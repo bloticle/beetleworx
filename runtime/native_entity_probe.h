@@ -18,7 +18,7 @@ struct NativeEntitySnapshot {
 };
 // Bounded tick-owner inspection; no native callbacks or retained guest pointers.
 // Does not pin guest objects against concurrent native destruction.
-bool ReadNativeEntitySnapshot(uint8_t*,NativeEntitySnapshot&,const char*& error,uint32_t& address);
+bool ReadNativeEntitySnapshot(uint8_t*,NativeEntitySnapshot&,const char*& error,uint32_t& address,bool include_positions=true);
 void TraceNativeEntitySnapshot(uint8_t*,uint64_t tick);
 bool TestNativeEntityProbe();
 }

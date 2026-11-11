@@ -96,6 +96,7 @@ bool Capture(PPCContext& ctx,uint8_t* base,em2::net::GameplayObservation& out,He
     std::array<uint32_t,2> entities{};const auto type=PPC_LOAD_U8(0x833DBC3C);
     for(unsigned i=0;i<2;++i){
         const auto entity=ResolveChecked(ctx,base,registry,manager+i*320+20);if(!entity)return false;entities[i]=entity;
+        for(unsigned word=0;word<4;++word)sampled.player_ids[i][word]=PPC_LOAD_U32(entity+4+word*4);
         const auto types=PPC_LOAD_U32(entity+88),components=PPC_LOAD_U32(entity+36);
         if(!Readable(base,types,unsigned(type)+1))return false;
         const auto slot=PPC_LOAD_U8(types+type);if(slot==255 || !Readable(base,components,unsigned(slot)*4+4))return false;

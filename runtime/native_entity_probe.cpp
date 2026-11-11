@@ -37,7 +37,7 @@ std::string Encode(const em2::NativeEntitySnapshot& snapshot){
     return bytes;
 }
 }
-bool em2::ReadNativeEntitySnapshot(uint8_t* base,NativeEntitySnapshot& out,const char*& error,uint32_t& address){
+bool em2::ReadNativeEntitySnapshot(uint8_t* base,NativeEntitySnapshot& out,const char*& error,uint32_t& address,bool include_positions){
     GuestReadBatch inspection;
     auto fail=[&](const char* reason,uint32_t where){error=reason;address=where;return false;};
     if(!Readable(base,0x833DA7E4,4) || !Readable(base,0x833DBC3C,1))return fail("globals",0x833DA7E4);
@@ -75,7 +75,7 @@ bool em2::ReadNativeEntitySnapshot(uint8_t* base,NativeEntitySnapshot& out,const
             if(!Readable(base,types,sample.component_count))return fail("component types",entity+88);
             for(unsigned type=0;type<sample.component_count;++type)if(PPC_LOAD_U8(types+type)!=255)record.component_mask[type/8]|=uint8_t(1u<<(type%8));
             const auto slot=PPC_LOAD_U8(types+position_type);
-            if(slot!=255){
+            if(include_positions && slot!=255){
                 if(!Readable(base,components,unsigned(slot)*4+4))return fail("position slot",components);
                 const auto entry=PPC_LOAD_U32(components+unsigned(slot)*4);
                 if(entry<8 || !Readable(base,entry-8,184))return fail("position component",entry);

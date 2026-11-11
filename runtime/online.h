@@ -119,6 +119,13 @@ struct RandomObservation {
     }
 };
 struct GameplayObservation {
+    struct CharacterPhysics {
+        std::array<uint32_t,4> id{};
+        bool active=false;
+        uint32_t state=0;
+        std::array<uint32_t,3> position{},velocity{};
+        bool operator==(const CharacterPhysics&)const=default;
+    };
     struct World {
         std::array<char,128> level{},state{},interior{};
         bool operator==(const World&) const = default;
@@ -130,6 +137,11 @@ struct GameplayObservation {
     // Only CRT calls on the simulation thread during this tick. This is a
     // diagnostic stream checksum, not coverage of all engine/worker RNGs.
     RandomObservation random;
+    // Native Room gameplay additionally proves all recognized character proxies,
+    // including NPCs. GUID order is canonical; guest pointers never participate.
+    bool includes_character_physics=false;
+    std::vector<CharacterPhysics> characters;
+    std::array<std::array<uint32_t,4>,2> player_ids{};
 };
 std::optional<std::array<uint8_t,32>> HashGameplayObservation(uint64_t,const GameplayObservation&);
 // Simulation-thread owner. Session and InputSystem must outlive attachment.

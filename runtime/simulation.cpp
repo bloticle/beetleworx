@@ -26,6 +26,7 @@
 #include "online_room_gameplay.h"
 #include "world_observation.h"
 #include "native_entity_probe.h"
+#include "native_character_physics.h"
 #include <rex/cvar.h>
 REXCVAR_DEFINE_BOOL(em2_trace_online_random_owners,false,"Debug","Capture bounded owner registers and parent stacks for online CRT diagnostics; requires observation tracing");
 REXCVAR_DEFINE_UINT32(em2_trace_online_random_start_tick,0,"Debug","First of two agreed ticks to capture bounded CRT events for online observation tracing");
@@ -628,9 +629,11 @@ struct RandomFailureHistory {
         bool valid=false,published=false;
         std::array<RandomTraceEvent,4096> events{};
         std::array<ScriptRandomOwner,32> scripts{};
+        bool character_coverage=false;
+        std::vector<em2::net::GameplayObservation::CharacterPhysics> characters;
     };
     std::array<Frame,4> frames{};size_t next=0;Frame* current=nullptr;
-    void Begin(uint64_t tick){auto& f=frames[next++%frames.size()];f.tick=tick;f.size=0;f.script_count=0;f.valid=true;f.published=false;current=&f;}
+    void Begin(uint64_t tick){auto& f=frames[next++%frames.size()];f.tick=tick;f.size=0;f.script_count=0;f.valid=true;f.published=false;f.character_coverage=false;f.characters.clear();current=&f;}
     void Record(RandomTraceEvent event){if(current && current->size<current->events.size())current->events[current->size++]=event;}
     template<class Emit>void Drain(Emit emit){
         std::array<Frame*,4> sorted{};for(size_t i=0;i<frames.size();++i)sorted[i]=&frames[i];
@@ -1283,22 +1286,30 @@ void CompleteNetworkObservation(PPCContext& ctx,uint8_t* base) {
     // observation and CRT counters for this same completed native update.
     const bool room_ready=room_report?room->CheckGameplayReadiness(ctx,base):false;
     ctx=saved;_mm_setcsr(mxcsr);
-    const bool valid=em2::ReadNativeGameplayObservation(ctx,base,state);
+    bool valid=em2::ReadNativeGameplayObservation(ctx,base,state);
+    if(valid && gameplay_report){
+        valid=em2::ReadNativeCharacterPhysics(base,state.characters) && state.characters.size()>=2;
+        state.includes_character_physics=valid;
+    }
     state.random=random_observation;
     const auto observed_tick=gameplay_report?gameplay->committed_tick():(room_report?room->committed_tick():(legacy_report?gate.committed_tick():tick_number));
     if(report && valid && state.players[0].mode==0 && state.players[1].mode==0)em2::TraceNativeEntitySnapshot(base,observed_tick);
     const auto digest=valid?em2::net::HashGameplayObservation(observed_tick,state):std::nullopt;
+    if(report && valid && random_failure_history && random_failure_history->current && random_failure_history->current->tick==observed_tick){
+        auto& frame=*random_failure_history->current;frame.character_coverage=state.includes_character_physics;
+        if(frame.character_coverage)frame.characters=state.characters;
+    }
     ctx=saved;_mm_setcsr(mxcsr);
     if((trace || (report && REXCVAR_GET(em2_trace_online_observations))) && digest) {
         std::string hex;for(auto byte:*digest)hex+=fmt::format("{:02x}",byte);
         const auto& a=observations[0];const auto& b=observations[1];
         if(report && REXCVAR_GET(em2_trace_online_random_owners))REXLOG_INFO("Native online scene clock: tick {}, seconds {:08X}, accumulated {:016X}, counter {}, previous {}",observed_tick,PPC_LOAD_U32(0x833FCA4C),PPC_LOAD_U64(0x833FCA38),PPC_LOAD_U64(0x833FCA60),PPC_LOAD_U64(0x833FCA68));
-        REXLOG_INFO("Native gameplay observation v4: level '{}' state '{}' interior '{}' epoch {}, tick {}, modes {}/{}, bits {:08X}/{:08X}/{:08X}/{:08X}/{:08X}/{:08X}, life {}/{}/{}/{}, ammo {:08X}/{:08X}/{:08X}/{:08X}/{:08X}/{:08X}, CRT calls/seeds {}/{}, last state {:08X}, stream {:016X}, digest {}, agreed {}",
-            state.world.level.data(),state.world.state.data(),state.world.interior.data(),tick_number,observed_tick,a.mode,b.mode,std::bit_cast<uint32_t>(a.position[0]),std::bit_cast<uint32_t>(a.position[1]),std::bit_cast<uint32_t>(a.position[2]),
+        REXLOG_INFO("Native gameplay observation v{}: level '{}' state '{}' interior '{}' epoch {}, tick {}, modes {}/{}, bits {:08X}/{:08X}/{:08X}/{:08X}/{:08X}/{:08X}, life {}/{}/{}/{}, ammo {:08X}/{:08X}/{:08X}/{:08X}/{:08X}/{:08X}, CRT calls/seeds {}/{}, last state {:08X}, stream {:016X}, digest {}, agreed {}, character proxies {}",
+            state.includes_character_physics?5:4,state.world.level.data(),state.world.state.data(),state.world.interior.data(),tick_number,observed_tick,a.mode,b.mode,std::bit_cast<uint32_t>(a.position[0]),std::bit_cast<uint32_t>(a.position[1]),std::bit_cast<uint32_t>(a.position[2]),
             std::bit_cast<uint32_t>(b.position[0]),std::bit_cast<uint32_t>(b.position[1]),std::bit_cast<uint32_t>(b.position[2]),
             state.life[0],state.life[1],state.life[2],state.life[3],std::bit_cast<uint32_t>(state.ammo[0]),std::bit_cast<uint32_t>(state.ammo[1]),
             std::bit_cast<uint32_t>(state.ammo[2]),std::bit_cast<uint32_t>(state.ammo[3]),std::bit_cast<uint32_t>(state.ammo[4]),std::bit_cast<uint32_t>(state.ammo[5]),
-            state.random.calls,state.random.seeds,state.random.last_state,state.random.sequence,hex,report);
+            state.random.calls,state.random.seeds,state.random.last_state,state.random.sequence,hex,report,state.characters.size());
     }
     if(report && capture_online_random){
         for(size_t i=0;i<online_random_trace_size;++i){const auto& event=online_random_trace[i];
@@ -1726,6 +1737,11 @@ void em2::DumpOnlineRandomTraceHistory(){
     struct HostState{DWORD error=GetLastError();unsigned csr=_mm_getcsr();~HostState(){SetLastError(error);_mm_setcsr(csr);}}host_state;
     LogScriptWaitTrace();
     random_failure_history->Drain([](const auto& f){
+        if(f.character_coverage){
+            REXLOG_INFO("Native character proof history: tick {}, count {}",f.tick,f.characters.size());
+            for(const auto& c:f.characters)REXLOG_INFO("Native character proof: tick {}, GUID {:08X} {:08X} {:08X} {:08X}, active {}, state {}, position {:08X} {:08X} {:08X}, velocity {:08X} {:08X} {:08X}",
+                f.tick,c.id[0],c.id[1],c.id[2],c.id[3],c.active,c.state,c.position[0],c.position[1],c.position[2],c.velocity[0],c.velocity[1],c.velocity[2]);
+        }
         REXLOG_INFO("Native online CRT failure history: tick {}, retained {} events (maximum {})",f.tick,f.size,f.events.size());
         for(size_t i=0;i<f.size;++i){const auto& e=f.events[i];
             REXLOG_INFO("Native online CRT event: tick {}, index {}, seed {}, caller {:08X}, state {:08X}, result {:08X}",f.tick,i,e.reseed,e.caller,e.state,e.result);

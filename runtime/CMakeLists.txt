@@ -498,3 +498,4 @@ target_sources(EM2Recomp PRIVATE online_room_gameplay.cpp online_retail_input.cp
 target_sources(EM2Recomp PRIVATE online_behavior_trace.cpp)
 
 target_sources(EM2Recomp PRIVATE native_launch_defaults.cpp)
+target_sources(EM2Recomp PRIVATE native_character_physics.cpp)
