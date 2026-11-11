@@ -130,6 +130,22 @@ void ModernDefaults(unsigned profile) {
     else if(profile&1)profiles[profile]={256,261,258,267,260,270,262,263,0,265,266,0,268,269,0,271,272,273,274,275,276,277,278,279,280,264,257,259};
 }
 bool ui_context=false;
+// The modern preset shares B between a dash tap and the retail held call.
+// Decide on release/hold, so calling a companion never starts a dash first.
+struct CompanionButton {
+    bool down=false,held=false,tapped=false;
+    Clock::time_point pressed{};
+    uint64_t tap_tick=0;
+    std::pair<bool,bool> Sample(bool value,Clock::time_point now,uint64_t tick) {
+        constexpr auto threshold=std::chrono::milliseconds(250);
+        if(value && !down){pressed=now;held=false;}
+        if(down && now-pressed>=threshold)held=true;
+        if(!value && down && !held){tapped=true;tap_tick=tick;}
+        down=value;
+        return {tapped && tap_tick==tick,value && held};
+    }
+};
+std::array<CompanionButton,2> companion_buttons{};
 bool ValidLook(unsigned index,int value) {
     return index<look_sizes.size() && value>=0 && value<look_sizes[index];
 }
@@ -393,6 +409,7 @@ em2::LiveLookInput MapLiveLook(unsigned user,const X_INPUT_GAMEPAD& raw) {
 }
 X_INPUT_GAMEPAD Remap(unsigned user,const X_INPUT_GAMEPAD& raw,std::optional<uint64_t> sample_tick={},bool dispatch_actions=true) {
     if(ui_context || menu_open){
+        companion_buttons[user]={};
         mod_buttons[user].store(0,std::memory_order_relaxed);auto out=raw;
         if(user==0){auto down=[&](unsigned key){return keys[key] && !blocked_keys[key];};
             uint16_t buttons=uint16_t(out.buttons);
@@ -426,6 +443,11 @@ X_INPUT_GAMEPAD Remap(unsigned user,const X_INPUT_GAMEPAD& raw,std::optional<uin
         const auto source=profiles[user*2+1][i]-256;
         pad_values[i]=PadSource(source==24?raw:action_pad,source);
     }
+    if(profiles[user*2+1][1]==261 && profiles[user*2+1][26]==257){
+        const auto [dash,call]=companion_buttons[user].Sample((uint16_t(raw.buttons)&0x2000)!=0,Clock::now(),epoch);
+        pad_values[26]=dash?1.f:0.f;
+        if(call)pad_values[1]=1;
+    }else companion_buttons[user]={};
     ShapeLook(values,look_profiles[user*2]);
     ShapeLook(pad_values,look_profiles[user*2+1]);
     for(int i=0;i<em2::kBindingCount;++i) values[i]=std::max(values[i],pad_values[i]);
@@ -524,6 +546,7 @@ public:
 
 namespace em2 {
 void SetControlUIContext(bool active){std::lock_guard lock(controls_mutex);if(ui_context==active)return;ui_context=active;++view_poll_epoch;
+    companion_buttons={};
     for(auto& buttons:mod_buttons)buttons.store(0,std::memory_order_relaxed);
     for(auto& pending:pending_keys)pending.fill(false);for(auto& valid:latched_valid)valid.fill(false);
     if(!active){wait_for_pad_release.fill(true);for(unsigned key=0;key<keys.size();++key)if(keys[key])blocked_keys[key]=true;}
@@ -698,7 +721,7 @@ void LoadControls(const std::filesystem::path& directory) {
     if(profiles[0]==keyboard_defaults || (std::equal(profiles[0].begin(),profiles[0].begin()+25,keyboard_defaults.begin()) && std::none_of(explicit_mod_bindings[0].begin(),explicit_mod_bindings[0].end(),[](bool explicit_binding){return explicit_binding;}))){ModernDefaults(0);migrated=true;}
     for(unsigned p:{1u,3u}){bool original=true;for(int i=0;i<kBindingCount;++i)original&=profiles[p][i]==(i<kPadSourceCount?256+i:0);if(original){ModernDefaults(p);migrated=true;}}
     if(migrated)Save();
-    capture=-1; keys.fill(false); blocked_keys.fill(false);swap_control_down=false;chord_shoulders_blocked.fill(false);
+    capture=-1; keys.fill(false); blocked_keys.fill(false);swap_control_down=false;chord_shoulders_blocked.fill(false);companion_buttons={};
     for(auto& buttons:mod_buttons)buttons.store(0,std::memory_order_relaxed);
     for(auto& pending:pending_keys) pending.fill(false);
     for(auto& epoch:latched_epoch) epoch.fill(UINT64_MAX);
@@ -765,6 +788,7 @@ void ClearControlKeys() {
     std::lock_guard lock(controls_mutex);
     ++view_poll_epoch;
     keys.fill(false); blocked_keys.fill(false); capture=-1;swap_control_down=false;
+    companion_buttons={};
     for(auto& buttons:mod_buttons)buttons.store(0,std::memory_order_relaxed);
     for(auto& pending:pending_keys) pending.fill(false);
     for(auto& epoch:latched_epoch) epoch.fill(UINT64_MAX);
@@ -773,6 +797,7 @@ void ClearControlKeys() {
 }
 void SetExternalControlCapture(bool captured){
     std::lock_guard lock(controls_mutex);if(external_capture==captured)return;
+    companion_buttons={};
     external_capture=captured;++view_poll_epoch;
     for(auto& buttons:mod_buttons)buttons.store(0,std::memory_order_relaxed);
     if(!captured)for(unsigned code=0;code<keys.size();++code)if(keys[code])blocked_keys[code]=true;
@@ -1059,7 +1084,22 @@ bool TestControls(const std::filesystem::path& directory) {
     {
         int selected=0;ControlOption(2210,0,selected);ControlOption(2210,1,selected);
         check(profiles[0][7]==VK_LBUTTON && profiles[0][6]==VK_RBUTTON && profiles[0][25]==VK_SHIFT && profiles[0][26]==VK_CONTROL && profiles[0][27]=='R',"modern keyboard preset keeps paint/thinner and movement actions deliberate");
-        {std::lock_guard lock(controls_mutex);X_INPUT_GAMEPAD pad{};pad.buttons=0x2000;const auto mapped=Remap(0,pad);check(!(uint16_t(mapped.buttons)&0x2000) && (mod_buttons[0].load()&2),"modern controller B dashes without sending the original co-op action");}
+        {
+            std::lock_guard lock(controls_mutex);companion_buttons={};X_INPUT_GAMEPAD pad{};pad.buttons=0x2000;
+            auto mapped=Remap(0,pad,51);
+            check(!(uint16_t(mapped.buttons)&0x2000) && !(mod_buttons[0].load()&2),"B press waits to distinguish a dash tap from a companion call");
+            companion_buttons[0].pressed=Clock::now()-std::chrono::milliseconds(500);
+            mapped=Remap(0,pad,52);
+            check((uint16_t(mapped.buttons)&0x2000) && !(mod_buttons[0].load()&2),"holding B sends the original companion call without dashing");
+            pad.buttons=0;mapped=Remap(0,pad,53);
+            check(!(uint16_t(mapped.buttons)&0x2000) && !(mod_buttons[0].load()&2),"releasing a companion call does not dash");
+            pad.buttons=0x2000;Remap(0,pad,54);pad.buttons=0;Remap(0,pad,55);
+            check(mod_buttons[0].load()&2,"tapping B dashes on release");
+            Remap(0,pad,55);check(mod_buttons[0].load()&2,"repeated polls preserve the dash tap within its simulation tick");
+            Remap(0,pad,56);check(!(mod_buttons[0].load()&2),"dash tap expires on the next simulation tick");
+            pad.buttons=0x2000;Remap(1,pad,57);
+            check(!companion_buttons[0].down && companion_buttons[1].down,"companion tap/hold state belongs to each controller");
+        }
         SetControlUIContext(true);
         {std::lock_guard lock(controls_mutex);X_INPUT_GAMEPAD pad{};pad.buttons=0x3000;check(uint16_t(Remap(0,pad).buttons)==0x3000 && !mod_buttons[0].load(),"native menu A/B remain physical and never activate gameplay modifications");}
         SetControlUIContext(false);ClearControlKeys();

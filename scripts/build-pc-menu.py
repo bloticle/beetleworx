@@ -14,6 +14,26 @@ pak = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pak)
 
 
+def insert_ability_resources(resources, clips):
+    """Register animation dependencies before HKW initializes their bindings."""
+    if not clips:
+        return resources
+    anchor = 'characters/mickey/mickey_default.hkw'
+    consumers = [i for i, (name, _, _) in enumerate(resources)
+                 if name.replace('\\', '/').lower() == anchor]
+    if len(consumers) != 1:
+        raise ValueError('Expected one Mickey animation initialization resource')
+    names = {name.replace('\\', '/').lower() for name, _, _ in resources}
+    added = [name.replace('\\', '/').lower() for name, _, _ in clips]
+    if len(set(added)) != len(added) or any(name in names for name in added):
+        raise ValueError('Ability resources must have distinct, new names')
+    at = consumers[0]
+    # The native PAK loader publishes entries sequentially. HKW initializes
+    # animation bindings immediately, so a clip appended after it is missing
+    # at that point and is permanently replaced with the reference pose.
+    return resources[:at] + clips + resources[at:]
+
+
 def run(*args):
     command = [str(arg) for arg in args]
     result = subprocess.run(command, cwd=ROOT, stdout=subprocess.PIPE,
@@ -192,7 +212,7 @@ def main():
         raise RuntimeError('Both original graphs and all three Mickey clip dependency resources are required')
     if any(name.lower() in originals for name, blob, kind in clips):
         raise RuntimeError('Imported ability clips would replace an original animation')
-    modified_dynamic.extend(clips)
+    modified_dynamic = insert_ability_resources(modified_dynamic, clips)
     pak.write_pak(modified_dynamic,ROOT / 'private/pc-assets/packfiles/_Dynamic.pak')
     (ROOT / 'analysis/native-ability-graph-report.json').write_text(json.dumps(graph_reports,indent=2))
     (ROOT / 'analysis/emr-ability-conversion-report.json').write_text(json.dumps(conversion_report,indent=2))

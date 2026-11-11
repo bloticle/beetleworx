@@ -117,6 +117,7 @@ class em2.options.TVSettings extends MovieClip
       }
       this._label(this._rows[7],"Page " + (this._page+1) + " / " + pages + "  -  Next",{page:true});
       this.pc_help.text = this._category == 5 ? "Select to bind. Left / Delete clears. Esc or hold Start cancels capture. Presets keep menu navigation standard." : "A / Enter: change. Left / Right: adjust. Page row: previous / next. Back: categories.";
+      if(this._category == 5 && (this._profile & 1) != 0) this.pc_help.text = "Select: bind. Left/Delete: clear. Esc/hold Start: cancel. Pad preset: tap B to dash; hold B to call/interact. RB interacts immediately.";
       if(this._category == 6) this.pc_help.text = "Select Epic Mickey to locate your RVZ. Its location is remembered. EM1 level compatibility is experimental.";
       if(this._category == 3) this.pc_help.text = "Mouse options apply live to Player 1, including when playing as Oswald. Center options reset the aiming cursor. Mouse sensitivity multiplies your keyboard/mouse camera profile.";
       if(this._category == 7) this.pc_help.text = "Review and save a report before opening an issue. Verified updates install after normal exit. Downloads require a published Beetleworx release.";

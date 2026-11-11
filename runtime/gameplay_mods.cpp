@@ -280,6 +280,8 @@ void em2::UpdateGameplayModTargets(PPCContext& ctx,uint8_t* base){
         if(!path.empty() && !graph_probed && NativeAnimationGraphHasEvent(engine_actors[0].animation,405,base) &&
            NativeAnimationGraphHasEvent(engine_actors[0].animation,406,base)){
             graph_probed=true;REXLOG_INFO("EMR native movement graph registered on Mickey");
+            std::string error;const bool okay=ProbeEMRAbilityClips(ctx,base,std::filesystem::path(path),error,engine_actors[0].animation);
+            REXLOG_INFO("EMR live bound clip validation {}: {}",okay?"passed":"failed",error);
         }
     }
 }
@@ -487,8 +489,8 @@ bool em2::TestGameplayMods(const std::filesystem::path& directory){
         PPC_STORE_U32(motion+108,0x7000);put(0x7000+72,5);
         PPC_STORE_U32(motion+548,table);PPC_STORE_U32(motion+552,0);PPC_STORE_U32(motion+556,4);
         PPC_STORE_U8(motion+640,1);PPC_STORE_U32(motion+208,1);put(motion+728,1);put(motion+736,0);
-        auto tick=[&](unsigned key,uint16_t buttons,unsigned native_state){
-            simulation_steps.fetch_add(1);ClearControlKeys();if(key)ControlKey(key,true);
+        auto tick=[&](unsigned key,uint16_t buttons,unsigned native_state,bool reset_input=true){
+            simulation_steps.fetch_add(1);if(reset_input)ClearControlKeys();if(key)ControlKey(key,true);
             rex::input::X_INPUT_STATE physical{};physical.gamepad.buttons=buttons;RemapLocalControlState(0,physical);
             PPC_STORE_U32(motion+384,native_state);UpdateGameplayModTargets(ctx,base);
             PrepareMotion(ctx,base,motion,1./30);
@@ -520,7 +522,9 @@ bool em2::TestGameplayMods(const std::filesystem::path& directory){
         tick(0,0x40,0);
         if(!check(!actors[0].model.sprinting && !PPC_LOAD_U32(motion+552),"a second controller click removes the sprint override"))return false;
         tick(0,0,0);tick(0,0x2000,0);
-        if(!check(actors[0].model.dashing && get(motion+240)==12,"controller B drives native dash without keyboard input"))return false;
+        if(!check(!actors[0].model.dashing,"B press does not dash before a companion hold can be distinguished"))return false;
+        tick(0,0,0,false);
+        if(!check(actors[0].model.dashing && get(motion+240)==12,"controller B tap drives native dash on release without keyboard input"))return false;
         tick(0,0x8000,2);
         if(!check(actors[0].model.pounding && get(motion+244)==-20,"controller Y drives the airborne pound velocity hook"))return false;
         PPC_STORE_U8(input+145,0);tick(VK_CONTROL,0,0);

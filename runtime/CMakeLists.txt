@@ -416,6 +416,8 @@ if(EXISTS "${EM2_GENERATED}/../tests/instructions.cpp")
         "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/audit-ground-pound-stimuli.py")
     add_test(NAME demo-support-transactions COMMAND EM2Recomp --em2_test_demo_support=true
         "--log_file=${CMAKE_CURRENT_BINARY_DIR}/demo-support-tests.log")
+    add_test(NAME ability-resource-order COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/test-ability-resource-order.py")
 endif()
 target_sources(EM2Recomp PRIVATE renderer_storage.cpp)
 
