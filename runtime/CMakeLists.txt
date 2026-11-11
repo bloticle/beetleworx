@@ -496,3 +496,5 @@ target_sources(EM2Recomp PRIVATE online_room_init_trace.cpp)
 target_sources(EM2Recomp PRIVATE online_room_gameplay.cpp online_retail_input.cpp online_retail_jump.cpp)
 
 target_sources(EM2Recomp PRIVATE online_behavior_trace.cpp)
+
+target_sources(EM2Recomp PRIVATE native_launch_defaults.cpp)
