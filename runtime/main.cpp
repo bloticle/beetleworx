@@ -149,6 +149,7 @@ REXCVAR_DECLARE(std::string,em2_online_qa_role);
 REXCVAR_DEFINE_BOOL(em2_online_menu,false,"Online","Show experimental direct-connect co-op Host/Join before starting the game");
 REXCVAR_DEFINE_BOOL(em2_test_pc_settings,false,"Debug","Run PC menu settings tests without opening the game");
 REXCVAR_DEFINE_BOOL(em2_test_demo_support,false,"Debug","Run isolated report and update transaction regressions without starting the game");
+REXCVAR_DEFINE_STRING(em2_test_live_update_path,"","Debug","Explicit headless diagnostic: verify a live published demo update inside this new isolated directory");
 REXCVAR_DEFINE_BOOL(em2_test_update_swap,false,"Debug","Verify and restore the running canonical executable rename primitive without starting the game");
 REXCVAR_DEFINE_BOOL(em2_test_mickey_ears,false,"Debug","Run per-instance ear draw-binding tests without opening the game");
 REXCVAR_DEFINE_BOOL(em2_test_content_setup,false,"Debug","Run isolated content setup, library and binary patch regressions without opening the game");
@@ -334,6 +335,11 @@ public:
                 log_config.category_levels[std::to_underlying(rex::LogCategory::GPU)] = spdlog::level::warn;
         }
         rex::InitLogging(log_config);
+        if(!REXCVAR_GET(em2_test_live_update_path).empty()){
+            std::string error;const bool success=em2::TestLiveDemoUpdate(REXCVAR_GET(em2_test_live_update_path),error);
+            REXLOG_INFO("Live published update diagnostic {}: {}",success?"passed":"failed",error);
+            spdlog::shutdown();ExitProcess(success?0:1);
+        }
         if(REXCVAR_GET(em2_test_demo_support) || REXCVAR_GET(em2_test_update_swap)) {
             std::string error;
             const bool swap=REXCVAR_GET(em2_test_update_swap);

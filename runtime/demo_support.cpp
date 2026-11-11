@@ -303,6 +303,30 @@ bool ShowDemoSupportPreview(void*owner,std::string&out){try{
  MSG msg{};while(IsWindow(h)){const auto got=GetMessageW(&msg,nullptr,0,0);if(got<=0){DestroyWindow(h);if(got==0)PostQuitMessage(int(msg.wParam));break;}if(!IsDialogMessageW(h,&msg)){TranslateMessage(&msg);DispatchMessageW(&msg);}}
  if(state.owner){EnableWindow(state.owner,TRUE);SetForegroundWindow(state.owner);}out="Report preview closed.";return true;
  }catch(const std::exception&e){out=e.what();return false;}}
+bool TestLiveDemoUpdate(const fs::path& root,std::string& error){
+ try{
+  Need(root.is_absolute() && !fs::exists(root) && fs::is_directory(root.parent_path()),"Live update test needs a new absolute directory with an existing parent");
+  PlainAbsolute(root);fs::create_directory(root);
+  constexpr const char* previous_version="0.1.0-demo.1";
+  auto listing=Http(api,8*1024*1024);
+  auto next=SelectRelease(listing,Semver(previous_version));Need(next.has_value(),"No newer published demo is available for the live update test");
+  auto old_details=Http("https://api.github.com/repos/Bloticle/beetleworx/releases/tags/v0.1.0-demo.1",8*1024*1024);
+  const auto old_array="["+String(old_details.bytes)+"]";
+  auto previous=SelectRelease({old_details.status,Bytes(old_array.begin(),old_array.end())},Semver("0.0.0"));
+  Need(previous && previous->version==previous_version,"Previous published demo is unavailable");
+  auto installation=root/"installation";
+  auto old_download=Http(previous->url,max_bundle);Need(old_download.status==200,"Previous demo download failed");
+  auto old=Stage(old_download.bytes,*previous,installation);old_download.bytes.clear();old_download.bytes.shrink_to_fit();
+  for(const auto& name:{"user_data/update-test-sentinel","game-data/update-test-sentinel","mods/update-test-sentinel"})WriteText(installation/name,"preserve existing user files");
+  auto downloaded=Http(next->url,max_bundle);Need(downloaded.status==200,"Published update download failed");
+  auto stage=installation/".beetleworx-update"/("stage-"+next->sha.substr(0,16));
+  auto updated=Stage(downloaded.bytes,*next,stage);downloaded.bytes.clear();downloaded.bytes.shrink_to_fit();
+  Install(installation,stage,old,updated);VerifyTree(installation,updated);
+  for(const auto& name:{"user_data/update-test-sentinel","game-data/update-test-sentinel","mods/update-test-sentinel"})Need(String(Read(installation/name,1024))=="preserve existing user files","Update changed a user-file sentinel");
+  std::ostringstream report;report<<"{\"from\":\""<<previous->version<<"\",\"to\":\""<<next->version<<"\",\"zip_sha256\":\""<<next->sha<<"\",\"installed_exe_sha256\":\""<<HashFile(installation/"beetleworx.exe")<<"\",\"files\":"<<updated.files.size()<<",\"user_files_preserved\":true,\"scope\":\"Live GitHub discovery and WinHTTP downloads, release and file hash verification, normal transactional installer into an isolated copy. No downloaded executable launched and no normal installation changed.\"}\n";
+  WriteText(root/"live-update-results.json",report.str());error.clear();return true;
+ }catch(const std::exception& exception){error=exception.what();return false;}
+}
 bool TestDemoSupport(std::string&error){
  try{
   auto rejects=[](auto fn){try{fn();return false;}catch(...){return true;}};

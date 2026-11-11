@@ -29,6 +29,9 @@ bool ShowDemoSupportPreview(void* owner,std::string& output);
 // restart=true starts only the newly installed canonical beetleworx.exe.
 bool ShutdownDemoSupport(bool restart,std::string& output);
 bool TestDemoSupport(std::string& error);
+// Explicit developer diagnostic: download the published demo and its update,
+// then use the normal installer only inside a new, isolated directory.
+bool TestLiveDemoUpdate(const std::filesystem::path& isolated_directory,std::string& error);
 // Explicit headless developer diagnostic ONLY. Copies the running canonical
 // image to a non-executable-named data file, proves the Windows mapped-image
 // rename primitive, then restores the original file identity/hash immediately.

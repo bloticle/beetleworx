@@ -30,3 +30,12 @@ Run the tool and runtime regression tests with the same game and SDK directories
 ```
 
 The compatibility tests generate private fixtures from your decoded executable, accept a different encoding of the same image, and reject changed image bytes, imports, entry points and truncated headers. They run in `beetleworx.exe` without guest execution. These synthetic fixtures verify the compatibility checks; they do not establish compatibility with another retail build.
+
+To check the live updater explicitly, use a new directory under `analysis`:
+
+```powershell
+$check = Join-Path (Resolve-Path analysis) ('live-update-' + [Guid]::NewGuid().ToString('N'))
+./build/runtime23/beetleworx.exe "--em2_test_live_update_path=$check" "--log_file=$check.log"
+```
+
+This downloads the published first demo and its newest update through the native WinHTTP transport, verifies their hashes, and applies the normal transactional installer to an isolated copy. It checks that user-file markers survive. It does not launch either downloaded executable or update the normal installation. This network check is opt-in and is not part of the offline regression suite.
