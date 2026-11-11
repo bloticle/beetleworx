@@ -106,7 +106,7 @@ struct Controller {
     size_t selected_campaign=0;
     std::stop_source campaign_cancel;
     std::future<HostCampaignCatalog> campaign_scan;
-    bool host=false,start=false,start_requested=false,handoff_available=false,try_router=false;
+    bool host=false,start=false,start_requested=false,handoff_available=false,try_router=false,lan_discovery=false;
     std::string error,feedback,advertised,reported_error;
     ~Controller(){campaign_cancel.request_stop();}
     bool Busy()const{
@@ -126,7 +126,7 @@ struct Controller {
         }
         browser.Poll();if(selected>=browser.games().size())selected=0;
         if(!browser.scanning() && feedback=="Searching your LAN for a host...")
-            feedback=browser.games().empty()?"No LAN hosts found. Ask your friend to select Host, then find games again.":"Select Join LAN game. Left / Right selects a different host.";
+            feedback=browser.games().empty()?"No LAN hosts found. Ask your friend to host with LAN discovery enabled or send you an invitation.":"Select Join LAN game. Left / Right selects a different host.";
         if(!boot)return;
         boot->Poll();const auto status=boot->status();
         if(status.state==BootState::Failed || status.state==BootState::Cancelled)
@@ -154,8 +154,10 @@ struct Controller {
                         router->Start(invite->address,invite->port);
                     }
                 }
-                if(advertised!=status.invitation){advertised=status.invitation;if(auto invite=DecodeInvite(advertised))advertiser.Start(*invite);}
-                advertiser.Poll();
+                if(lan_discovery){
+                    if(advertised!=status.invitation){advertised=status.invitation;if(auto invite=DecodeInvite(advertised))advertiser.Start(*invite);}
+                    advertiser.Poll();
+                }else advertiser.Stop();
             }
         }else advertiser.Stop();
         if(router)router->Poll();
@@ -175,6 +177,7 @@ struct Controller {
     }
     int State()const{
         if(!error.empty())return 9;
+        if(NativeOnlineStatus().state==NativeSessionState::Failed)return 9;
         if(start)return 7;
         if(!boot)return 0;
         switch(boot->status().state){
@@ -187,6 +190,8 @@ struct Controller {
     }
     std::string Message()const{
         if(!error.empty())return error;
+        const auto native=NativeOnlineStatus();
+        if(native.state==NativeSessionState::Failed)return OnlineFailureAdvice(native.error,true);
         switch(State()){
         case 1:
             if(!host)return "Checking your game files before connecting...";
@@ -197,10 +202,13 @@ struct Controller {
             if(router){
                 const auto& mapping=router->status();
                 if(mapping.state==RouterState::Active)return "Internet invitation ready. Copy it and send it to your friend.";
-                if(mapping.state==RouterState::Failed)return mapping.error+" LAN hosting is still available.";
-                return "Requesting a temporary Internet port. Friends on your LAN can join now.";
+                if(mapping.state==RouterState::Failed)return mapping.error+" Friends on your LAN can still join by invitation.";
+                return "Requesting a temporary Internet port. LAN invitations are available now.";
             }
-            return "Waiting for player two. Friends on your LAN can find this game.";
+            if(lan_discovery && !advertiser.error().empty())
+                return "LAN discovery is unavailable. Copy the invitation and share it with your friend.";
+            return lan_discovery?"Waiting for player two. Friends on your LAN can find this game.":
+                "Waiting for player two. Copy the invitation and share it with your friend.";
         case 3:return "Connecting and checking that your game builds and files match...";
         case 4:return "Transferring the host save into a separate online session...";
         case 5:return "Installing the shared session save. Your normal save is kept separate.";
@@ -236,6 +244,9 @@ struct Controller {
         router.reset();
         error.clear();feedback.clear();start=false;start_requested=false;
         const auto level=em2::CurrentNativeLoadLevel();auto* runtime=rex::Runtime::instance();
+        if(NativeOnlineStatus().state==NativeSessionState::Failed){
+            error="Restart Beetleworx to begin a new online session from the shared save.";return;
+        }
         if(!runtime || !FrontendLevel(level.data()) || SynchronizedSessionActive()){
             error="Return to the title menu before starting an online session.";return;
         }
@@ -247,6 +258,7 @@ struct Controller {
             std::array<wchar_t,32768> executable{};const auto length=GetModuleFileNameW(nullptr,executable.data(),DWORD(executable.size()));
             if(!length || length>=executable.size())throw std::runtime_error("Executable path unavailable");
             BootPaths paths{std::filesystem::path(executable.data()),runtime->game_data_root(),target,StartupPolicy::NativeMenu};
+            paths.content_identity_cache=user/"online-content-identity.bin";
             boot=std::make_unique<OnlineBoot>();host=hosting;
             if(hosting){
                 const auto source=ResolveCampaignSaveSource(retained?*retained/"42560816":user/"42560816");
@@ -262,7 +274,7 @@ struct Controller {
 Controller& Menu(){static Controller controller;return controller;}
 }
 bool NativeOnlineMenuOption(int id,int choice,int& result){
-    if(id<2700 || id>2715)return false;
+    if(id<2700 || id>2716)return false;
     struct Restore{unsigned csr=_mm_getcsr();DWORD error=GetLastError();~Restore(){_mm_setcsr(csr);SetLastError(error);}}restore;
     if(PublicDemoBuild()) {
         // Stale authored pages and diagnostic auto-open flags cannot create a
@@ -303,6 +315,12 @@ bool NativeOnlineMenuOption(int id,int choice,int& result){
                     :"Automatic Internet port mapping is off. LAN hosting is available.";
             }
             break;
+        case 16:
+            if(!menu.Busy() && !NativeOnlineMenuQaActive()){
+                menu.lan_discovery=!menu.lan_discovery;
+                menu.error.clear();
+            }
+            break;
         default:break;
         }
         result=menu.State();return true;
@@ -325,6 +343,7 @@ bool NativeOnlineMenuOption(int id,int choice,int& result){
     else if(id==2713)result=ByteAt(menu.CampaignMessage(),choice);
     else if(id==2714)result=menu.campaign_scan.valid();
     else if(id==2715)result=choice==0?int(menu.try_router):int(menu.MappedInvite().has_value());
+    else if(id==2716)result=menu.lan_discovery;
     return true;
 }
 std::optional<BootResult> TakeNativeOnlineMenuReady(){
@@ -340,6 +359,16 @@ std::optional<BootResult> TakeNativeOnlineMenuReady(){
         menu.router.reset();
     }
     return result;
+}
+void CompleteNativeOnlineMenuHandoff(){
+    auto& menu=Menu();std::lock_guard lock(menu.mutex);
+    if(!menu.boot || menu.boot->status().state!=BootState::Taken)return;
+    menu.boot.reset();
+    menu.start=false;
+    menu.start_requested=false;
+    menu.advertised.clear();
+    menu.feedback.clear();
+    REXLOG_INFO("Native online menu released completed preparation; live session retained");
 }
 void SetNativeOnlineMenuHandoffAvailable(bool available){if(PublicDemoBuild())return;auto& menu=Menu();std::lock_guard lock(menu.mutex);menu.handoff_available=available;}
 void FailNativeOnlineMenuHandoff(std::string reason){
@@ -360,13 +389,17 @@ bool TestNativeOnlineMenu(){
         const bool previous=REXCVAR_GET(em2_demo_build);
         struct RestoreDemo {bool value;~RestoreDemo(){REXCVAR_SET(em2_demo_build,value);}} restore{previous};
         REXCVAR_SET(em2_demo_build,true);
-        for(int id=2700;id<=2715;++id)for(int choice=-1;choice<=15;++choice) {
+        for(int id=2700;id<=2716;++id)for(int choice=-1;choice<=16;++choice) {
             int result=-99;
             ok=NativeOnlineMenuOption(id,choice,result) &&
                 result==((id==2710 || id==2713)?ByteAt("Online multiplayer is unavailable in this demo.",choice):0) && ok;
         }
         int result=99;ok=!NativeOnlineMenuOption(2699,0,result) && !TakeNativeOnlineMenuReady() && !NativeOnlineMenuQaActive() && ok;
         ok=!ShowOnlineFrontend({},{},{}) && ok;
+        REXCVAR_SET(em2_demo_build,false);
+        ok=NativeOnlineMenuOption(2716,-1,result) && result==0 && ok;
+        ok=NativeOnlineMenuOption(2700,16,result) && NativeOnlineMenuOption(2716,-1,result) && result==1 && ok;
+        ok=NativeOnlineMenuOption(2700,16,result) && NativeOnlineMenuOption(2716,-1,result) && result==0 && ok;
     }
     if(!ok)REXLOG_ERROR("Native online menu boundary/text bounds test failed");return ok;
 }

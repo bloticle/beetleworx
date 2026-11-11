@@ -69,7 +69,7 @@
          var scanning = _level0.SetOption(2714,-1) == 1;
          this._em2OnlineButton(0,"Host offline campaign",true);
          this._em2OnlineButton(1,archives > 0 ? "Resume online campaign " + (archive+1) + "/" + archives : "No online campaigns yet",!scanning && archives > 0);
-         this._em2OnlineButton(2,"Previous campaign",!scanning && archives > 1);
+         this._em2OnlineButton(2,_level0.SetOption(2716,-1) == 1 ? "Visibility: Discoverable on LAN" : "Visibility: Invite only",true);
          this._em2OnlineButton(3,"Next campaign",!scanning && archives > 1);
          this._em2OnlineButton(4,scanning ? "Checking campaigns..." : "Refresh campaigns",!scanning);
          this._em2OnlineButton(5,"Back",true);
@@ -107,7 +107,7 @@
       {
          if(item == this.b_main) { this._em2OnlineHostPage = false; _level0.SetOption(2700,1); }
          else if(item == this.b_1) _level0.SetOption(2700,12);
-         else if(item == this.b_2) _level0.SetOption(2700,13);
+         else if(item == this.b_2) _level0.SetOption(2700,16);
          else if(item == this.b_3) _level0.SetOption(2700,14);
          else if(item == this.b_4) _level0.SetOption(2700,11);
          else if(item == this.b_5) this._em2OnlineHostPage = false;

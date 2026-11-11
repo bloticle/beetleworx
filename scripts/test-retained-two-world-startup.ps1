@@ -136,7 +136,7 @@ try {
    $readyCount=0
    foreach($item in $owned){
     if($item.process.HasExited){throw "Native-menu $($item.peer.role) exited during startup with code $($item.process.ExitCode)."}
-    [string]$startupLog=if(Test-Path -LiteralPath $item.peer.log){Get-Content -LiteralPath $item.peer.log -Raw}else{''}
+    $startupLog=if(Test-Path -LiteralPath $item.peer.log){(Get-Content -LiteralPath $item.peer.log -Raw) ?? ''}else{''}
     foreach($failure in @('Native online lobby handoff failed:','Native online menu preparation failed:','Native lobby QA rejected:','Retained online session stopped:','Online simulation stopped:')){
      if($startupLog.Contains($failure)){throw "Native-menu $($item.peer.role) reported $failure See its startup.log."}
     }
@@ -160,7 +160,7 @@ try {
  }
  foreach($item in $owned){
   $item.peer.alive_after_observation=!$item.process.HasExited
-  [string]$observed=if(Test-Path -LiteralPath $item.peer.log){Get-Content -LiteralPath $item.peer.log -Raw}else{''}
+  $observed=if(Test-Path -LiteralPath $item.peer.log){(Get-Content -LiteralPath $item.peer.log -Raw) ?? ''}else{''}
   $item.peer.session_failed_before_close=$observed.Contains('Retained online session stopped:') -or $observed.Contains('Online simulation stopped:')
  }
 } catch {$record.error=$_.Exception.Message;$record.error_location=$_.ScriptStackTrace}
@@ -186,7 +186,7 @@ finally {
  }
  foreach($item in $owned){$p=$item.process;$item.peer.process_exited=$p.WaitForExit(30000);if($p.HasExited){$item.peer.exit_code=$p.ExitCode}}
  foreach($peer in $peers){
-  [string]$log=if(Test-Path -LiteralPath $peer.log){Get-Content -LiteralPath $peer.log -Raw}else{''}
+  $log=if(Test-Path -LiteralPath $peer.log){(Get-Content -LiteralPath $peer.log -Raw) ?? ''}else{''}
   $peer.retained_prelaunch_ready=$log.Contains('Localhost QA retained session ready before runtime creation')
   $peer.native_menu_opened=$log.Contains('Authored native Online Multiplayer page opened')
   $peer.native_menu_bridge=$log.Contains('Native FrontMenu online SetOption bridge registered')

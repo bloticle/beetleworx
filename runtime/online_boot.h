@@ -10,6 +10,7 @@ struct BootPaths {
     // Nonempty only for native Resume: revalidate the retained host archive on
     // the preparation worker before fingerprinting or creating a destination.
     std::filesystem::path retained_host_normal_root;
+    std::filesystem::path content_identity_cache;
 };
 struct BootStatus {
     BootState state=BootState::Idle;

@@ -8,6 +8,12 @@ owner=re.compile(r'Native online CRT owner: tick (\d+), index (\d+), r29 ([0-9A-
 stack=re.compile(r'Native online CRT stack: tick (\d+), index (\d+), returns ((?:[0-9A-F]{8} ?){6})')
 schedule=re.compile(r'Native online CRT schedule: tick (\d+), index (\d+), scene ([0-9A-F]{8}), last ([0-9A-F]{8}), interval ([0-9A-F]{8}), budget ([0-9A-F]{8}), gate ([0-9A-F]{8})')
 target=re.compile(r'Native online CRT target: tick (\d+), index (\d+), key ([0-9A-F]{8}), entity ([0-9A-F]{8}), handle ([0-9A-F]{8})')
+script=re.compile(r"Native online Lua RNG: tick (\d+), index (\d+), source '(.*)', function line (\d+)")
+script_stack=re.compile(r'Native online Lua stack: tick (\d+), index (\d+), returns ((?:[0-9A-F]{8} ?){12})')
+script_wait=re.compile(
+    r'Native online Lua wait: agreed (true|false), tick (\d+), slot (\d+)/(\d+), target ([0-9A-F]{8}), '
+    r'remaining ([0-9A-F]{8}), flags ([0-9A-F]{8}), scaled ([0-9A-F]{8}), unscaled ([0-9A-F]{8})'
+)
 peers={};summaries={}
 
 for role in ('host','client'):
@@ -22,7 +28,17 @@ for role in ('host','client'):
     for m in stack.finditer(text):details[int(m[1])].setdefault(int(m[2]),{})['parents']=m[3].split()
     for m in schedule.finditer(text):details[int(m[1])].setdefault(int(m[2]),{})['schedule']=dict(zip(['scene','last','interval','budget','gate'],m.groups()[2:]))
     for m in target.finditer(text):details[int(m[1])].setdefault(int(m[2]),{})['target']=dict(zip(['key','entity','handle'],m.groups()[2:]))
+    for m in script.finditer(text):
+        details[int(m[1])].setdefault(int(m[2]),{})['lua']={'source':m[3],'defined_line':int(m[4])}
+    for m in script_stack.finditer(text):
+        details[int(m[1])].setdefault(int(m[2]),{})['lua_parents']=m[3].split()
+    waits=[
+        {'agreed':m[1]=='true','tick':int(m[2]),'slot':int(m[3]),'count':int(m[4]),
+         'target':m[5],'remaining':m[6],'flags':m[7],'scaled_delta':m[8],'unscaled_delta':m[9]}
+        for m in script_wait.finditer(text)
+    ]
     peers[role]={'ticks':dict(ticks),'owners':dict(details),'expected_counts':counts,'truncated':'Native online CRT trace reached its' in text}
+    if waits:peers[role]['lua_waits']=waits
 for tick in sorted(set(peers['host']['ticks'])|set(peers['client']['ticks'])):
     a=peers['host']['ticks'].get(tick,[]);b=peers['client']['ticks'].get(tick,[])
     complete=all(not peers[r]['truncated'] and len(rows)==peers[r]['expected_counts'].get(tick,-1) and all(row['index']==i for i,row in enumerate(rows)) for r,rows in [('host',a),('client',b)])

@@ -4,6 +4,7 @@
 #include <rex/logging.h>
 #include <rex/sha256.h>
 #include <algorithm>
+#include <atomic>
 #include <fstream>
 #include <span>
 #include <stdexcept>
@@ -118,13 +119,97 @@ Hash HashTree(const fs::path& root,bool content,std::stop_token stop,Installatio
     for(size_t i=0;i<files.size();++i)if(files[i].key!=after[i].key || files[i].size!=after[i].size || files[i].time!=after[i].time)throw std::runtime_error("Identity directory changed during verification");
     return tree.Finish();
 }
+
+std::optional<Hash> ContentCacheKey(const std::vector<File>& files,std::stop_token stop) {
+    // Bump this domain if the content tree's digest representation changes.
+    Sha key;key.Text("EM2-content-cache-v1");key.Number(files.size(),8);
+    for(const auto& file:files){
+        Cancel(stop);
+        key.Number(file.key.size(),4);key.Text(file.key);
+        if(file.key=="configfiles.ini"){
+            // Local graphics values have the same normalization as HashTree.
+            InstallationIdentity ignored;
+            key.Add(HashFile(file,true,stop,ignored));
+            continue;
+        }
+        const auto handle=CreateFileW(file.path.c_str(),GENERIC_READ,FILE_SHARE_READ,
+            nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+        if(handle==INVALID_HANDLE_VALUE)return {};
+        struct Close {HANDLE handle;~Close(){CloseHandle(handle);}} close{handle};
+        FILE_ID_INFO id{};
+        FILE_BASIC_INFO times{};
+        LARGE_INTEGER size{};
+        wchar_t filesystem[16]{};
+        // Volume GUID paths are available for local volumes. Use the full
+        // byte scan on network shares and filesystems without NTFS metadata.
+        if(!GetFinalPathNameByHandleW(handle,nullptr,0,VOLUME_NAME_GUID|FILE_NAME_OPENED) ||
+           !GetVolumeInformationByHandleW(handle,nullptr,0,nullptr,nullptr,nullptr,filesystem,DWORD(std::size(filesystem))) ||
+           wcscmp(filesystem,L"NTFS")!=0 ||
+           !GetFileInformationByHandleEx(handle,FileIdInfo,&id,sizeof(id)) ||
+           !GetFileInformationByHandleEx(handle,FileBasicInfo,&times,sizeof(times)) ||
+           !GetFileSizeEx(handle,&size) || uint64_t(size.QuadPart)!=file.size || !times.ChangeTime.QuadPart)return {};
+        key.Number(id.VolumeSerialNumber,8);key.Add(id.FileId.Identifier);
+        key.Number(file.size,8);
+        key.Number(times.CreationTime.QuadPart,8);key.Number(times.LastWriteTime.QuadPart,8);
+        key.Number(times.ChangeTime.QuadPart,8);
+    }
+    return key.Finish();
 }
-IdentityResult FingerprintProgram(const fs::path& executable,const fs::path& content,std::stop_token stop) {
+
+using CacheRecord=std::array<uint8_t,96>;
+CacheRecord MakeCacheRecord(const Hash& key,const Hash& digest) {
+    CacheRecord bytes{};
+    std::copy(key.begin(),key.end(),bytes.begin());
+    std::copy(digest.begin(),digest.end(),bytes.begin()+32);
+    Sha integrity;integrity.Add(std::span(bytes).first(64));
+    const auto checksum=integrity.Finish();
+    std::copy(checksum.begin(),checksum.end(),bytes.begin()+64);
+    return bytes;
+}
+std::optional<Hash> ReadContentCache(const fs::path& path,const Hash& key) {
+    std::ifstream input(path,std::ios::binary);
+    CacheRecord bytes{};
+    if(!input.read(reinterpret_cast<char*>(bytes.data()),bytes.size()) ||
+       input.peek()!=std::char_traits<char>::eof() ||
+       !std::equal(key.begin(),key.end(),bytes.begin()))return {};
+    Hash digest{};
+    std::copy_n(bytes.begin()+32,digest.size(),digest.begin());
+    if(bytes!=MakeCacheRecord(key,digest))return {};
+    return digest;
+}
+void WriteContentCache(const fs::path& path,const Hash& key,const Hash& digest) {
+    static std::atomic<uint64_t> sequence=0;
+    auto temporary=path;
+    temporary+=L"."+std::to_wstring(GetCurrentProcessId())+L"."+std::to_wstring(++sequence)+L".tmp";
+    const auto bytes=MakeCacheRecord(key,digest);
+    const auto handle=CreateFileW(temporary.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(handle==INVALID_HANDLE_VALUE)return;
+    DWORD written=0;
+    const bool complete=WriteFile(handle,bytes.data(),DWORD(bytes.size()),&written,nullptr) &&
+        written==bytes.size() && FlushFileBuffers(handle);
+    CloseHandle(handle);
+    if(!complete || !MoveFileExW(temporary.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))
+        DeleteFileW(temporary.c_str());
+}
+}
+IdentityResult FingerprintProgram(const fs::path& executable,const fs::path& content,std::stop_token stop,const fs::path& cache) {
     try {
         InstallationIdentity identity;
         const File build{executable,"beetleworx.exe",fs::file_size(executable),fs::last_write_time(executable)};
         identity.build=HashFile(build,false,stop,identity);
-        identity.content=HashTree(content,true,stop,identity);
+        const auto files=cache.empty()?std::vector<File>{}:Inventory(content,true,stop);
+        const auto key=cache.empty()?std::optional<Hash>{}:ContentCacheKey(files,stop);
+        const auto cached=key?ReadContentCache(cache,*key):std::optional<Hash>{};
+        if(cached){
+            identity.content=*cached;
+            identity.reused_content_digest=true;
+            identity.files+=files.size();
+            for(const auto& file:files)identity.bytes+=file.size;
+        }else{
+            identity.content=HashTree(content,true,stop,identity);
+            if(key && ContentCacheKey(Inventory(content,true,stop),stop)==key)
+                WriteContentCache(cache,*key,identity.content);
+        }
         Cancel(stop);return {identity,{}};
     } catch(const std::exception& error){return {{},error.what()};}
 }
@@ -153,6 +238,21 @@ bool TestInstallationIdentity(const fs::path& root) {
             first.value->checkpoint==second.value->checkpoint,"relocation, case-insensitive relative paths, multi-block files and local source markers"))return false;
         std::string hex;for(auto byte:first.value->build){constexpr char digits[]="0123456789abcdef";hex+=digits[byte>>4];hex+=digits[byte&15];}
         if(!check(hex==rex::util::sha256("abc"),"streamed executable SHA-256 matches independent SDK implementation"))return false;
+        const auto cache=b/"identity-cache.bin";
+        auto cached=[&]{return FingerprintProgram(b/"game.exe",b/"content",{},cache);};
+        const bool cache_supported=bool(ContentCacheKey(Inventory(b/"content",true,{}),{}));
+        const auto cold=cached(),warm=cached();
+        if(!check(cold.value && warm.value && !cold.value->reused_content_digest &&
+            warm.value->reused_content_digest==cache_supported && warm.value->content==second.value->content &&
+            warm.value->bytes==cold.value->bytes && warm.value->files==cold.value->files,
+            "cold and warm content checks retain identical protocol identity and statistics"))return false;
+        if(cache_supported){
+            write(cache,"invalid cache");
+            const auto repaired=cached(),reloaded=cached();
+            if(!check(repaired.value && !repaired.value->reused_content_digest &&
+                reloaded.value && reloaded.value->reused_content_digest && reloaded.value->content==cold.value->content,
+                "corrupt identity cache is recomputed and replaced"))return false;
+        }
         write(b/"content"/"pc-shader-library"/"local.em2dxbc","local compiled shader");
         write(b/"content"/"$SystemUpdate"/"dashboard.bin","unused console updater");
         const auto local_artifacts=fingerprint(b);
@@ -167,13 +267,22 @@ bool TestInstallationIdentity(const fs::path& root) {
         write(b/"content"/"configfiles.ini","ShadowMapPlayerSize=2048\nGravity=9.81\n");
         const auto graphics=fingerprint(b);
         if(!check(graphics.value && graphics.value->content==first.value->content,"local graphics quality and CRLF do not block compatibility"))return false;
+        const auto graphics_cached=cached();
+        if(!check(graphics_cached.value && graphics_cached.value->reused_content_digest==cache_supported &&
+            graphics_cached.value->content==graphics.value->content,"cache key respects graphics normalization"))return false;
         write(b/"content"/"configfiles.ini","ShadowMapPlayerSize=2048\nGravity=1.62\n");
         const auto physics=fingerprint(b);
         if(!check(physics.value && physics.value->content!=first.value->content,"gameplay configuration changes alter compatibility"))return false;
+        const auto physics_cached=cached();
+        if(!check(physics_cached.value && !physics_cached.value->reused_content_digest && physics_cached.value->content==physics.value->content,
+            "gameplay config edits invalidate cached identity"))return false;
         const auto path=b/"content"/"packfiles"/"test.pak";const auto timestamp=fs::last_write_time(path);
         auto changed=large;changed.back()='y';write(path,changed);fs::last_write_time(path,timestamp);
         const auto asset=fingerprint(b);
         if(!check(asset.value && physics.value && asset.value->content!=physics.value->content,"same-size asset edits with preserved timestamps are detected"))return false;
+        const auto asset_cached=cached();
+        if(!check(asset_cached.value && !asset_cached.value->reused_content_digest && asset_cached.value->content==asset.value->content,
+            "cache rejects same-size writes after restoring the original modification time"))return false;
         write(b/"save"/"save.dat","different checkpoint");write(b/"game.exe","abd");
         const auto altered=fingerprint(b);
         if(!check(altered.value && altered.value->checkpoint!=first.value->checkpoint && altered.value->build!=first.value->build,"checkpoint and executable changes detected independently"))return false;

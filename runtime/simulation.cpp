@@ -72,6 +72,7 @@ PPC_EXTERN_FUNC(__imp__sub_830B5240);
 PPC_EXTERN_FUNC(__imp__sub_830751E0);
 PPC_EXTERN_FUNC(__imp__sub_826C9F38);
 PPC_EXTERN_FUNC(__imp__sub_831BC328);
+PPC_EXTERN_FUNC(__imp__sub_8273D880);
 PPC_EXTERN_FUNC(__imp__sub_82581840);
 PPC_EXTERN_FUNC(__imp__sub_82568C20);
 PPC_EXTERN_FUNC(__imp__sub_825532B0);
@@ -583,14 +584,41 @@ thread_local bool in_tick=false;
 thread_local bool record_random=false;
 thread_local em2::net::RandomObservation random_observation;
 struct RandomTraceEvent {bool reseed;uint32_t caller,state,result;};
+struct ScriptRandomOwner {
+    size_t event=0;
+    uint32_t defined_line=0;
+    std::array<char,192> source{};
+    std::array<uint32_t,12> parents{};
+};
+struct ScriptWaitTrace {
+    bool agreed;
+    uint64_t tick;
+    uint32_t slot,count,target,remaining,flags,scaled,unscaled;
+};
+thread_local std::array<ScriptWaitTrace,384> script_wait_trace{};
+thread_local size_t script_wait_trace_size=0;
+void LogScriptWaitTrace(){
+    for(size_t i=0;i<script_wait_trace_size;++i){
+        const auto& wait=script_wait_trace[i];
+        REXLOG_INFO("Native online Lua wait: agreed {}, tick {}, slot {}/{}, target {:08X}, remaining {:08X}, flags {:08X}, scaled {:08X}, unscaled {:08X}",
+            wait.agreed,wait.tick,wait.slot,wait.count,wait.target,wait.remaining,wait.flags,wait.scaled,wait.unscaled);
+    }
+    script_wait_trace_size=0;
+}
 thread_local std::array<RandomTraceEvent,4096> online_random_trace{};
 thread_local size_t online_random_trace_size=0;
 // Lazily allocate on the tracing simulation thread only. Preserve recent basic
 // CRT events until failure, rather than logging every successful frame.
 struct RandomFailureHistory {
-    struct Frame {uint64_t tick=0;size_t size=0;bool valid=false,published=false;std::array<RandomTraceEvent,4096> events{};};
+    struct Frame {
+        uint64_t tick=0;
+        size_t size=0,script_count=0;
+        bool valid=false,published=false;
+        std::array<RandomTraceEvent,4096> events{};
+        std::array<ScriptRandomOwner,32> scripts{};
+    };
     std::array<Frame,4> frames{};size_t next=0;Frame* current=nullptr;
-    void Begin(uint64_t tick){auto& f=frames[next++%frames.size()];f.tick=tick;f.size=0;f.valid=true;f.published=false;current=&f;}
+    void Begin(uint64_t tick){auto& f=frames[next++%frames.size()];f.tick=tick;f.size=0;f.script_count=0;f.valid=true;f.published=false;current=&f;}
     void Record(RandomTraceEvent event){if(current && current->size<current->events.size())current->events[current->size++]=event;}
     template<class Emit>void Drain(Emit emit){
         std::array<Frame*,4> sorted{};for(size_t i=0;i<frames.size();++i)sorted[i]=&frames[i];
@@ -614,6 +642,7 @@ bool TestRandomFailureHistory(){
 }
 thread_local bool capture_online_random=false;
 thread_local bool capture_online_random_owners=false;
+thread_local bool capture_script_random_owners=false;
 struct RandomOwnerTrace {size_t event;std::array<uint32_t,3> registers{},heads{};std::array<uint32_t,6> returns{};std::array<uint32_t,5> schedule{};std::array<uint32_t,2> identity{};bool scheduled=false;};
 thread_local std::array<RandomOwnerTrace,32> online_random_owners{};
 thread_local size_t online_random_owner_size=0;
@@ -622,6 +651,54 @@ uint32_t RandomTraceWord(uint8_t* base,uint32_t address){
     uint32_t word=0;SIZE_T copied=0;
     if(!ReadProcessMemory(GetCurrentProcess(),PPC_RAW_ADDR(address),&word,sizeof(word),&copied) || copied!=sizeof(word))return 0;
     return _byteswap_ulong(word);
+}
+
+ScriptRandomOwner TraceScriptRandomOwner(uint8_t* base,const PPCContext& ctx,size_t event) {
+    ScriptRandomOwner owner;owner.event=event;
+    auto stack=ctx.r1.u32;
+    for(auto& address:owner.parents){
+        const auto parent=RandomTraceWord(base,stack);
+        if(parent<=stack || parent-stack>65536)break;
+        address=RandomTraceWord(base,parent-8);stack=parent;
+    }
+    const auto state=ctx.r31.u32;
+    // The retail debug API reads the CallInfo stack at L+12/+20. A saved
+    // frame base points past its function slot. Tag 9 is a Lua closure.
+    const auto first=RandomTraceWord(base,state+12),current=RandomTraceWord(base,state+20);
+    if(!first || current<first || (current-first)%16 || current-first>16*1024*1024)return owner;
+    for(auto frame=current;frame>first && (current-frame)/16<8;frame-=16){
+        const auto lua_stack=RandomTraceWord(base,frame);
+        if(lua_stack<4096 || (RandomTraceWord(base,lua_stack-4)&15)!=9)continue;
+        const auto closure=RandomTraceWord(base,lua_stack-8);
+        const auto proto=RandomTraceWord(base,closure+8);
+        const auto location=RandomTraceWord(base,proto+40);
+        const auto source=RandomTraceWord(base,location+24);
+        if(!closure || !proto || !location || !source)continue;
+        const auto length=RandomTraceWord(base,source+4)&0x3fffffff;
+        const auto count=std::min<size_t>(length,owner.source.size()-1);
+        SIZE_T copied=0;
+        if(!count || uint64_t(source)+12+count>0x100000000ull ||
+           !ReadProcessMemory(GetCurrentProcess(),PPC_RAW_ADDR(source+12),owner.source.data(),count,&copied) ||
+           copied!=count) {
+            owner.source.fill(0);
+            continue;
+        }
+        owner.defined_line=RandomTraceWord(base,location);
+        for(size_t i=0;i<count;++i)if(static_cast<unsigned char>(owner.source[i])<32)owner.source[i]='?';
+        break;
+    }
+    return owner;
+}
+void LogScriptRandomOwners(const RandomFailureHistory::Frame& frame) {
+    for(size_t i=0;i<frame.script_count;++i){
+        const auto& owner=frame.scripts[i];
+        REXLOG_INFO("Native online Lua RNG: tick {}, index {}, source '{}', function line {}",
+            frame.tick,owner.event,owner.source[0]?owner.source.data():"<unavailable>",owner.defined_line);
+        REXLOG_INFO("Native online Lua stack: tick {}, index {}, returns {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X}",
+            frame.tick,owner.event,owner.parents[0],owner.parents[1],owner.parents[2],owner.parents[3],
+            owner.parents[4],owner.parents[5],owner.parents[6],owner.parents[7],owner.parents[8],
+            owner.parents[9],owner.parents[10],owner.parents[11]);
+    }
 }
 
 struct TraceTargetCache{bool ready=false;uint64_t tick=0;std::unordered_map<uint32_t,uint32_t> handles;};
@@ -1208,9 +1285,15 @@ void CompleteNetworkObservation(PPCContext& ctx,uint8_t* base) {
             if(owner.scheduled)REXLOG_INFO("Native online CRT target: tick {}, index {}, key {:08X}, entity {:08X}, handle {:08X}",observed_tick,owner.event,owner.heads[1],owner.identity[0],owner.identity[1]);
         }
         if(online_random_trace_size==online_random_trace.size())REXLOG_INFO("Native online CRT trace reached its {} event limit",online_random_trace.size());
-        if(random_failure_history && random_failure_history->current && random_failure_history->current->tick==observed_tick)random_failure_history->current->published=true;
+        if(random_failure_history && random_failure_history->current && random_failure_history->current->tick==observed_tick){
+            LogScriptRandomOwners(*random_failure_history->current);
+            random_failure_history->current->published=true;
+        }
     }
-    if(report) {if(digest) gate.Complete(*digest);else gate.ObservationFailed();}
+    if(report) {
+        if(observed_tick==12 && script_wait_trace_size)LogScriptWaitTrace();
+        if(digest) gate.Complete(*digest);else gate.ObservationFailed();
+    }
 }
 thread_local std::unordered_map<uint32_t,CameraMotion> camera_motion;
 
@@ -1291,6 +1374,7 @@ void StartTick(uint8_t* base,bool agreed=false,uint64_t input_tick=0) {
     const uint64_t random_start=REXCVAR_GET(em2_trace_online_random_start_tick);
     capture_online_random=agreed && input_tick>=random_start && input_tick-random_start<2 && REXCVAR_GET(em2_trace_online_observations);
     capture_online_random_owners=capture_online_random && REXCVAR_GET(em2_trace_online_random_owners);
+    capture_script_random_owners=agreed && REXCVAR_GET(em2_trace_online_observations) && REXCVAR_GET(em2_trace_online_random_owners);
     if(agreed && REXCVAR_GET(em2_trace_online_observations)){
         if(!random_failure_history)random_failure_history=std::make_unique<RandomFailureHistory>();
         random_failure_history->Begin(input_tick);
@@ -1522,15 +1606,44 @@ void RecordCameraInput(unsigned user,int16_t x,int16_t y,uint16_t buttons) {
 }
 
 bool em2::InAgreedSimulationTick(){return in_tick && agreed_clock_tick;}
-void em2::ResetOnlineRandomTraceHistory(){random_failure_history.reset();trace_target_cache={};}
+
+PPC_FUNC_IMPL(sub_8273D880) {
+    // The coroutine scheduler subtracts one of the native clock deltas from
+    // each pending wait before it resumes Lua. Capture the inputs before the
+    // original scheduler mutates or removes entries.
+    if(REXCVAR_GET(em2_trace_online_random_owners) && em2::net::SynchronizedSessionActive() &&
+       (!em2::InAgreedSimulationTick() || clock_input_tick<12)){
+        struct HostState {DWORD error=GetLastError();unsigned csr=_mm_getcsr();~HostState(){SetLastError(error);_mm_setcsr(csr);}} host_state;
+        const auto manager=ctx.r3.u32;
+        const auto list=RandomTraceWord(base,manager+72),count=RandomTraceWord(base,manager+76);
+        const auto state=RandomTraceWord(base,manager+92);
+        if(count && list && uint64_t(list)+uint64_t(count)*132<=0x100000000ull){
+            const auto mode=RandomTraceWord(base,state+24);
+            const auto scaled=RandomTraceWord(base,mode?0x833FCA70:0x833FCA54);
+            const auto unscaled=RandomTraceWord(base,0x833FCA74);
+            for(uint32_t i=0;i<std::min(count,24u) && script_wait_trace_size<script_wait_trace.size();++i){
+                const auto entry=list+i*132;
+                const auto wait=RandomTraceWord(base,entry+96),flags=RandomTraceWord(base,entry+100);
+                const auto target=RandomTraceWord(base,entry+112);
+                if(!(flags&0x00FF0000))continue;
+                script_wait_trace[script_wait_trace_size++]={
+                    em2::InAgreedSimulationTick(),clock_input_tick,i,count,target,wait,flags,scaled,unscaled};
+            }
+        }
+    }
+    __imp__sub_8273D880(ctx,base);
+}
+void em2::ResetOnlineRandomTraceHistory(){random_failure_history.reset();trace_target_cache={};script_wait_trace_size=0;}
 void em2::DumpOnlineRandomTraceHistory(){
     if(!random_failure_history)return;
     struct HostState{DWORD error=GetLastError();unsigned csr=_mm_getcsr();~HostState(){SetLastError(error);_mm_setcsr(csr);}}host_state;
+    LogScriptWaitTrace();
     random_failure_history->Drain([](const auto& f){
         REXLOG_INFO("Native online CRT failure history: tick {}, retained {} events (maximum {})",f.tick,f.size,f.events.size());
         for(size_t i=0;i<f.size;++i){const auto& e=f.events[i];
             REXLOG_INFO("Native online CRT event: tick {}, index {}, seed {}, caller {:08X}, state {:08X}, result {:08X}",f.tick,i,e.reseed,e.caller,e.state,e.result);
         }
+        LogScriptRandomOwners(f);
     });
 }
 
@@ -1538,7 +1651,15 @@ void em2::DumpOnlineRandomTraceHistory(){
 void em2::RecordNativeRandom(bool reseed,uint32_t caller,uint32_t state,uint32_t result,const PPCContext* context,uint8_t* base) {
     if(in_tick && record_random){
         random_observation.Record(reseed,caller,state,result);
-        if(random_failure_history)random_failure_history->Record({reseed,caller,state,result});
+        if(random_failure_history){
+            auto* frame=random_failure_history->current;
+            if(capture_script_random_owners && context && (caller==0x826F5CB4 || caller==0x826F5ED8) &&
+               frame && frame->size<frame->events.size() && frame->script_count<frame->scripts.size()){
+                struct HostState {DWORD error=GetLastError();unsigned csr=_mm_getcsr();~HostState(){SetLastError(error);_mm_setcsr(csr);}} host_state;
+                frame->scripts[frame->script_count++]=TraceScriptRandomOwner(base,*context,frame->size);
+            }
+            random_failure_history->Record({reseed,caller,state,result});
+        }
         if(capture_online_random && online_random_trace_size<online_random_trace.size()){
             const auto index=online_random_trace_size;
             online_random_trace[online_random_trace_size++]={reseed,caller,state,result};

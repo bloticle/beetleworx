@@ -44,10 +44,10 @@ Prepared Prepare(const BootPaths& paths,const fs::path& source,bool host,uint8_t
     }
     step->store(PreparationStep::CheckingFiles);
     const auto started=std::chrono::steady_clock::now();
-    const auto program=FingerprintProgram(paths.executable,paths.content,stop);
+    const auto program=FingerprintProgram(paths.executable,paths.content,stop,paths.content_identity_cache);
     if(!program.value)throw std::runtime_error(program.error);
-    REXLOG_INFO("Online {} game files verified in {:.2f} seconds ({} bytes)",host?"host":"guest",
-        std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count(),program.value->bytes);
+    REXLOG_INFO("Online {} game files verified in {:.2f} seconds ({} bytes, content digest reused {})",host?"host":"guest",
+        std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count(),program.value->bytes,program.value->reused_content_digest);
     Prepared prepared;prepared.identity.build=program.value->build;prepared.identity.content=program.value->content;prepared.identity.input_delay=delay;
     prepared.identity.startup_policy=paths.startup_policy;prepared.identity.initialization_policy=initialization;
     if(host) {

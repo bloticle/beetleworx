@@ -249,6 +249,7 @@ void UpdateNativeOnlineHandoff(PPCContext& ctx,uint8_t* base){
         if(handoff.campaign_lease)REXLOG_INFO("Native lobby retained validated host campaign with an exclusive active-session lease");
         if(!Resume(ctx,base,owner)){Fail("The native menu did not accept Continue for the shared save.");return;}
         if(!FinishNativeOnlineMenuPreparation()){Fail("The prepared native online session could not enter gameplay.");return;}
+        CompleteNativeOnlineMenuHandoff();
         watch.generation.store(0,std::memory_order_release);
         handoff.phase=Phase::Finished;handoff.prepared.reset();handoff.owner=0;
         // Resume's original 829ECB70 transition destroys/recreates both native
