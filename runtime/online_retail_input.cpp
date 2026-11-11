@@ -44,6 +44,7 @@ struct RetailState {
     uint16_t mask=0;bool active=false,started=false,faulted=false,camera=false;
     Frame published{};std::array<RetailActorInput,2> actors{};std::array<Stage,2> stages{};
     RetailJumpAdmission jump=nullptr;
+    RetailButtonAdmission buttons=nullptr;
 };
 thread_local RetailState state;
 thread_local uint64_t serial=0;
@@ -128,7 +129,11 @@ bool Active(uint64_t tick,uint8_t* base){uint64_t agreed=0;return Owner(base) &&
 Result Validate(unsigned slot,const RoomMovement& command,PPCContext& ctx,uint8_t* base){
     if(!Owner(base))return Result::WrongThread;if(state.faulted || !Current(slot,ctx,base))return Result::Stale;
     if(!ValidRoomMovement(command) || command.actor_epoch!=state.actors[slot].actor_epoch)return Result::InvalidInput;
-    if(command.source==RoomMovementSource::NativeActionV3)return Result::UnsupportedAction;
+    if(command.source==RoomMovementSource::NativeActionV3){
+        if(!state.buttons || !state.buttons(slot,command,ctx,base))return Result::UnsupportedAction;
+        if(!state.camera && (command.pad.right_x || command.pad.right_y))return Result::UnsupportedAction;
+        return Result::Applied;
+    }
     if(command.pad.left_trigger || command.pad.right_trigger || (!state.camera && (command.pad.right_x || command.pad.right_y)))return Result::UnsupportedAction;
     if(command.source==RoomMovementSource::NativeActionV2){if(!state.jump || !state.jump(slot,command,ctx,base))return Result::UnsupportedAction;}
     else if(command.pad.buttons || command.jump_count || command.jump_button_mask)return Result::UnsupportedAction;
@@ -212,6 +217,7 @@ bool RetailInputQuarantineFor(unsigned slot,PPCContext& ctx,uint8_t* base,Retail
     out=state.actors[slot];return true;
 }
 bool SetRetailJumpAdmission(RetailJumpAdmission admission){if(!state.world || state.thread!=GetCurrentThreadId() || state.active || (admission && state.started))return false;state.jump=admission;return true;}
+bool SetRetailButtonAdmission(RetailButtonAdmission admission){if(!state.world || state.thread!=GetCurrentThreadId() || state.active || (admission && state.started))return false;state.buttons=admission;return true;}
 bool SetRetailCameraInputAllowed(bool allowed){if(!state.world || state.thread!=GetCurrentThreadId() || state.active || state.started)return false;state.camera=allowed;return true;}
 ActorInputResult ValidateRetailMovement(unsigned slot,const RoomMovement& c,PPCContext& ctx,uint8_t* base){Environment environment;return Validate(slot,c,ctx,base);}
 ActorInputResult ValidateRetailMovementFrame(const RoomFrame& frame,PPCContext& ctx,uint8_t* base){Environment environment;
@@ -441,6 +447,25 @@ bool TestNativeRetailInput(){
        "completed exact controls frame retains same retail quarantine lease"))return false;
     bool foreign_quarantine=true;std::thread foreign_owner([&]{auto c=context();RetailActorInput out;foreign_quarantine=RetailInputQuarantineFor(0,c,base,out);});foreign_owner.join();
     if(!check(!foreign_quarantine,"foreign thread cannot acquire retained quarantine"))return false;
+    // Independent lifecycle for complete native button delivery. These are
+    // private allocated-image callbacks, never injected into live gameplay.
+    em2::EndSynchronizedControls(restore.controls);restore.controls=0;
+    if(!em2::BeginSynchronizedControls(10))return false;
+    restore.controls=em2::SynchronizedControlsGeneration();DisarmRetailInput();
+    if(!ArmRetailInput(77,registry,restore.controls,3,{101,102},10,ctx,base))return false;
+    auto button_drive=[&](const RoomFrame& input){
+        if(ValidateRetailMovementFrame(input,ctx,base)!=Result::Applied || ValidateRetailButtonFrame(input,ctx,base)!=Result::Applied)return false;
+        Frame pads;pads.tick=input.tick;for(unsigned i=0;i<2;++i)pads.players[i]=input.players[i].pad;
+        fixture_tick=input.tick;
+        if(!em2::PublishSynchronizedControls(pads) || !BeginRetailBasisTick(registry,input.tick,ctx,base))return false;
+        for(unsigned i=0;i<2;++i)if(PrepareRetailMovement(i,input.players[i],input.tick,ctx,base)!=Result::Applied)return false;
+        for(unsigned i=0;i<2;++i)if(ReplayRetailMovement(i,{event,0xA000u+i*512,input.players[i].x,input.players[i].y},input.tick,ctx,base)!=Result::Applied)return false;
+        for(unsigned i=0;i<2;++i)if(ReplayRetailButtonBatch(i,input,ctx,base)!=Result::Applied ||
+            ReplayRetailButtonBatch(i,input,ctx,base)==Result::Applied)return false;
+        for(unsigned i=0;i<2;++i){auto call=context();call.r3.u64=controllers[i]+24;UpdateRetailBasisController(call,base,FixtureBoundedController);}
+        return FinishRetailButtonTick(input.tick,ctx,base)==Result::Applied && FinishRetailInputTick(input.tick,ctx,base);
+    };
+    if(!check(TestRetailButtonReceivers(ctx,base,button_drive),"native buttons consume complete staged frames through original character handlers"))return false;
     // Independent lifecycle for the native Jump fixture. Never reset a live
     // production stream to install a capability after gameplay has started.
     em2::EndSynchronizedControls(restore.controls);restore.controls=0;

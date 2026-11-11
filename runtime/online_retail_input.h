@@ -24,6 +24,9 @@ bool RetailInputQuarantineFor(unsigned,PPCContext&,uint8_t*,RetailActorInput&);
 using RetailJumpAdmission=bool(*)(unsigned,const RoomMovement&,PPCContext&,uint8_t*);
 // Installed by an armed native Jump adapter; nullptr restores Movement-only.
 bool SetRetailJumpAdmission(RetailJumpAdmission);
+using RetailButtonAdmission=bool(*)(unsigned,const RoomMovement&,PPCContext&,uint8_t*);
+// Explicit complete-button receiver capability; immutable after first Begin.
+bool SetRetailButtonAdmission(RetailButtonAdmission);
 // Only an owner publishing full canonical two-lane Pads may opt into native
 // right-stick camera actions. Default rejects these axes; immutable once begun.
 bool SetRetailCameraInputAllowed(bool);

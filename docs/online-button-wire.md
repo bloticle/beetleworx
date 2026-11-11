@@ -31,7 +31,10 @@ window carries 256 button decisions and both Jump edges for each of sixteen
 real loopback connections. A separate source fixture carries an actual native
 Oswald button result through the codec and authoritative echo.
 
-This is transport and metadata matching. It does not dispatch these actions
-into the live game. Existing Movement/Jump adapters explicitly reject V3 until
-receiver ownership, ordered native callbacks and aiming are integrated. It
-does not enable the public online menu or establish sixteen playable actors.
+The live Room still uses V2; this transport does not by itself dispatch actions
+into a running game. The Movement adapter accepts V3 only with the explicitly
+enabled two-slot [button delivery adapter](online-retail-buttons.md). That
+adapter exercises original native callbacks in allocated-image fixtures but
+has not been connected to the live delayed-input transition. Aim remains
+unfinished. This does not enable the public online menu or establish sixteen
+playable actors.
