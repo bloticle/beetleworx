@@ -1,4 +1,5 @@
 #include "online_local_jump.h"
+#include "online_local_source.h"
 #include "guest_read_batch.h"
 #include "ppc_context.h"
 #include <rex/logging.h>
@@ -10,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 PPC_EXTERN_FUNC(__imp__sub_827C2D98);
@@ -22,6 +24,7 @@ PPC_EXTERN_FUNC(__imp__sub_830A7968);
 PPC_EXTERN_FUNC(__imp__sub_830A8090);
 PPC_EXTERN_FUNC(__imp__sub_827B58D0);
 PPC_EXTERN_FUNC(__imp__sub_82A69948);
+PPC_EXTERN_FUNC(__imp__sub_827CA160);
 namespace {
 using namespace em2::net;
 struct Environment {unsigned csr=_mm_getcsr();DWORD error=GetLastError();~Environment(){_mm_setcsr(csr);SetLastError(error);}};
@@ -61,7 +64,7 @@ bool InspectAction(NativeLocalJumpAction& out,unsigned edge,const NativeLocalMov
     const auto a=out.action;out.uid=PPC_LOAD_U32(a);out.kind=PPC_LOAD_U32(a+80);out.key=PPC_LOAD_U32(a+92);
     // Single gamepad digital binding only. Analog thresholds, modifiers,
     // chords, timed-repeat and multiple-device routes need separate proofs.
-    if(out.uid!=PPC_LOAD_U32(edge?0x833DAEC0:0x833DAEBC) ||
+    if(out.uid!=PPC_LOAD_U32((edge?0x833DAEC0:0x833DAEBC)+m.retail_slot*12) ||
        PPC_LOAD_U32(a+408)!=1 || PPC_LOAD_U32(a+412) || PPC_LOAD_U32(a+88)!=m.logical_user ||
        (out.key&0xFFFF0000)!=0x01400000 || PPC_LOAD_U32(a+108)!=0 ||
        out.kind!=(edge?3u:2u) || PPC_LOAD_U8(a+104) || PPC_LOAD_U32(a+432)!=0)return false;
@@ -129,7 +132,8 @@ bool Advance(Stream& state,const NativeLocalJumpBinding& b,const Pad& pad,uint64
 }
 bool em2::net::DiscoverNativeLocalJumpBinding(const NativeLocalMovementBinding& m,PPCContext& ctx,uint8_t* base,NativeLocalJumpBinding& output){
     Environment preserve;output={};em2::GuestReadBatch reads;
-    if(evaluating || GameplayInputGate().active() || !Parent(m,ctx,base) || !Readable(0x833DAEBC,8,base) || !PPC_LOAD_U32(0x833DAEBC) || !PPC_LOAD_U32(0x833DAEC0) ||
+    const auto jump_global=0x833DAEBC+m.retail_slot*12;
+    if(m.retail_slot>1 || evaluating || GameplayInputGate().active() || !Parent(m,ctx,base) || !Readable(jump_global,8,base) || !PPC_LOAD_U32(jump_global) || !PPC_LOAD_U32(jump_global+4) ||
        !Readable(m.manager,96,base) || !Readable(m.input,88,base) || !Readable(m.device,96,base))return false;
     NativeLocalJumpBinding b;b.movement=m;std::array<unsigned,2> found{};
     for(const auto event:{m.manager+24,m.active_event}){
@@ -139,7 +143,7 @@ bool em2::net::DiscoverNativeLocalJumpBinding(const NativeLocalMovementBinding& 
         for(unsigned index=0;index<count;++index){const auto action=PPC_LOAD_U32(list+index*4);
             if(!Readable(action,4,base))return false;
             const auto uid=PPC_LOAD_U32(action);
-            for(unsigned i=0;i<2;++i)if(uid==PPC_LOAD_U32(i?0x833DAEC0:0x833DAEBC)){
+            for(unsigned i=0;i<2;++i)if(uid==PPC_LOAD_U32(jump_global+i*4)){
                 if(++found[i]!=1)return false;auto& a=b.actions[i];a.event=event;a.action=action;a.index=index;
                 if(!InspectAction(a,i,m,ctx,base))return false;
             }
@@ -168,18 +172,38 @@ bool em2::net::ArmNativeLocalJump(const NativeLocalJumpBinding& b,uint64_t epoch
     std::memcpy(stream.buttons.data(),base+b.buttons,b.button_count*20);return true;
 }
 void em2::net::DisarmNativeLocalJump(){stream={};}
-bool em2::net::ProduceNativeLocalJump(const NativeLocalJumpBinding& b,const Pad& pad,uint64_t epoch,uint64_t tick,
-    PPCContext& ctx,uint8_t* base,NativeLocalJumpEvents& output,unsigned user){
-    Environment preserve;output={};NativeLocalJumpBinding current;
-    if(evaluating || !stream.active || stream.thread!=GetCurrentThreadId() || user!=b.movement.user)return false;
+namespace {
+bool PrepareJump(const NativeLocalJumpBinding& b,const Pad& pad,uint64_t epoch,uint64_t tick,
+    PPCContext& ctx,uint8_t* base,Stream& next,NativeLocalJumpEvents& output){
+    output={};NativeLocalJumpBinding current;
+    if(evaluating || !stream.active || stream.thread!=GetCurrentThreadId())return false;
     if(!DiscoverNativeLocalJumpBinding(b.movement,ctx,base,current) || current!=b){stream.active=false;return false;}
-    auto next=stream;NativeLocalJumpEvents result;
+    next=stream;NativeLocalJumpEvents result;
     if(!Advance(next,b,pad,epoch,tick,ctx,base,result))return false;
     if(!DiscoverNativeLocalJumpBinding(b.movement,ctx,base,current) || current!=b){stream.active=false;return false;}
+    output=result;return true;
+}
+}
+bool em2::net::ProduceNativeLocalJump(const NativeLocalJumpBinding& b,const Pad& pad,uint64_t epoch,uint64_t tick,
+    PPCContext& ctx,uint8_t* base,NativeLocalJumpEvents& output,unsigned user){
+    Environment preserve;output={};Stream next;NativeLocalJumpEvents result;
+    if(user!=b.movement.user || !PrepareJump(b,pad,epoch,tick,ctx,base,next,result))return false;
+    stream=next;output=result;return true;
+}
+bool em2::net::ProduceNativeLocalJump(const Room& room,const NativeLocalJumpBinding& b,const NativeRoutedPadSample& sample,uint64_t epoch,
+    PPCContext& ctx,uint8_t* base,NativeLocalJumpEvents& output){
+    Environment preserve;output={};Stream next;NativeLocalJumpEvents result;
+    if(!ValidateNativeLocalSource(room,sample,b.movement,ctx,base) ||
+       !PrepareJump(b,sample.pad(),epoch,sample.source_tick(),ctx,base,next,result) ||
+       !ValidateNativeLocalSource(room,sample,b.movement,ctx,base))return false;
     stream=next;output=result;return true;
 }
 namespace {
 void JumpFixturePhysicalUser(PPCContext& ctx,uint8_t* base){ctx.r3.u64=PPC_LOAD_U32(ctx.r3.u32+4);}
+void JumpFixtureReference(PPCContext& ctx,uint8_t* base){
+    if(ctx.lr!=0x827CA1B4 || ctx.r4.u32!=0x833DA808 || ctx.r6.u32)throw std::runtime_error("P2 source fixture requires ORIGINAL NiEntity property dispatch");
+    const auto reference=PPC_LOAD_U32(ctx.r3.u32+4);std::memcpy(base+ctx.r5.u32,base+reference+256,48);ctx.r3.u64=1;
+}
 }
 bool em2::net::TestNativeLocalJump(){
     Environment preserve;const auto prior=stream;
@@ -198,7 +222,8 @@ bool em2::net::TestNativeLocalJump(){
     };
     if(!map(uint32_t(PPC_CODE_BASE),__imp__sub_827B58D0) || !map(uint32_t(PPC_CODE_BASE)+4,__imp__sub_82A69948) ||
        !map(uint32_t(PPC_CODE_BASE)+8,JumpFixturePhysicalUser) || !map(0x830A7FD0,__imp__sub_830A7FD0) ||
-       !map(0x830A8030,__imp__sub_830A8030) || !map(0x830A8090,__imp__sub_830A8090) || !map(0x830A7968,__imp__sub_830A7968))return false;
+       !map(0x830A8030,__imp__sub_830A8030) || !map(0x830A8090,__imp__sub_830A8090) || !map(0x830A7968,__imp__sub_830A7968) ||
+       !map(0x827CA160,__imp__sub_827CA160) || !map(uint32_t(PPC_CODE_BASE)+12,JumpFixtureReference))return false;
     constexpr uint32_t registry=0x2000,players=0x3000,manager=0x4000,movement=0x5000,event=0x6000,input=0x7000,device=0x8000;
     constexpr uint32_t axes=0x9000,buttons=0xA000,entity=0x10000,controller=0x11000,types=0x12000,list=0x13000;
     constexpr uint32_t buckets=0x14000,node=0x15000,handle=0x1234,jump=0x24000,release=0x25000;
@@ -305,6 +330,60 @@ bool em2::net::TestNativeLocalJump(){
     if(!check(ProduceNativeLocalJump(binding,{},65,UINT64_MAX,c,base,events) &&
         ProduceNativeLocalJump(binding,{},65,UINT64_MAX,c,base,events) && !ProduceNativeLocalJump(binding,{},65,0,c,base,events),
         "source tick exhaustion preserves exact repeats without wrapping"))return false;
+    // Captured human P2 uses the SAME derived controller ABI but a distinct
+    // native record, original action-family globals and logical/native user1.
+    DisarmNativeLocalJump();DisarmNativeLocalMovement();
+    constexpr uint32_t entity2=0x30000,controller2=0x31000,types2=0x32000,list2=0x33000,node2=0x34000;
+    constexpr uint32_t movement2=0x35000,jump2=0x36000,release2=0x37000,device2=0x38000,buttons2=0x39000,axes2=0x3A000,handle2=0x5678;
+    PPC_STORE_U32(players+340,handle2);PPC_STORE_U32(players+352,0);
+    PPC_STORE_U32(0x3B000,handle2);auto hash=context();hash.r3.u64=0x3B000;__imp__sub_827B58D0(hash,base);
+    const auto bucket=buckets+(hash.r3.u32%4)*4;
+    PPC_STORE_U32(node2,handle2);PPC_STORE_U32(node2+4,entity2);PPC_STORE_U32(node2+8,PPC_LOAD_U32(bucket));PPC_STORE_U32(bucket,node2);
+    std::memcpy(base+types2,base+types,256);PPC_STORE_U32(entity2+88,types2);PPC_STORE_U32(entity2+36,list2);PPC_STORE_U32(list2,controller2+24);
+    PPC_STORE_U32(controller2+24,0x8211DCE0);PPC_STORE_U32(controller2+80,0x8211DCD0);PPC_STORE_U32(controller2+64,entity2-8);
+    PPC_STORE_U8(controller2+68,15);
+    constexpr uint32_t reference2=0x3C000,frame2=0x3D000,camera2=0x3E000,refs2=0x3F000;
+    PPC_STORE_U32(controller2+16,0x8211DE70);PPC_STORE_U8(0x833DAE58,6);PPC_STORE_U8(types2+6,0);PPC_STORE_U32(controller2+96,reference2);
+    PPC_STORE_U32(reference2,0x8208D908);PPC_STORE_U32(reference2+4,123);PPC_STORE_U32(reference2+36,refs2);PPC_STORE_U32(reference2+44,2);
+    PPC_STORE_U32(refs2,frame2);PPC_STORE_U32(refs2+4,camera2);PPC_STORE_U32(frame2,0x82090340);PPC_STORE_U32(frame2+4,reference2);PPC_STORE_U32(camera2,0x820D8970);
+    PPC_STORE_U32(0x82090340+172,uint32_t(PPC_CODE_BASE)+12);
+    for(unsigned i=0;i<12;++i)put(reference2+256+i*4,i%5==0?1.f:0.f);
+    put(reference2+288,3);put(reference2+292,-12);put(reference2+296,4);
+    std::memcpy(base+movement2,base+movement,436);std::memcpy(base+jump2,base+jump,436);std::memcpy(base+release2,base+release,436);
+    std::memcpy(base+0x2B020,"Movement2",10);std::memcpy(base+0x2A040,"Jump2",6);std::memcpy(base+0x2A060,"JumpRelease2",13);
+    PPC_STORE_U32(0x833DAEC4,0x2B020);PPC_STORE_U32(0x833DAEC8,0x2A040);PPC_STORE_U32(0x833DAECC,0x2A060);
+    PPC_STORE_U32(movement2,0x2B020);PPC_STORE_U32(movement2+88,1);PPC_STORE_U32(movement2+120,1);
+    PPC_STORE_U32(jump2,0x2A040);PPC_STORE_U32(jump2+88,1);PPC_STORE_U32(release2,0x2A060);PPC_STORE_U32(release2+88,1);
+    PPC_STORE_U32(event+8,2);PPC_STORE_U32(0x17004,controller2+80);PPC_STORE_U32(event+20,6);
+    PPC_STORE_U32(0x1800C,movement2);PPC_STORE_U32(0x18010,jump2);PPC_STORE_U32(0x18014,release2);
+    PPC_STORE_U32(0x19000+8,1);PPC_STORE_U32(0x1A004,0x1B100);PPC_STORE_U32(0x1B100,0x1C000);PPC_STORE_U32(0x1B104,1);
+    std::memcpy(base+device2,base+device,96);std::memcpy(base+buttons2,base+buttons,320);std::memcpy(base+axes2,base+axes,256);
+    PPC_STORE_U32(device2+52,buttons2);PPC_STORE_U32(device2+60,axes2);PPC_STORE_U32(input+76,device2);
+    if(!check(ArmNativeLocalMovement(19,registry,base,1,1) && DiscoverNativeLocalMovementBinding(c,base,parent) &&
+        parent.retail_slot==1 && parent.entity==entity2 && parent.action==movement2 && parent.user==1 &&
+        DiscoverNativeLocalJumpBinding(parent,c,base,binding) && binding.actions[0].action==jump2 && binding.actions[1].action==release2 &&
+        binding.button_mask==0x1000 && ArmNativeLocalJump(binding,88,700,c,base),
+        "actual P2 action family resolves by selected native record without borrowing P0 Jump bindings"))return false;
+    bool held=false;uint64_t sequence=0;
+    const std::array<bool,6> p2levels{false,true,true,false,false,true};
+    for(unsigned i=0;i<p2levels.size();++i){Pad pad;pad.buttons=p2levels[i]?0x1000:0;
+        const auto before=std::vector<uint8_t>(base,base+0x50000);std::array<uint8_t,sizeof(PPCContext)> saved{};std::memcpy(saved.data(),&c,sizeof(c));
+        if(!check(!ProduceNativeLocalJump(binding,pad,88,700+i,c,base,events,0) && ProduceNativeLocalJump(binding,pad,88,700+i,c,base,events,1) &&
+            events.count==unsigned(p2levels[i]!=held) && (!(p2levels[i]!=held) || (events.events[0].sequence==++sequence &&
+            events.events[0].edge==(p2levels[i]?RoomJumpEdge::Pressed:RoomJumpEdge::Released))) &&
+            std::memcmp(base,before.data(),before.size())==0 && std::memcmp(&c,saved.data(),sizeof(c))==0,
+            "slot1 ORIGINAL digital interpreter yields its own exact press/hold/release stream and preserves both actors; hardware0 shortcut rejected"))return false;
+        held=p2levels[i];++cases;
+    }
+    PPC_STORE_U32(jump2,0x2A000);
+    if(!check(!ProduceNativeLocalJump(binding,{},88,706,c,base,events,1),"P0 UID replacement cannot feed a pinned P2 Jump stream"))return false;
+    PPC_STORE_U32(jump2,0x2A040);DisarmNativeLocalJump();
+    if(!check(DiscoverNativeLocalJumpBinding(parent,c,base,binding) && ArmNativeLocalJump(binding,88,706,c,base),"explicit new P2 edge ownership can rearm after diagnostic teardown"))return false;
+    PPC_STORE_U32(players+352,1);
+    if(!check(!ProduceNativeLocalJump(binding,{},88,706,c,base,events,1),"P2 return to AI invalidates Jump through the retained parent lease"))return false;
+    PPC_STORE_U32(players+352,0);DisarmNativeLocalJump();DisarmNativeLocalMovement();
+    if(!check(ArmNativeLocalMovement(20,registry,base,1,1) && DiscoverNativeLocalMovementBinding(c,base,parent) && parent.reference==reference2 &&
+        TestNativeLocalSource(c,base,parent),"sealed hardware0-to-canonical1 route uses real sampler provenance and typed native math while strict APIs retain rejection"))return false;
     DisarmNativeLocalJump();DisarmNativeLocalMovement();PPC_STORE_U32(0x1B000+4,3);PPC_STORE_U32(input+84,device);
     if(!check(ArmNativeLocalMovement(10,registry,base,3) && DiscoverNativeLocalMovementBinding(c,base,parent) &&
         DiscoverNativeLocalJumpBinding(parent,c,base,binding) && ArmNativeLocalJump(binding,66,300,c,base),

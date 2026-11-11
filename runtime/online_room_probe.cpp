@@ -1,0 +1,242 @@
+#include "online_room_probe.h"
+#include "online_room_boot.h"
+#include "online_room_runtime.h"
+#include "online_invite.h"
+#include "online_local_movement.h"
+#include "online_local_jump.h"
+#include "players.h"
+#include "guest_read_batch.h"
+#include "ppc_context.h"
+#include <rex/cvar.h>
+#include <rex/logging.h>
+#include <windows.h>
+#include <immintrin.h>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cstring>
+#include <stdexcept>
+#include <thread>
+
+REXCVAR_DECLARE(bool,em2_private_profile);
+REXCVAR_DECLARE(std::string,em2_user_data_directory);
+REXCVAR_DECLARE(bool,em2_online_menu);
+REXCVAR_DECLARE(bool,em2_online_qa_prelaunch);
+REXCVAR_DECLARE(bool,em2_online_auto_continue);
+REXCVAR_DECLARE(std::string,em2_online_qa_role);
+REXCVAR_DECLARE(std::string,em2_native_lobby_qa_role);
+REXCVAR_DECLARE(bool,em2_open_native_online_menu);
+REXCVAR_DECLARE(bool,em2_probe_online_local_movement);
+REXCVAR_DECLARE(bool,em2_probe_owned_native_player);
+REXCVAR_DEFINE_STRING(em2_room_probe_role,"","Debug","Private native Room loopback probe: host or guest; never a gameplay adapter");
+REXCVAR_DEFINE_STRING(em2_room_probe_invitation_file,"","Debug","Private native Room probe NEW absolute invitation path");
+REXCVAR_DEFINE_INT32(em2_room_probe_expected_players,2,"Debug","Private native Room probe transport participant count 2..16; not playable actor capacity");
+namespace em2::net {
+namespace {
+namespace fs=std::filesystem;
+using Clock=std::chrono::steady_clock;
+std::atomic<bool> prepared{false};
+struct Environment {unsigned csr=_mm_getcsr();DWORD error=GetLastError();~Environment(){_mm_setcsr(csr);SetLastError(error);}};
+struct Handle {HANDLE value=INVALID_HANDLE_VALUE;~Handle(){if(value!=INVALID_HANDLE_VALUE)CloseHandle(value);}};
+void Require(bool value,const char* why){if(!value)throw std::runtime_error(why);}
+bool Within(const fs::path& child,const fs::path& root){
+    auto c=child.begin();for(auto r=root.begin();r!=root.end();++r,++c)
+        if(c==child.end() || _wcsicmp(c->c_str(),r->c_str()))return false;
+    return true;
+}
+void NoReparse(const fs::path& path){
+    fs::path current;for(const auto& part:path){current/=part;
+        const auto attributes=GetFileAttributesW(current.c_str());
+        Require(attributes!=INVALID_FILE_ATTRIBUTES && !(attributes&FILE_ATTRIBUTE_REPARSE_POINT),"Private Room probe rejects missing or reparse path ancestors");
+    }
+}
+void PlainFile(HANDLE file){
+    FILE_ATTRIBUTE_TAG_INFO info{};
+    Require(GetFileInformationByHandleEx(file,FileAttributeTagInfo,&info,sizeof(info))!=0 &&
+        !(info.FileAttributes&(FILE_ATTRIBUTE_REPARSE_POINT|FILE_ATTRIBUTE_DIRECTORY)),"Private Room invitation must be an ordinary file");
+}
+bool MissingFile(const fs::path& file){const auto attributes=GetFileAttributesW(file.c_str());
+    if(attributes!=INVALID_FILE_ATTRIBUTES)return false;
+    const auto error=GetLastError();return error==ERROR_FILE_NOT_FOUND || error==ERROR_PATH_NOT_FOUND;
+}
+void StoreNewInvitation(const fs::path& path,const std::string& code){
+    const auto decoded=DecodeInvite(code);
+    Require(decoded && decoded->address=="127.0.0.1" && code.size()<=256,"Private Room host produced an invalid loopback invitation");
+    NoReparse(path.parent_path());
+    Handle file{CreateFileW(path.c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,CREATE_NEW,
+        FILE_ATTRIBUTE_NORMAL|FILE_FLAG_WRITE_THROUGH|FILE_FLAG_OPEN_REPARSE_POINT,nullptr)};
+    Require(file.value!=INVALID_HANDLE_VALUE,"Private Room host could not CREATE_NEW invitation; an existing file is never replaced");
+    PlainFile(file.value);DWORD written=0;
+    Require(WriteFile(file.value,code.data(),DWORD(code.size()),&written,nullptr)!=0 && written==code.size() && FlushFileBuffers(file.value),
+        "Private Room host could not finish its exact verified invitation");
+}
+std::optional<std::string> ReadInvitation(const fs::path& path){
+    Handle file{CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr)};
+    if(file.value==INVALID_HANDLE_VALUE){const auto error=GetLastError();
+        if(error==ERROR_FILE_NOT_FOUND || error==ERROR_PATH_NOT_FOUND || error==ERROR_SHARING_VIOLATION)return {};
+        throw std::runtime_error("Private Room guest cannot open invitation");
+    }
+    PlainFile(file.value);LARGE_INTEGER length{};
+    Require(GetFileSizeEx(file.value,&length) && length.QuadPart>0 && length.QuadPart<=256,"Private Room invitation has invalid size");
+    std::string code(size_t(length.QuadPart),'\0');DWORD got=0;
+    Require(ReadFile(file.value,code.data(),DWORD(code.size()),&got,nullptr) && got==code.size(),"Private Room invitation read was incomplete");
+    const auto decoded=DecodeInvite(code);
+    Require(decoded && decoded->address=="127.0.0.1","Private Room guest requires a checksum-valid numeric loopback invitation");
+    return code;
+}
+bool Readable(uint32_t pointer,size_t size,uint8_t* base){return base && pointer>=4096 && uint64_t(pointer)+size<=0x100000000ull && em2::GuestReadBatch::Readable(base+pointer,size);}
+bool ObserveReadiness(PPCContext& ctx,uint8_t* base){
+    Environment environment;
+    struct Context {PPCContext& ctx;std::array<uint8_t,sizeof(PPCContext)> bytes{};
+        explicit Context(PPCContext& value):ctx(value){std::memcpy(bytes.data(),&ctx,sizeof(ctx));}
+        ~Context(){std::memcpy(&ctx,bytes.data(),sizeof(ctx));}} context(ctx);
+    // Never assert readiness: the complete native actor/gameplay adapter is
+    // deliberately absent. These are completed-tick observations, not controls.
+    if(!prepared.load(std::memory_order_acquire) || GameplayInputGate().active() || !NativeRoomActive() || !em2::NativeCoopReady(base))return false;
+    static thread_local uint32_t observed_registry=0;
+    static thread_local Clock::time_point next{};
+    const auto now=Clock::now();if(now<next)return false;next=now+std::chrono::seconds(1);
+    if(!Readable(0x833DA7E4,4,base))return false;const auto registry=PPC_LOAD_U32(0x833DA7E4);
+    if(!registry || registry==observed_registry)return false;
+    std::array<NativeLocalMovementBinding,2> selected;
+    for(unsigned slot=0;slot<2;++slot){
+        struct Disarm {~Disarm(){DisarmNativeLocalJump();DisarmNativeLocalMovement();}} disarm;
+        NativeLocalMovementBinding movement;bool found=false;
+        for(unsigned device=0;device<4;++device){
+            DisarmNativeLocalMovement();
+            if(ArmNativeLocalMovement(1,registry,base,device,slot) && DiscoverNativeLocalMovementBinding(ctx,base,movement)){found=true;break;}
+        }
+        if(!found){const auto d=LocalMovementDiagnostics();
+            REXLOG_INFO("Private Room probe: co-op admitted; P{} Movement not yet eligible, stage {} inspect {} event {:08X} count {} index {}",slot,d.discovery_stage,d.discovery_inspect_stage,d.discovery_event,d.discovery_count,d.discovery_index);return false;}
+        NativeLocalJumpBinding jump;
+        if(!DiscoverNativeLocalJumpBinding(movement,ctx,base,jump)){
+            REXLOG_INFO("Private Room probe: P{} Movement lease eligible, native Jump pair not yet eligible; device {} action {:08X}",slot,movement.user,movement.action);return false;}
+        std::array<uint8_t,800> controller{};std::memcpy(controller.data(),base+movement.controller,controller.size());
+        std::array<uint8_t,sizeof(PPCContext)> incoming{};std::memcpy(incoming.data(),&ctx,sizeof(ctx));
+        RoomMovement neutral;NativeLocalJumpEvents events;
+        // Temporary private math-stream incarnation ONLY. No command, event,
+        // spawn incarnation or readiness assertion is sent to the Room.
+        const uint64_t diagnostic_epoch=0x50524F4245000000ull+slot+1;
+        const bool math=ProduceNativeLocalRoomMovement(movement,{},diagnostic_epoch,ctx,base,neutral,movement.user) &&
+            neutral.x==0 && neutral.y==0 && ArmNativeLocalJump(jump,diagnostic_epoch,0,ctx,base) &&
+            ProduceNativeLocalJump(jump,{},diagnostic_epoch,0,ctx,base,events,movement.user) && events.count==0 && events.button_mask==jump.button_mask;
+        if(!math || std::memcmp(controller.data(),base+movement.controller,controller.size()) || std::memcmp(incoming.data(),&ctx,sizeof(ctx))){
+            REXLOG_ERROR("Private Room probe: P{} neutral ORIGINAL math/preservation failed; no command dispatched or submitted",slot);return false;}
+        const auto diagnostics=LocalMovementDiagnostics();
+        if(diagnostics.observations || diagnostics.captured){REXLOG_ERROR("Private Room probe: unexpected natural-capture provenance during P{} read-only discovery",slot);return false;}
+        selected[slot]=movement;
+        REXLOG_INFO("Private Room probe P{} eligible: entity {:08X}, controller {:08X}, listener {:08X}, Movement event/action {:08X}/{:08X}, logical user {}, native device {}, profile/user object {:08X}/{:08X}, reference {:08X}, forward {},{}; Jump/Release {:08X}/{:08X}, mask {:04X}; prior observations {} captures {}; neutral original math only",
+            slot,movement.entity,movement.controller,movement.listener,movement.event,movement.action,movement.logical_user,movement.user,movement.profile,movement.user_object,movement.reference,neutral.forward_x,neutral.forward_z,
+            jump.actions[0].action,jump.actions[1].action,jump.button_mask,diagnostics.observations,diagnostics.captured);
+    }
+    if(selected[0].entity==selected[1].entity)return false;
+    observed_registry=registry;
+    REXLOG_INFO("Private Room probe SUCCESS: real native co-op ready; BOTH retail slots independently discovered and neutral-evaluated with their own native references; P0/P1 handles {:08X}/{:08X}, native devices {}/{}; no source routing, events or network commands submitted; gameplay-ready vote remains FALSE",
+        selected[0].handle,selected[1].handle,selected[0].user,selected[1].user);
+    return false;
+}
+}
+bool PreparePrivateRoomProbe(const fs::path& executable,const fs::path& content,fs::path& user_data){
+    Environment environment;
+    const auto role=REXCVAR_GET(em2_room_probe_role);if(role.empty())return true;
+    OnlineRoomBoot boot;
+    try{
+        Require(!prepared.load() && (role=="host" || role=="guest"),"Private Room probe role must be host or guest and prepared once");
+        const auto count=REXCVAR_GET(em2_room_probe_expected_players);
+        Require(count>=2 && count<=16,"Private Room probe expects 2..16 transport participants");
+        Require(REXCVAR_GET(em2_private_profile) && !REXCVAR_GET(em2_user_data_directory).empty(),"Private Room probe requires private_profile and explicit isolated user root");
+        Require(REXCVAR_GET(em2_online_auto_continue),"Private Room probe requires native online automatic Continue enabled");
+        Require(!REXCVAR_GET(em2_online_menu) && !REXCVAR_GET(em2_online_qa_prelaunch) && REXCVAR_GET(em2_online_qa_role).empty() &&
+            REXCVAR_GET(em2_native_lobby_qa_role).empty() && !REXCVAR_GET(em2_open_native_online_menu) &&
+            !REXCVAR_GET(em2_probe_online_local_movement) && !REXCVAR_GET(em2_probe_owned_native_player) &&
+            !LegacyNativeSessionActive() && !NativeRoomActive(),"Private Room probe cannot overlap legacy QA, menus, native actor/input probes or session ownership");
+        Require(executable.is_absolute() && content.is_absolute() && user_data.is_absolute(),"Private Room probe paths must be absolute");
+        NoReparse(user_data);NoReparse(fs::path(REXCVAR_GET(em2_user_data_directory)));NoReparse(content);NoReparse(executable.parent_path());
+        const auto program=fs::canonical(executable),assets=fs::canonical(content),user=fs::canonical(user_data);
+        Require(_wcsicmp(program.filename().c_str(),L"beetleworx.exe")==0 && program.parent_path().filename()==L"runtime23" && program.parent_path().parent_path().filename()==L"build",
+            "Private Room probe requires the canonical build/runtime23/beetleworx.exe");
+        std::array<wchar_t,32768> running{};const auto length=GetModuleFileNameW(nullptr,running.data(),DWORD(running.size()));
+        Require(length && length<running.size() && _wcsicmp(program.c_str(),fs::canonical(fs::path(running.data())).c_str())==0,
+            "Private Room probe executable path must match this running executable");
+        const auto analysis=fs::canonical(program.parent_path().parent_path().parent_path()/"analysis");
+        Require(user.filename()==L"user_data" && user!=analysis && Within(user,analysis) && fs::canonical(REXCVAR_GET(em2_user_data_directory))==user,
+            "Private Room probe source must be an explicit existing private analysis user_data copy");
+        NoReparse(user);NoReparse(assets);NoReparse(program.parent_path());
+        const auto target=user/"room-session";
+        Require(MissingFile(target),"Private Room probe refuses an existing room-session destination");
+        const auto configured=fs::path(REXCVAR_GET(em2_room_probe_invitation_file));
+        Require(configured.is_absolute() && !configured.filename().empty(),"Private Room probe requires explicit absolute invitation file");
+        const auto leaf=configured.filename().wstring();
+        Require(leaf!=L"." && leaf!=L".." && leaf.size()<=128 && leaf.find(L':')==std::wstring::npos && leaf.find(L'\0')==std::wstring::npos,
+            "Private Room invitation needs a plain bounded filename without alternate streams");
+        NoReparse(configured.parent_path());const auto parent=fs::canonical(configured.parent_path());NoReparse(parent);
+        Require(Within(parent,analysis),"Private Room invitation must stay inside private analysis roots");
+        const auto invitation=parent/configured.filename();
+        Require(invitation!=target && !Within(invitation,target) && !Within(invitation,user/"42560816"),"Private Room invitation cannot overwrite source/session campaign files");
+        BootPaths paths{program,assets,target};paths.startup_policy=StartupPolicy::NativeMenu;
+        // Share only the existing worker's verified content cache between the
+        // private peers. FingerprintProgram still validates its complete key;
+        // this never substitutes caller-supplied hashes or skips verification.
+        NoReparse(analysis);
+        const auto cache=analysis/"room-probe-content-identity.bin";
+        Require(!Within(cache,assets) && !Within(cache,user),"Private Room identity cache must stay outside content and user data");
+        const auto cache_attributes=GetFileAttributesW(cache.c_str());
+        if(cache_attributes!=INVALID_FILE_ATTRIBUTES){
+            Require(!(cache_attributes&(FILE_ATTRIBUTE_REPARSE_POINT|FILE_ATTRIBUTE_DIRECTORY)),
+                "Private Room identity cache must be an ordinary file");
+            NoReparse(cache);
+        }else{
+            const auto cache_error=GetLastError();
+            Require(cache_error==ERROR_FILE_NOT_FOUND || cache_error==ERROR_PATH_NOT_FOUND,
+                "Private Room identity cache path could not be validated");
+        }
+        paths.content_identity_cache=cache;
+        if(role=="host"){
+            Require(MissingFile(invitation),"Private Room host invitation already exists; never replacing it");
+            const auto source=user/"42560816";NoReparse(source);Require(fs::is_directory(source),"Private Room host requires an already isolated campaign copy");
+            Require(boot.Host(paths,source,"127.0.0.1","127.0.0.1",uint8_t(count),"Room probe host"),"Private Room host preparation rejected");
+        }else{
+            const auto deadline=Clock::now()+std::chrono::seconds(180);std::optional<std::string> code;
+            auto next_wait_log=Clock::now();
+            while(Clock::now()<deadline){code=ReadInvitation(invitation);if(code)break;
+                if(Clock::now()>=next_wait_log){REXLOG_INFO("Private Room guest waiting for NEW loopback invitation {}",invitation.string());next_wait_log=Clock::now()+std::chrono::seconds(5);}
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));}
+            Require(bool(code),"Private Room guest invitation wait exceeded 180 seconds");
+            Require(boot.Join(paths,*code,"Room probe guest "+std::to_string(GetCurrentProcessId())),"Private Room guest preparation rejected");
+        }
+        REXLOG_INFO("Private Room probe {} preparing verified build/content and NEW isolated shared save {}; loopback only, no gameplay adapter",role,target.string());
+        const auto deadline=Clock::now()+std::chrono::seconds(180);auto next_log=Clock::now();bool published=false,ready=false,started=false;
+        while(Clock::now()<deadline){
+            boot.Poll();const auto status=boot.status();
+            Require(status.state!=BootState::Failed && status.state!=BootState::Cancelled && status.state!=BootState::Cancelling,
+                status.error.empty()?"Private Room preparation cancelled":status.error.c_str());
+            if(role=="host" && !published && !status.invitation.empty()){StoreNewInvitation(invitation,status.invitation);published=true;
+                REXLOG_INFO("Private Room host published the exact verified encoded invitation to NEW {}",invitation.string());}
+            // A later roster Join invalidates every ready vote. Wait until the
+            // exact requested roster is present before voting, including >2.
+            if(!ready && status.state==BootState::Ready && boot.room_state()==RoomState::Lobby &&
+                boot.lobby().players.size()==size_t(count) && !boot.profile_pending()){
+                Require(boot.SetReady(true),"Private Room local installed checkpoint could not Ready");ready=true;}
+            if(role=="host" && !started && boot.lobby().players.size()==size_t(count) && boot.CanStart()){
+                Require(boot.StartNativeBootstrap(),"Private Room host could not start native bootstrap");started=true;}
+            if(auto result=boot.TakeStarted()){
+                Require(result->room && result->room->native_bootstrap() && result->room->lobby().players.size()==size_t(count),"Private Room frozen roster/mode does not match requested diagnostic");
+                Require(AdoptNativeRoom(result->room,0),"Private Room native runtime refused frozen session ownership");
+                if(!StartNativeRoomPrelaunchPolling()){ReleaseNativeRoomSession();throw std::runtime_error("Private Room could not start retained prelaunch polling");}
+                user_data=result->user_data;prepared.store(true,std::memory_order_release);
+                REXLOG_INFO("Private Room probe {} adopted real frozen native bootstrap; private Runtime user root {}",role,user_data.string());return true;
+            }
+            if(Clock::now()>=next_log){const auto progress=boot.checkpoint_progress();size_t installed=0;for(const auto& peer:progress)installed+=peer.installed;
+                REXLOG_INFO("Private Room probe {} waiting: phase {} preparation {} peers {}/{} checkpoint-installed {}",role,int(status.state),int(status.preparation),boot.lobby().players.size(),count,installed);next_log=Clock::now()+std::chrono::seconds(5);}
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        throw std::runtime_error("Private Room verified startup exceeded 180 seconds");
+    }catch(const std::exception& error){boot.Cancel();REXLOG_ERROR("Private Room probe preparation failed: {}",error.what());return false;}
+}
+bool InstallPrivateRoomProbe(){
+    Environment environment;if(REXCVAR_GET(em2_room_probe_role).empty())return true;
+    if(!prepared.load(std::memory_order_acquire) || !NativeRoomActive() || !SetNativeRoomReadinessProbe(ObserveReadiness)){
+        REXLOG_ERROR("Private Room probe could not install completed-tick observer on its bound native owner");return false;}
+    REXLOG_INFO("Private Room probe installed: completed-tick observation only; gameplay readiness is NEVER asserted");return true;
+}
+}

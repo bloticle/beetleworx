@@ -13,7 +13,7 @@ from pathlib import Path
 from live_guest_base import resolve_guest_base
 
 
-def inspect(capture, include_components=False, include_input=False):
+def inspect(capture, include_components=False, include_input=False, include_initialization=False):
     meta = json.loads((capture / 'process.json').read_text(encoding='utf-8-sig'))
     kernel = c.WinDLL('kernel32', use_last_error=True)
     kernel.OpenProcess.argtypes = [c.c_uint32, c.c_bool, c.c_uint32]
@@ -69,6 +69,25 @@ def inspect(capture, include_components=False, include_input=False):
 
         def text(address):
             return read(address, 96).split(b'\0', 1)[0].decode('ascii')
+
+        if include_initialization:
+            before = read(0x833D0098, 0x324)
+            count = read(0x833D03B8, 1)[0]
+            if count > 32:
+                raise RuntimeError('Native initialization module count exceeds its 32-record table')
+            modules = []
+            for index in range(count):
+                record = 0x833D00B8 + index * 24
+                name, init, deps = word(record), word(record + 8), word(record + 4)
+                modules.append(dict(index=index, name=text(name) if name else None,
+                                    initializer=f'{init:08X}', dependencies=text(deps) if deps else None,
+                                    record=read(record, 24).hex()))
+            return dict(mode='ReadProcessMemory only; native initialization, no execution or input',
+                        stable=before == read(0x833D0098, 0x324), prefab_names={}, actors=[],
+                        module_count=count, initialized_count=read(0x833D03B9, 1)[0],
+                        initialization_enabled=read(0x833D03BA, 1)[0],
+                        order=list(read(0x833D0098, count)), modules=modules,
+                        component_registry=f'{word(0x833DBAF4):08X}')
 
         def controller_tasks(basic, entity):
             # ORIGINAL Basic constructor827863D8: action collection+140.
@@ -354,8 +373,9 @@ if __name__ == '__main__':
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--include-components', action='store_true')
     parser.add_argument('--include-input', action='store_true')
+    parser.add_argument('--include-initialization', action='store_true')
     args = parser.parse_args()
-    result = inspect(args.capture, args.include_components, args.include_input)
+    result = inspect(args.capture, args.include_components, args.include_input, args.include_initialization)
     with args.output.open('x', encoding='utf-8') as output:
         output.write(json.dumps(result, indent=2, allow_nan=False) + '\n')
     print(json.dumps(dict(output=str(args.output), stable=result['stable'], prefabs=result['prefab_names'], actors=result['actors'])))

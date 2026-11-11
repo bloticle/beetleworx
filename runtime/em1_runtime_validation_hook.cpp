@@ -187,6 +187,7 @@ REXCVAR_DEFINE_BOOL(em1_registry_roundtrip,false,"Debug",
     "Developer baseline: parse initial retail level registry from an identical owned buffer");
 REXCVAR_DEFINE_STRING(em1_register_level,"","Debug","Original EM1 .level entry to register during initial native registry loading");
 PPC_EXTERN_FUNC(__imp__sub_827CCE50);
+#include "online_room_init_trace.h"
 PPC_EXTERN_FUNC(__imp__sub_832187A8);
 PPC_FUNC_IMPL(sub_832187A8){
     const bool observe=em2::em1::RegisteredLevelEntryProbeRequested();
@@ -200,7 +201,9 @@ PPC_FUNC_IMPL(sub_832187A8){
 }
 // Reserve new type slots before any entity allocates its fixed-size type cache.
 PPC_FUNC_IMPL(sub_827CCE50){
+    em2::net::TraceNativeRoomComponentRegistry(ctx,base,"registry-before");
     __imp__sub_827CCE50(ctx,base);
+    em2::net::TraceNativeRoomComponentRegistry(ctx,base,"registry-after-original");
     const auto saved=ctx;const auto error=GetLastError();const auto csr=_mm_getcsr();
     if(!REXCVAR_GET(em1_register_level).empty() || em2::em1::CurrentLevelCatalog()){
         const auto capacity=PPC_LOAD_U8(0x833DBAF1);
@@ -208,6 +211,7 @@ PPC_FUNC_IMPL(sub_827CCE50){
         else REXLOG_ERROR("[em1] native component type capacity cannot fit original EM1 adapters");
     }
     ctx=saved;SetLastError(error);_mm_setcsr(csr);
+    em2::net::TraceNativeRoomComponentRegistry(ctx,base,"registry-after-capacity");
 }
 PPC_EXTERN_FUNC(__imp__sub_82797910);
 namespace {

@@ -1,6 +1,7 @@
 #include "guest_read_batch.h"
 #include "online_selector.h"
 #include "online.h"
+#include "simulation.h"
 #include <rex/logging.h>
 #include <rex/cvar.h>
 REXCVAR_DECLARE(bool,em2_trace_online_observations);
@@ -453,9 +454,10 @@ void em2::net::RunCanonicalPerception(PPCContext& ctx,uint8_t* base){
         if(has_work)valid=targets.Build(reader,ctx.r3.u32);
     }
     if(!has_work){__imp__sub_829505C0(ctx,base);return;}
-    if(REXCVAR_GET(em2_trace_online_observations) && GameplayInputGate().committed_tick()<4){
+    uint64_t trace_tick=0;
+    if(REXCVAR_GET(em2_trace_online_observations) && em2::CurrentAgreedSimulationTick(trace_tick) && trace_tick<4){
         HostState host;std::string ids;for(size_t i=0;i<std::min<size_t>(targets.entries.size(),64);++i){const auto& id=targets.entries[i].id;ids+=fmt::format("{:08X}{:08X}{:08X}{:08X} ",id[0],id[1],id[2],id[3]);}
-        REXLOG_INFO("Canonical perception order: tick {}, selector {:08X}, valid {}, reordered {}, targets {}, ids {}",GameplayInputGate().committed_tick(),ctx.r3.u32,valid,targets.reorder,targets.entries.size(),ids);
+        REXLOG_INFO("Canonical perception order: tick {}, selector {:08X}, valid {}, reordered {}, targets {}, ids {}",trace_tick,ctx.r3.u32,valid,targets.reorder,targets.entries.size(),ids);
     }
     if(!valid || !targets.reorder){__imp__sub_829505C0(ctx,base);return;}
     CanonicalBody(ctx,base,targets);

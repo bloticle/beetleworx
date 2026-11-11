@@ -54,8 +54,9 @@ bool TestRoomBootstrapGate(){
     auto unchanged=[&](uint64_t generation,const Frame& expected){uint64_t actual=0;Frame frame;
         return em2::ReadPublishedSynchronizedControls(actual,frame) && actual==generation && frame==expected;};
     if(!check(setup(),"three real TCP peers enter SharedNativeV1 bootstrap and only host acquires native controls"))return false;
-    if(!check(RoomBootstrapActive() && gate.active() && !em2::BeginSynchronizedControls(100),
-        "one native owner excludes a second controls lease"))return false;
+    if(!check(RoomBootstrapActive() && gate.active() && gate.Owns(*rooms[0]) && !gate.Owns(*rooms[1]) &&
+        !em2::BeginSynchronizedControls(100),
+        "one native owner excludes a second controls lease and distinguishes its actual Room"))return false;
     {uint64_t absent_generation=0;Frame absent;
         if(!check(!gate.PublishedRetailFrame(absent_generation,absent) && !em2::ReadPublishedSynchronizedControls(absent_generation,absent),
             "attachment alone cannot expose an unpublished retail controller frame"))return false;

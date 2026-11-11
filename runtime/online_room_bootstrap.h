@@ -30,6 +30,9 @@ public:
     bool Complete(bool ready_for_gameplay,const std::array<uint8_t,32>& observation_digest);
     bool PublishedRetailFrame(uint64_t& generation,Frame&)const;
     bool active()const{return active_.load(std::memory_order_acquire);}
+    // Owner-thread identity check for completed-boundary adapters; no transfer
+    // of transport or controller ownership is implied.
+    bool Owns(const Room& room)const{return OnOwnerThread() && active() && room_==&room;}
     bool completion_pending()const{return completion_pending_;}
     uint64_t committed_tick()const{return committed_tick_;}
     bool joining()const{return joining_;}

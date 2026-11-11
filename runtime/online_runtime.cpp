@@ -1,5 +1,7 @@
 #include "online_runtime.h"
 #include "online_room_bootstrap.h"
+#include "online_room_runtime.h"
+#include "online_room_probe.h"
 #include "online_continue.h"
 #include "online_uuid.h"
 #include "online_world_random.h"
@@ -86,8 +88,9 @@ bool PollLoadingAt(std::chrono::steady_clock::time_point now) {
     return true;
 }
 }
-bool PollNativeOnlineLoading(){return PollLoadingAt(std::chrono::steady_clock::now());}
+bool PollNativeOnlineLoading(){return NativeRoomActive()?PollNativeRoomLoading():PollLoadingAt(std::chrono::steady_clock::now());}
 bool PrepareNativeOnlineWorldRandom(std::string_view destination){
+    if(NativeRoomActive())return RoomPrepareWorldRandom(destination);
     auto& owner=RuntimeOwner();
     const auto seed=owner.initialization.World(destination);if(!seed)return false;
     em2::BeginNativeOnlineWorldRandom(seed->value);
@@ -96,6 +99,7 @@ bool PrepareNativeOnlineWorldRandom(std::string_view destination){
     return true;
 }
 bool PrepareNativeOnlinePlayerRandom(uint32_t slot,uint32_t mode){
+    if(NativeRoomActive())return RoomPreparePlayerRandom(slot,mode);
     auto& owner=RuntimeOwner();
     // 8276A828 selects the authoritative native prefab from slot/mode; these
     // are identical on both copies and do not mean the locally owned wire lane.
@@ -108,8 +112,12 @@ bool PrepareNativeOnlinePlayerRandom(uint32_t slot,uint32_t mode){
     try{REXLOG_INFO("Native online player initialization: slot {}, mode {}, sequence {}, thread {}, seed {:08X}",slot,mode,seed->sequence,GetCurrentThreadId(),seed->value);}catch(...){}
     return true;
 }
-bool BindNativeOnlineThread(){auto& owner=RuntimeOwner();return owner.session && ClaimOwnerThread(owner);}
+bool BindNativeOnlineThread(){
+    if(NativeRoomActive())return BindNativeRoomThread() && InstallPrivateRoomProbe();
+    auto& owner=RuntimeOwner();return owner.session && ClaimOwnerThread(owner);
+}
 bool StartNativeOnlinePrelaunchPolling() {
+    if(NativeRoomActive())return StartNativeRoomPrelaunchPolling();
     auto& owner=RuntimeOwner();
     if(!owner.session || owner.thread.load(std::memory_order_acquire) || owner.prelaunch.joinable() ||
         NativeOnlineStatus().state!=NativeSessionState::WaitingForWorld)return false;
@@ -126,7 +134,7 @@ bool StartNativeOnlinePrelaunchPolling() {
 }
 bool AdoptNativeOnlineSession(std::unique_ptr<Session>& ready,unsigned device) {
     auto& owner=RuntimeOwner();
-    if(!ready || ready->state()!=State::Ready || device>=2 || owner.session || GameplayInputGate().active() || RoomBootstrapActive())return false;
+    if(!ready || ready->state()!=State::Ready || device>=2 || owner.session || GameplayInputGate().active() || RoomBootstrapActive() || NativeRoomActive())return false;
     if(!owner.initialization.Arm(ready->identity()))return false;
     owner.session=std::move(ready);owner.device=device;owner.preparing=owner.attached=owner.menu_preparation=false;
     owner.thread.store(0,std::memory_order_release);
@@ -171,14 +179,17 @@ void FailNativeOnlineMenuPreparation(const std::string& error){
     if(owner.menu_preparation && owner.thread.load()==GetCurrentThreadId())owner.Fail(error);
 }
 NativeSessionStatus NativeOnlineStatus() {
+    if(NativeRoomActive())return NativeRoomStatus();
     auto& owner=RuntimeOwner();std::lock_guard lock(owner.status_mutex);return owner.status;
 }
 bool ClaimNativeOnlineProfile(unsigned& device) {
+    if(NativeRoomActive())return RoomClaimProfile(device);
     auto& owner=RuntimeOwner();std::lock_guard lock(owner.status_mutex);
     if(owner.status.state!=NativeSessionState::WaitingForWorld || owner.profile_claimed || owner.menu_preparation)return false;
     owner.profile_claimed=true;device=owner.device;return true;
 }
 void FinishNativeOnlineProfile(bool accepted) {
+    if(NativeRoomActive()){RoomFinishProfile(accepted);return;}
     auto& owner=RuntimeOwner();std::lock_guard lock(owner.status_mutex);
     if(owner.status.state==NativeSessionState::WaitingForWorld){
         if(accepted)owner.status.profile_requested=true;
@@ -186,6 +197,7 @@ void FinishNativeOnlineProfile(bool accepted) {
     }
 }
 bool ClaimNativeOnlineSaveNotice(){
+    if(NativeRoomActive())return RoomClaimSaveNotice();
     if(!REXCVAR_GET(em2_online_auto_continue))return false;
     auto& owner=RuntimeOwner();std::lock_guard lock(owner.status_mutex);
     if(owner.status.state!=NativeSessionState::WaitingForWorld || !owner.status.profile_requested || owner.status.continue_requested || owner.status.save_notice_requested)return false;
@@ -193,11 +205,13 @@ bool ClaimNativeOnlineSaveNotice(){
     REXLOG_INFO("Online startup authorized native existing-save autosave notice confirmation");return true;
 }
 bool ClaimNativeOnlineContinue() {
+    if(NativeRoomActive())return RoomClaimContinue();
     auto& owner=RuntimeOwner();std::lock_guard lock(owner.status_mutex);
     if(owner.status.state!=NativeSessionState::WaitingForWorld || owner.continue_claimed || owner.menu_preparation)return false;
     owner.continue_claimed=true;return true;
 }
 void FinishNativeOnlineContinue(bool accepted) {
+    if(NativeRoomActive()){RoomFinishContinue(accepted);return;}
     auto& owner=RuntimeOwner();std::lock_guard lock(owner.status_mutex);
     if(owner.status.state==NativeSessionState::WaitingForWorld) {
         if(accepted){
@@ -211,14 +225,16 @@ void FinishNativeOnlineContinue(bool accepted) {
     }
 }
 NativeSessionTiming NativeOnlineTiming() {
+    if(NativeRoomActive())return NativeRoomTiming();
     auto& owner=RuntimeOwner();std::lock_guard lock(owner.status_mutex);
     return {owner.status.state!=NativeSessionState::None || RoomBootstrapActive(),owner.status.state==NativeSessionState::Failed || RoomBootstrapHalted()};
 }
 bool LegacyNativeSessionActive() noexcept {
     return retained_session_active.load(std::memory_order_acquire) || GameplayInputGate().active();
 }
-bool SynchronizedSessionActive() noexcept {return LegacyNativeSessionActive() || RoomBootstrapActive();}
+bool SynchronizedSessionActive() noexcept {return LegacyNativeSessionActive() || NativeRoomActive() || RoomBootstrapActive();}
 bool UpdateNativeOnlineSession(uint8_t* base,bool advance_world) {
+    if(NativeRoomActive())return UpdateNativeRoomSession(base,advance_world);
     auto& owner=RuntimeOwner();if(!owner.session)return false;
     if(!ClaimOwnerThread(owner))return true;
     struct Restore {unsigned csr=_mm_getcsr();~Restore(){_mm_setcsr(csr);}} restore;
@@ -260,9 +276,11 @@ bool UpdateNativeOnlineSession(uint8_t* base,bool advance_world) {
     return true;
 }
 void ReleaseNativeOnlineSession() {
+    ReleaseNativeRoomSession();
     auto& owner=RuntimeOwner();if(!owner.session)return;
     owner.StopPrelaunch();
     if(owner.attached)GameplayInputGate().Detach();
+    else em2::EndNativeOnlineRandom();
     SetOnlineJoinControls(false);owner.session->Disconnect();owner.session.reset();
     owner.preparing=owner.attached=owner.continue_claimed=owner.profile_claimed=owner.menu_preparation=false;owner.Publish(NativeSessionState::None);
     retained_session_active.store(false,std::memory_order_release);

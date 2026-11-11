@@ -1,6 +1,7 @@
 #include "online_local_movement.h"
 #include "online.h"
 #include "online_movement_frame.h"
+#include "online_local_source.h"
 #include "guest_read_batch.h"
 #include "ppc_context.h"
 #include <rex/logging.h>
@@ -29,7 +30,7 @@ PPC_EXTERN_FUNC(__imp__sub_82783208);
 PPC_EXTERN_FUNC(__imp__sub_827CA160);
 namespace {
 using Binding=em2::net::NativeLocalMovementBinding;
-struct Owner {uint64_t epoch=0,generation=0;uint32_t registry=0;DWORD thread=0;unsigned user=0;};
+struct Owner {uint64_t epoch=0,generation=0;uint32_t registry=0;DWORD thread=0;unsigned user=0,retail_slot=0;};
 thread_local Owner owner;
 thread_local Binding latest;
 thread_local em2::net::NativeLocalMovementDiagnostics diagnostics;
@@ -81,13 +82,14 @@ bool Inspect(Binding& b,PPCContext& ctx,uint8_t* base){
     em2::GuestReadBatch reads;
     diagnostics.stage=10;
     if(!owner.epoch || owner.thread!=GetCurrentThreadId() || b.world_epoch!=owner.epoch ||
-       b.producer_generation!=owner.generation || b.registry!=owner.registry ||
+       b.producer_generation!=owner.generation || b.registry!=owner.registry || b.retail_slot!=owner.retail_slot || b.retail_slot>1 ||
        !Readable(0x833DA7E4,4,base) || PPC_LOAD_U32(0x833DA7E4)!=b.registry ||
        !Readable(b.registry,24,base) || !Readable(0x833DBAD8,4,base) ||
        PPC_LOAD_U32(0x833DBAD8)!=b.manager || !Readable(b.manager,76,base))return false;
     diagnostics.stage=20;b.player_manager=PPC_LOAD_U32(0x833DAB60);
     if(!Readable(b.player_manager,640,base))return false;
-    b.handle=PPC_LOAD_U32(b.player_manager+20);if(!b.handle)return false;
+    const auto record=b.player_manager+b.retail_slot*320;
+    b.handle=PPC_LOAD_U32(record+20);if(!b.handle || PPC_LOAD_U32(record+32)!=0)return false;
     {
         Scratch scratch(ctx,base);if(!scratch.memory)return false;
         const auto key=scratch.stack+512;PPC_STORE_U32(key,b.handle);
@@ -106,8 +108,8 @@ bool Inspect(Binding& b,PPCContext& ctx,uint8_t* base){
        PPC_LOAD_U32(0x8211DCD0)!=0x82A3C930 || PPC_LOAD_U32(b.controller+64)!=b.entity-8)return false;
     diagnostics.stage=40;
     if(!Readable(b.action,436,base) || !Readable(b.event,24,base) ||
-       !Readable(0x833DAEB8,4,base) || !PPC_LOAD_U32(0x833DAEB8) ||
-       PPC_LOAD_U32(b.action)!=PPC_LOAD_U32(0x833DAEB8) ||
+       !Readable(0x833DAEB8+b.retail_slot*12,4,base) || !PPC_LOAD_U32(0x833DAEB8+b.retail_slot*12) ||
+       PPC_LOAD_U32(b.action)!=PPC_LOAD_U32(0x833DAEB8+b.retail_slot*12) ||
        PPC_LOAD_U32(b.action+80)!=4 || PPC_LOAD_U32(b.action+408)!=2 ||
        PPC_LOAD_U32(b.action+412)!=0)return false; // Modifier conditions need their own producer proof.
     b.movement_uid=PPC_LOAD_U32(b.action);
@@ -210,11 +212,11 @@ bool Math(const Binding& binding,const std::array<float,2>& axes,PPCContext& ctx
 }
 }
 PPC_FUNC_IMPL(sub_827C3030){if(!Override(ctx))__imp__sub_827C3030(ctx,base);}
-bool em2::net::ArmNativeLocalMovement(uint64_t epoch,uint32_t registry,uint8_t* base,unsigned selected_user){
+bool em2::net::ArmNativeLocalMovement(uint64_t epoch,uint32_t registry,uint8_t* base,unsigned selected_user,unsigned retail_slot){
     Environment preserve;
-    if(!epoch || selected_user>3 || query || owner.generation==UINT64_MAX || !Readable(0x833DA7E4,4,base) ||
+    if(!epoch || selected_user>3 || retail_slot>1 || query || owner.generation==UINT64_MAX || !Readable(0x833DA7E4,4,base) ||
        !registry || PPC_LOAD_U32(0x833DA7E4)!=registry)return false;
-    owner={epoch,owner.generation+1,registry,GetCurrentThreadId(),selected_user};latest={};diagnostics={};return true;
+    owner={epoch,owner.generation+1,registry,GetCurrentThreadId(),selected_user,retail_slot};latest={};diagnostics={};return true;
 }
 void em2::net::DisarmNativeLocalMovement(){const auto generation=owner.generation;owner={};owner.generation=generation;latest={};}
 bool em2::net::CaptureNativeLocalMovementBinding(PPCContext& ctx,uint8_t* base,Binding& output){
@@ -222,6 +224,7 @@ bool em2::net::CaptureNativeLocalMovementBinding(PPCContext& ctx,uint8_t* base,B
     diagnostics.stage=1;
     if(query || ctx.lr!=0x827C439C || GameplayInputGate().active() || !Readable(0x833DBAD8,4,base))return false;
     Binding b;b.world_epoch=owner.epoch;b.producer_generation=owner.generation;b.registry=owner.registry;
+    b.retail_slot=owner.retail_slot;
     b.manager=PPC_LOAD_U32(0x833DBAD8);b.listener=ctx.r3.u32;b.event=ctx.r4.u32;b.action=ctx.r5.u32;
     if(!Inspect(b,ctx,base))return false;output=b;return true;
 }
@@ -251,14 +254,15 @@ bool em2::net::DiscoverNativeLocalMovementBinding(PPCContext& ctx,uint8_t* base,
     stage(203);if(query)return false;
     stage(204);if(GameplayInputGate().active())return false;
     stage(205);if(!Readable(0x833DA7E4,4,base) || PPC_LOAD_U32(0x833DA7E4)!=owner.registry)return false;
-    stage(206);if(!Readable(0x833DAB60,4,base) || !Readable(0x833DBAD8,4,base) || !Readable(0x833DAEB8,4,base))return false;
+    const auto movement_global=0x833DAEB8+owner.retail_slot*12;
+    stage(206);if(!Readable(0x833DAB60,4,base) || !Readable(0x833DBAD8,4,base) || !Readable(movement_global,4,base))return false;
     const auto players=PPC_LOAD_U32(0x833DAB60),manager=PPC_LOAD_U32(0x833DBAD8);
     stage(207);if(!Readable(players,640,base))return false;
     stage(208);if(!Readable(manager,76,base))return false;
     uint32_t entity=0,active=0;
     {
         stage(209);Scratch scratch(ctx,base);if(!scratch.memory)return false;
-        const auto key=scratch.stack+512;PPC_STORE_U32(key,PPC_LOAD_U32(players+20));
+        const auto key=scratch.stack+512;PPC_STORE_U32(key,PPC_LOAD_U32(players+20+owner.retail_slot*320));
         stage(210);if(!Readable(owner.registry,24,base))return false;
         ctx.r3.u64=owner.registry;ctx.r4.u64=key;__imp__sub_82732A18(ctx,base);entity=ctx.r3.u32;
         const auto count=PPC_LOAD_U32(manager+8),events=PPC_LOAD_U32(manager+4);
@@ -292,8 +296,9 @@ bool em2::net::DiscoverNativeLocalMovementBinding(PPCContext& ctx,uint8_t* base,
             diagnostics.action=action;
             if(!Readable(action,4,base))return false;
             diagnostics.discovery_uid=PPC_LOAD_U32(action);
-            if(diagnostics.discovery_uid!=PPC_LOAD_U32(0x833DAEB8))continue;
+            if(diagnostics.discovery_uid!=PPC_LOAD_U32(movement_global))continue;
             Binding b;b.world_epoch=owner.epoch;b.producer_generation=owner.generation;b.registry=owner.registry;
+            b.retail_slot=owner.retail_slot;
             b.manager=manager;b.listener=face+56;b.event=event;b.action=action;
             // Every candidate must pass precisely the same live lease checks.
             // Multiple valid default/current routes are deliberately ambiguous.
@@ -305,18 +310,19 @@ bool em2::net::DiscoverNativeLocalMovementBinding(PPCContext& ctx,uint8_t* base,
     stage(224);if(candidates!=1){latest={};return false;}
     latest=selected;output=selected;stage(225);return true;
 }
-bool em2::net::ProduceNativeLocalMovement(const Binding& binding,const Pad& pad,PPCContext& ctx,uint8_t* base,NativeActorAction& output,unsigned sampled_user){
-    Environment preserve;output={};if(query || sampled_user!=owner.user || sampled_user!=binding.user || GameplayInputGate().active())return false;
+namespace {
+bool MovementMath(const Binding& binding,const em2::net::Pad& pad,PPCContext& ctx,uint8_t* base,em2::net::NativeActorAction& output){
+    output={};if(query || em2::net::GameplayInputGate().active())return false;
     auto current=binding;if(!Inspect(current,ctx,base) || current!=binding || !Readable(0x833B65FC,4,base))return false;
     const auto deadzone=Float(0x833B65FC,base);if(!std::isfinite(deadzone) || deadzone<0 || deadzone>=1)return false;
     return Math(binding,{Axis(pad.left_x,false,deadzone),Axis(pad.left_y,true,deadzone)},ctx,base,output);
 }
-bool em2::net::ProduceNativeLocalRoomMovement(const Binding& binding,const Pad& pad,uint64_t actor_epoch,
-    PPCContext& ctx,uint8_t* base,RoomMovement& output,unsigned sampled_user){
-    Environment preserve;output={};
+bool RoomMath(const Binding& binding,const em2::net::Pad& pad,uint64_t actor_epoch,
+    PPCContext& ctx,uint8_t* base,em2::net::RoomMovement& output){
+    using namespace em2::net;output={};
     if(!actor_epoch || !binding.reference)return false;
     NativeActorAction action;
-    if(!ProduceNativeLocalMovement(binding,pad,ctx,base,action,sampled_user))return false;
+    if(!MovementMath(binding,pad,ctx,base,action))return false;
     RoomMovement result;result.x=action.x;result.y=action.y;result.pad=pad;
     result.actor_epoch=actor_epoch;result.source=RoomMovementSource::NativeActionV1;
     {
@@ -336,6 +342,25 @@ bool em2::net::ProduceNativeLocalRoomMovement(const Binding& binding,const Pad& 
         if(Float(copy+260,base)!=0 || !ValidRoomMovement(result))return false;
     }
     auto current=binding;if(!Inspect(current,ctx,base) || current!=binding)return false;
+    output=result;return true;
+}
+}
+bool em2::net::ProduceNativeLocalMovement(const Binding& binding,const Pad& pad,PPCContext& ctx,uint8_t* base,NativeActorAction& output,unsigned sampled_user){
+    Environment preserve;output={};
+    if(sampled_user!=owner.user || sampled_user!=binding.user)return false;
+    return MovementMath(binding,pad,ctx,base,output);
+}
+bool em2::net::ProduceNativeLocalRoomMovement(const Binding& binding,const Pad& pad,uint64_t actor_epoch,
+    PPCContext& ctx,uint8_t* base,RoomMovement& output,unsigned sampled_user){
+    Environment preserve;output={};
+    if(sampled_user!=owner.user || sampled_user!=binding.user)return false;
+    return RoomMath(binding,pad,actor_epoch,ctx,base,output);
+}
+bool em2::net::ProduceNativeLocalRoomMovement(const Room& room,const Binding& binding,const NativeRoutedPadSample& sample,uint64_t actor_epoch,
+    PPCContext& ctx,uint8_t* base,RoomMovement& output){
+    Environment preserve;output={};RoomMovement result;
+    if(!ValidateNativeLocalSource(room,sample,binding,ctx,base) ||
+       !RoomMath(binding,sample.pad(),actor_epoch,ctx,base,result) || !ValidateNativeLocalSource(room,sample,binding,ctx,base))return false;
     output=result;return true;
 }
 namespace {
@@ -619,6 +644,70 @@ bool em2::net::TestNativeLocalMovement(){
     PPC_STORE_U32(0x18000,action);PPC_STORE_U32(manager+44,0);PPC_STORE_U32(0x833DA7E4,registry+4);
     if(!check(!DiscoverNativeLocalMovementBinding(c,base,invalid) && diagnostics.discovery_stage==205,
         "discovery distinguishes registry lifecycle drift from event/binding rejection"))return false;
+    // Real human-P2 capture20261111-104150: SAME typed derived controller,
+    // distinct canonical record/action family/user/camera. No generic widening.
+    setup(0,2,0);put(0x833B65FC,.2f);
+    constexpr uint32_t entity2=0x30000,controller2=0x31000,types2=0x32000,list2=0x33000,node2=0x34000;
+    constexpr uint32_t reference2=0x36000,frame2=0x37000,camera2=0x38000,refs2=0x39000,action2=0x26000;
+    constexpr uint32_t device2=0x40000,history2=0x41000,handle2=0x5678;
+    PPC_STORE_U32(players+340,handle2);PPC_STORE_U32(players+352,0);
+    PPC_STORE_U32(0x35000,handle2);auto hash=context();hash.r3.u64=0x35000;__imp__sub_827B58D0(hash,base);
+    const auto bucket=buckets+(hash.r3.u32%4)*4;
+    PPC_STORE_U32(node2,handle2);PPC_STORE_U32(node2+4,entity2);PPC_STORE_U32(node2+8,PPC_LOAD_U32(bucket));PPC_STORE_U32(bucket,node2);
+    std::memcpy(base+types2,base+types,256);PPC_STORE_U32(entity2+88,types2);PPC_STORE_U32(entity2+36,list2);
+    PPC_STORE_U32(list2,controller2+24);PPC_STORE_U32(controller2+24,0x8211DCE0);PPC_STORE_U32(controller2+80,0x8211DCD0);
+    PPC_STORE_U32(controller2+64,entity2-8);PPC_STORE_U8(controller2+68,15); // Observed ordinary low flags, not capture bit80.
+    PPC_STORE_U32(controller+16,0x8211DE70);PPC_STORE_U32(controller2+16,0x8211DE70);
+    PPC_STORE_U8(0x833DAE58,6);PPC_STORE_U8(types+6,0);PPC_STORE_U8(types2+6,0);
+    auto camera_reference=[&](uint32_t ctl,uint32_t ref,uint32_t frm,uint32_t cam,uint32_t refs,uint32_t guid,float x,float y,float z){
+        PPC_STORE_U32(ctl+96,ref);PPC_STORE_U32(ref,0x8208D908);PPC_STORE_U32(ref+4,guid);
+        PPC_STORE_U32(ref+36,refs);PPC_STORE_U32(ref+44,2);PPC_STORE_U32(refs,frm);PPC_STORE_U32(refs+4,cam);
+        PPC_STORE_U32(frm,0x82090340);PPC_STORE_U32(frm+4,ref);PPC_STORE_U32(cam,0x820D8970);
+        for(unsigned i=0;i<12;++i)put(ref+256+i*4,i%5==0?1.f:0.f);
+        put(ref+288,x);put(ref+292,y);put(ref+296,z);
+    };
+    camera_reference(controller,reference,frame,camera,reference_list,111,0,0,1);
+    camera_reference(controller2,reference2,frame2,camera2,refs2,222,3,-12,4);
+    std::memcpy(base+action2,base+action,436);PPC_STORE_U32(action2,0x8207F5C4);PPC_STORE_U32(0x833DAEC4,0x8207F5C4);
+    PPC_STORE_U32(action2+88,1);PPC_STORE_U32(action2+120,1);
+    PPC_STORE_U32(event+8,2);PPC_STORE_U32(0x17004,controller2+80);PPC_STORE_U32(event+20,2);PPC_STORE_U32(0x18004,action2);
+    PPC_STORE_U32(0x19000+8,1);PPC_STORE_U32(0x1A004,0x1B100);PPC_STORE_U32(0x1B100,0x1C000);PPC_STORE_U32(0x1B104,1);
+    std::memcpy(base+device2,base+device,72);std::memcpy(base+history2,base+history,256);
+    PPC_STORE_U32(device2+60,history2);PPC_STORE_U32(device2+56,8);PPC_STORE_U32(input+76,device2);
+    c=context();
+    if(!check(!ArmNativeLocalMovement(12,registry,base,1,2) && ArmNativeLocalMovement(12,registry,base,1,1) &&
+        DiscoverNativeLocalMovementBinding(c,base,b) && b.retail_slot==1 && b.handle==handle2 && b.entity==entity2 &&
+        b.controller==controller2 && b.listener==controller2+80 && b.action==action2 && b.logical_user==1 && b.user==1 && b.reference==reference2,
+        "explicit retail slot1 resolves actual captured typed human layout, Movement2 family, native user1 and its own camera"))return false;
+    auto p2capture=context();p2capture.lr=0x827C439C;p2capture.r3.u64=controller2+80;p2capture.r4.u64=event;p2capture.r5.u64=action2;
+    Binding captured2;
+    if(!check(CaptureNativeLocalMovementBinding(p2capture,base,captured2) && captured2==b,
+        "slot1 can observe the actual direct derived-listener provenance without another wrapper or fake callback"))return false;
+    p2capture.r5.u64=action;
+    if(!check(!CaptureNativeLocalMovementBinding(p2capture,base,invalid),"selected P2 listener cannot borrow P0 Movement UID"))return false;
+    p2capture.r5.u64=action2;p2capture.r3.u64=controller+80;
+    if(!check(!CaptureNativeLocalMovementBinding(p2capture,base,invalid),"selected P2 lease cannot borrow the P0 listener"))return false;
+    Pad p2pad;p2pad.left_x=20000;p2pad.left_y=-15000;
+    PPC_STORE_U16(sdk+8,uint16_t(p2pad.left_x));PPC_STORE_U16(sdk+10,uint16_t(p2pad.left_y));
+    auto original=context();original.r3.u64=device2;original.r4.u64=sdk;__imp__sub_830ACF88(original,base);
+    NativeActorAction oracle;
+    if(!check(Math(b,{},c,base,oracle,false),"slot1 native original SDK-device plus action-interpreter oracle succeeds"))return false;
+    const auto p2_before=std::vector<uint8_t>(base,base+0x50000);std::array<uint8_t,sizeof(PPCContext)> p2_context{};std::memcpy(p2_context.data(),&c,sizeof(c));
+    RoomMovement p2room;
+    if(!check(ProduceNativeLocalRoomMovement(b,p2pad,987,c,base,p2room,1) && p2room.actor_epoch==987 && p2room.pad==p2pad &&
+        std::bit_cast<uint32_t>(p2room.x)==std::bit_cast<uint32_t>(oracle.x) && std::bit_cast<uint32_t>(p2room.y)==std::bit_cast<uint32_t>(oracle.y) &&
+        std::abs(p2room.forward_x-.6f)<1e-6f && std::abs(p2room.forward_z-.8f)<1e-6f &&
+        std::memcmp(base,p2_before.data(),p2_before.size())==0 && std::memcmp(&c,p2_context.data(),sizeof(c))==0,
+        "slot1 complete command matches ORIGINAL math, uses own pitched camera instead of P0, and preserves both native actors and caller"))return false;
+    if(!check(!ProduceNativeLocalRoomMovement(b,p2pad,987,c,base,p2room,0),"physical source0 cannot masquerade as canonical device1 without a separate validated route"))return false;
+    PPC_STORE_U32(players+352,1);
+    if(!check(!ProduceNativeLocalRoomMovement(b,p2pad,987,c,base,p2room,1) && !NativeLocalMovementBindingFor(c,base,retained),
+        "P2 return to AI mode invalidates production and retained binding"))return false;
+    PPC_STORE_U32(players+352,0);
+    if(!check(!NativeLocalMovementBindingFor(c,base,retained),"restoring human mode cannot resurrect retired P2 binding"))return false;
+    if(!check(ArmNativeLocalMovement(12,registry,base,0) && DiscoverNativeLocalMovementBinding(c,base,retained) && retained.retail_slot==0 &&
+        retained.entity==entity && retained.action==action && retained.reference==reference &&
+        !ProduceNativeLocalRoomMovement(b,p2pad,987,c,base,p2room,1),"default callers still select P0 and rearming another retail slot retires P2 producer"))return false;
     if(ok)REXLOG_INFO("Native local Movement passed {} checks/{} action cases: original LEFT producer/getters, original action curves, native NiEntity reference projection, pre-tick discovery and complete context preservation; no gameplay dispatch",checks,cases);
     return ok;
 }

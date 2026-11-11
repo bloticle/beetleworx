@@ -35,5 +35,7 @@ void DisarmNativeLocalJump();
 // repeats, gaps, stale bindings and mismatched physical devices reject.
 bool ProduceNativeLocalJump(const NativeLocalJumpBinding&,const Pad&,uint64_t actor_epoch,uint64_t source_tick,
     PPCContext&,uint8_t*,NativeLocalJumpEvents&,unsigned sampled_native_user=0);
+bool ProduceNativeLocalJump(const Room&,const NativeLocalJumpBinding&,const NativeRoutedPadSample&,uint64_t actor_epoch,
+    PPCContext&,uint8_t*,NativeLocalJumpEvents&);
 bool TestNativeLocalJump();
 }

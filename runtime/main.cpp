@@ -86,6 +86,8 @@
 #include "online_basic_input_test.h"
 #include "online_room_boot.h"
 #include "online_room_bootstrap.h"
+#include "online_room_runtime.h"
+#include "online_room_probe.h"
 #include "online_world_random.h"
 
 #include "online_name_input.h"
@@ -157,9 +159,10 @@ REXCVAR_DECLARE(int32_t, query_occlusion_fake_sample_count);
 REXCVAR_DECLARE(bool, gpu_allow_invalid_fetch_constants);
 REXCVAR_DECLARE(bool,d3d12_allow_variable_refresh_rate_and_tearing);
 REXCVAR_DECLARE(std::string,em2_online_qa_role);
+REXCVAR_DECLARE(std::string,em2_room_probe_role);
 REXCVAR_DEFINE_BOOL(em2_online_menu,false,"Online","Show experimental direct-connect co-op Host/Join before starting the game");
 REXCVAR_DEFINE_BOOL(em2_test_pc_settings,false,"Debug","Run PC menu settings tests without opening the game");
-REXCVAR_DEFINE_BOOL(em2_test_online_input,false,"Debug","Run online room/native input regressions headlessly in the canonical executable");
+REXCVAR_DEFINE_BOOL(em2_test_online_input,false,"Debug","Run online room/native-slot and sealed local-source regressions headlessly in the canonical executable");
 REXCVAR_DEFINE_BOOL(em2_test_demo_support,false,"Debug","Run isolated report and update transaction regressions without starting the game");
 REXCVAR_DEFINE_STRING(em2_test_live_update_path,"","Debug","Explicit headless diagnostic: verify a live published demo update inside this new isolated directory");
 REXCVAR_DEFINE_BOOL(em2_test_update_swap,false,"Debug","Verify and restore the running canonical executable rename primitive without starting the game");
@@ -457,7 +460,7 @@ public:
         if (REXCVAR_GET(em2_test_online_input)) {
             const auto fixture=exe_dir/("online-input-test-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
             const bool created=CreateDirectoryW(fixture.c_str(),nullptr)!=0;
-            const bool success=created && em2::net::TestOnlineRoom() && em2::net::TestOnlineRoomBoot(fixture/"boot") && em2::net::TestRoomBootstrapGate() && em2::net::TestNativeWorldInitializationSeed() && em2::net::TestNativeLocalMovement() && em2::net::TestNativeLocalJump() && em2::net::TestNativeGenericBasicInput() && em2::net::TestOwnedActorInput() && em2::TestCanonicalNativeJoin();
+            const bool success=created && em2::net::TestOnlineRoom() && em2::net::TestOnlineRoomBoot(fixture/"boot") && em2::net::TestRoomBootstrapGate() && em2::net::TestNativeRoomSession() && em2::net::TestNativeWorldInitializationSeed() && em2::net::TestNativeLocalMovement() && em2::net::TestNativeLocalJump() && em2::net::TestNativeGenericBasicInput() && em2::net::TestOwnedActorInput() && em2::TestCanonicalNativeJoin();
             if(created){std::error_code cleanup_error;std::filesystem::remove_all(fixture,cleanup_error);}
             spdlog::shutdown();ExitProcess(success?0:1);
         }
@@ -496,7 +499,7 @@ public:
             const auto test_nonce=std::chrono::system_clock::now().time_since_epoch().count();
             const auto test_dir=exe_dir / ("pc-settings-test-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(test_nonce));
             const auto settings_ok=em2::TestGuestReadBatch() && em2::TestPCSettings(test_dir,game_dir/"ConfigFiles.ini") && em2::TestContentSetup(test_dir/"content-setup") && em2::TestContentLibraryPersistence(test_dir/"content-library") && em2::net::TestNativeContentRoot(test_dir/"content-root") && em2::TestDiscImageImport(test_dir/"disc-image") && em2::TestPackReads(test_dir/"pack-reads");
-            const auto controls_ok=em2::TestPsoBinaryCache(test_dir/"pso-cache") && em2::TestControls(test_dir/"controls") && em2::TestEngineWorkbench() && em2::TestGPUInterruptLifetime() && em2::TestGameplayMods(test_dir/"gameplay-mods") && em2::net::TestInstallationIdentity(test_dir/"online-identity") && em2::net::TestOnlineInvites() && em2::net::TestLANDiscovery() && em2::net::TestRouterMapping() && em2::net::TestNativeUpnpAutomation() && em2::net::TestUpnpRouterMapping() && em2::net::TestCheckpointBundles(test_dir/"checkpoint") && em2::net::TestCheckpointTransport(test_dir/"checkpoint-transport") && em2::net::TestOnlineBoot(test_dir/"online-boot") && em2::net::TestOnlineRoomBoot(test_dir/"online-room-boot") && em2::net::TestRoomBootstrapGate() && em2::net::TestRetainedHostCampaigns(test_dir/"online-campaigns") && em2::net::TestNativeOnlineSession() && em2::net::TestOnlineNotices() && em2::TestAllocationTrace() && em2::TestPlatformAllocations() && em2::TestMovieTextureMemory() && em2::TestNativeHeapBudget() && em2::TestShadowResourceCreation() && em2::TestLiveShadowResize() && em2::TestNativeResources() && em2::TestNativeEntityProbe();
+            const auto controls_ok=em2::TestPsoBinaryCache(test_dir/"pso-cache") && em2::TestControls(test_dir/"controls") && em2::TestEngineWorkbench() && em2::TestGPUInterruptLifetime() && em2::TestGameplayMods(test_dir/"gameplay-mods") && em2::net::TestInstallationIdentity(test_dir/"online-identity") && em2::net::TestOnlineInvites() && em2::net::TestLANDiscovery() && em2::net::TestRouterMapping() && em2::net::TestNativeUpnpAutomation() && em2::net::TestUpnpRouterMapping() && em2::net::TestCheckpointBundles(test_dir/"checkpoint") && em2::net::TestCheckpointTransport(test_dir/"checkpoint-transport") && em2::net::TestOnlineBoot(test_dir/"online-boot") && em2::net::TestOnlineRoomBoot(test_dir/"online-room-boot") && em2::net::TestRoomBootstrapGate() && em2::net::TestNativeRoomSession() && em2::net::TestRetainedHostCampaigns(test_dir/"online-campaigns") && em2::net::TestNativeOnlineSession() && em2::net::TestOnlineNotices() && em2::TestAllocationTrace() && em2::TestPlatformAllocations() && em2::TestMovieTextureMemory() && em2::TestNativeHeapBudget() && em2::TestShadowResourceCreation() && em2::TestLiveShadowResize() && em2::TestNativeResources() && em2::TestNativeEntityProbe();
             const auto lowering_ok=em2::TestLinkTimeDispatch() && em2::TestNativeRandom() && em2::net::TestOnlinePerceptionBudget() && em2::TestPhysicsTiming() && em2::TestNativeMatrixMath() && em2::TestNativeMaterialBinding() && em2::TestMickeyEarInstances() && em2::TestNativeTypeCheck() && (!em2::HasLoweringTests || em2::TestLowering());
             std::string em1_collision_error;
             const auto em1_collision_ok=em2::em1::TestLevelPartitionClassification(em1_collision_error) && em2::em1::TestKeyframeColorEvaluator(em1_collision_error) && em2::em1::TestNifContainerCompatibility(em1_collision_error) && em2::em1::TestEm1HavokCollision(em1_collision_error) && em2::em1::TestNifFixedPointUvPromotion(em1_collision_error) && em2::em1::TestPortableBcPixels(em1_collision_error) && em2::em1::TestPreviewDiffusePeState(em1_collision_error) && em2::em1::TestLevelOriginalScriptLibrary() && em2::em1::TestLevelOriginalAudioOwnership();
@@ -556,6 +559,7 @@ public:
         const bool exact_game_xex=rex::util::sha256_file(pc_assets/"default.xex")==kTranslatedGameXex;
         if(!shader_storage_test)em2::WriteGameConfigOverlay(game_dir / "ConfigFiles.ini", pc_assets / "ConfigFiles.ini");
 
+        if(!shader_storage_test && !em2::net::PreparePrivateRoomProbe(exe_dir/"beetleworx.exe",pc_assets,user_data))return false;
         if(!shader_storage_test && !em2::PublicDemoBuild() && REXCVAR_GET(em2_online_menu)) {
             if(!REXCVAR_GET(em2_online_qa_role).empty()) {
                 REXLOG_ERROR("Online connection menu cannot overlap QA session ownership");return false;
@@ -788,7 +792,8 @@ public:
         window_->AddInputListener(this,0);
         window_->Open();
         const auto qa_role=REXCVAR_GET(em2_online_qa_role);
-        const char* window_title=REXCVAR_GET(em1_enter_courtyard)?"Beetleworx - Epic Mickey compatibility":REXCVAR_GET(em2_private_profile)?"Beetleworx - Private test":qa_role=="host"?"Beetleworx - Host QA":qa_role=="client"?"Beetleworx - Client QA":"Beetleworx";
+        const auto room_role=REXCVAR_GET(em2_room_probe_role);
+        const char* window_title=REXCVAR_GET(em1_enter_courtyard)?"Beetleworx - Epic Mickey compatibility":room_role=="host"?"Beetleworx - Private Room host":room_role=="guest"?"Beetleworx - Private Room guest":REXCVAR_GET(em2_private_profile)?"Beetleworx - Private test":qa_role=="host"?"Beetleworx - Host QA":qa_role=="client"?"Beetleworx - Client QA":"Beetleworx";
         window_->SetTitle(window_title);
         ApplyPCWindowSettings();
         em2::SetPCSupportActionCallback([this](int action,int command) {

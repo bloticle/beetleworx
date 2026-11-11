@@ -21,6 +21,7 @@
 #include "online.h"
 #include "online_runtime.h"
 #include "online_room_bootstrap.h"
+#include "online_room_runtime.h"
 #include "world_observation.h"
 #include "native_entity_probe.h"
 #include <rex/cvar.h>
@@ -1796,7 +1797,11 @@ PPC_FUNC_IMPL(sub_829EC348) {
     em2::MaybeQueueNativeStartLevel();
     em2::em1::MaybeProbeRegisteredLevelEntry();
     em2::em1::TickArchitecturePreview(ctx,base);
-    if(!em2::net::RoomBootstrapActive() && !em2::net::UpdateNativeOnlineSession(base))em2::net::UpdateOnlineQASession(base);
+    if(em2::net::NativeRoomActive()){
+        // Also reachable while this loaded copy is parked for slower peers.
+        // Advancing startup here is safe only after the preceding native finish.
+        em2::net::UpdateNativeOnlineSession(base,!in_tick && !frame_finish_pending);
+    }else if(!em2::net::RoomBootstrapActive() && !em2::net::UpdateNativeOnlineSession(base))em2::net::UpdateOnlineQASession(base);
     static thread_local auto previous=Clock::now();
     static thread_local bool was_enabled=false;
     static thread_local bool was_network=false;
