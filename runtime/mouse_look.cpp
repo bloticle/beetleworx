@@ -158,6 +158,10 @@ bool MouseLookHasMotion(uint32_t mode) {
     std::lock_guard lock(motion_mutex);
     return motion.captured && motion.mode==mode && motion.Fresh(Clock::now()) && (motion.x || motion.y);
 }
+bool MouseLookHasPendingMotion(){
+    std::lock_guard lock(motion_mutex);
+    return motion.x || motion.y;
+}
 void ResetMouseLook() {
     std::lock_guard lock(motion_mutex);motion.available=false;motion.mode=0;motion.Clear();
 }
@@ -269,6 +273,17 @@ bool TestMouseLook() {
     struct RestoreMath {unsigned csr=_mm_getcsr();~RestoreMath(){_mm_setcsr(csr);}}restore_math;
     bool ok=TestNativeCursorCenter();unsigned checks=0;
     auto check=[&](bool passed,const char* message){++checks;if(!passed){ok=false;REXLOG_ERROR("Mouse look test: {}",message);}};
+    {
+        const auto saved=[] {std::lock_guard lock(motion_mutex);return motion;}();
+        struct RestoreMotion {Motion saved;~RestoreMotion(){std::lock_guard lock(motion_mutex);motion=saved;}}restore_motion{saved};
+        {std::lock_guard lock(motion_mutex);motion.Clear();}
+        check(!MouseLookHasPendingMotion(),"neutral global mouse state has no pending counts");
+        {std::lock_guard lock(motion_mutex);motion.mode=0;motion.x=1;}
+        check(MouseLookHasPendingMotion(),"first-mode pending motion is observable before camera ownership exists");
+        {std::lock_guard lock(motion_mutex);motion.mode=0x1234;motion.x=0;motion.y=-2;}
+        check(MouseLookHasPendingMotion(),"pending motion on a different camera mode blocks background replay");
+        {std::lock_guard lock(motion_mutex);check(motion.mode==0x1234 && motion.x==0 && motion.y==-2,"pending inspection preserves all accumulated counts and ownership");}
+    }
     {
         MouseCursorOptions options;DeviceHandoff device;
         device.Pad({0,0,0,0,0,0,0});check(!device.controller,"neutral pad does not claim ownership");

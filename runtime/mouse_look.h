@@ -12,6 +12,7 @@ struct MouseLookAngles {float yaw=0,pitch=0;};
 // Simulation-thread native camera admission. No input/pose extrapolation.
 MouseLookAngles TakeMouseLook(uint32_t mode,bool allowed);
 bool MouseLookHasMotion(uint32_t mode);
+bool MouseLookHasPendingMotion();
 void ResetMouseLook();
 class MouseLookHost {
 public:

@@ -1,6 +1,7 @@
 #include "ppc_context.h"
 #include "camera_projection.h"
 #include "camera_timing.h"
+#include "camera_cadence.h"
 #include "pc_settings.h"
 #include "online.h"
 #include "online_runtime.h"
@@ -53,7 +54,8 @@ void CameraUpdate(PPCContext& ctx,uint8_t* base,float width,PPCFunc* update,bool
 bool em2::IsNormalGameplayCamera(uint32_t controller,uint8_t* base) {
     return NormalOwnedCamera(controller,base);
 }
-PPC_FUNC_IMPL(sub_828510C8) {
+namespace {
+void ProjectedCamera(PPCContext& ctx,uint8_t* base){
     em2::ObserveNativeCameraUpdate(ctx,base);
     const auto width=em2::GameplayViewWidth();
     bool synchronized=false;
@@ -63,8 +65,13 @@ PPC_FUNC_IMPL(sub_828510C8) {
     }
     CameraUpdate(ctx,base,width,__imp__sub_828510C8,synchronized);
 }
+}
+PPC_FUNC_IMPL(sub_828510C8) {
+    if(!em2::HandleCameraPresentationUpdate(ctx,base,ProjectedCamera))ProjectedCamera(ctx,base);
+}
 PPC_FUNC_IMPL(sub_8290E320) {
     __imp__sub_8290E320(ctx,base);
+    em2::ObserveNativeCameraEntity(ctx,base);
     // This call feeds the camera entity's native FOV attribute setter (virtual
     // +276), which then updates the camera projection. Leave authored/cached
     // pose data untouched so widening cannot accumulate on subsequent ticks.

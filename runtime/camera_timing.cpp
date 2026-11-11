@@ -1,9 +1,11 @@
 #include "ppc_context.h"
 #include "camera_timing.h"
+#include "guest_read_batch.h"
 #include "physics_timing.h"
 #include <chrono>
 #include <algorithm>
 #include "camera_projection.h"
+#include "camera_cadence.h"
 #include "pc_settings.h"
 #include "online.h"
 #include "online_runtime.h"
@@ -24,6 +26,7 @@ PPC_EXTERN_FUNC(__imp__sub_83207330);
 PPC_EXTERN_FUNC(__imp__sub_82A515D0);
 PPC_EXTERN_FUNC(__imp__sub_82A517D0);
 PPC_EXTERN_FUNC(__imp__sub_82A628A0);
+PPC_EXTERN_FUNC(__imp__sub_82A5D278);
 PPC_EXTERN_FUNC(__imp__sub_831C6930);
 PPC_EXTERN_FUNC(__imp__sub_831C6878);
 PPC_EXTERN_FUNC(EM2MousePitch);
@@ -39,12 +42,20 @@ void WriteFloat(uint32_t address,float value,uint8_t* base) {PPC_STORE_U32(addre
 struct CameraWindow {
     uint32_t identity=0,mode=0,minimum5=UINT32_MAX,maximum5=0,minimum6=UINT32_MAX,maximum6=0;
     uint64_t calls=0,invalid=0,paused=0;double total=0,minimum=.25,maximum=0;
+    uint64_t source_samples=0,source_invalid=0;
+    double source_min=std::numeric_limits<double>::infinity(),source_max=-std::numeric_limits<double>::infinity();
+    double offset_min=std::numeric_limits<double>::infinity(),offset_max=-std::numeric_limits<double>::infinity();
     std::chrono::steady_clock::time_point started{};
     void Add(double dt,uint32_t a,uint32_t b) {
         ++calls;minimum5=std::min(minimum5,a);maximum5=std::max(maximum5,a);
         minimum6=std::min(minimum6,b);maximum6=std::max(maximum6,b);
         if(!std::isfinite(dt) || dt<0 || dt>.25){++invalid;return;}
         total+=dt;minimum=std::min(minimum,dt);maximum=std::max(maximum,dt);paused+=dt==0;
+    }
+    void Source(double absolute,double scene){
+        if(!std::isfinite(absolute) || !std::isfinite(scene)){++source_invalid;return;}
+        ++source_samples;source_min=std::min(source_min,absolute);source_max=std::max(source_max,absolute);
+        const auto offset=absolute-scene;offset_min=std::min(offset_min,offset);offset_max=std::max(offset_max,offset);
     }
 };
 struct SpringProbe {
@@ -193,9 +204,11 @@ bool TestCameraWindow() {
     CameraWindow sample;
     for(unsigned i=0;i<450;++i)sample.Add(1./90,i&1,0x1000+i);
     sample.Add(0,0,0x2000);sample.Add(NAN,0,0);sample.Add(-1,0,0);
+    sample.Source(20,19);sample.Source(21,20);sample.Source(NAN,20);
     const bool okay=sample.calls==453 && sample.invalid==2 && sample.paused==1 &&
         std::abs(sample.total-5)<1e-10 && sample.minimum==0 && sample.maximum==1./90 &&
-        sample.minimum5==0 && sample.maximum5==1 && sample.minimum6==0 && sample.maximum6==0x2000;
+        sample.minimum5==0 && sample.maximum5==1 && sample.minimum6==0 && sample.maximum6==0x2000 &&
+        sample.source_samples==2 && sample.source_invalid==1 && sample.source_min==20 && sample.source_max==21 && sample.offset_min==1 && sample.offset_max==1;
     if(!okay)REXLOG_ERROR("Camera timing diagnostic accumulation failed");return okay;
 }
 struct FilterHistory {
@@ -387,7 +400,7 @@ void SmoothLook(PPCContext& ctx,uint8_t* base,int response=0) {
     _mm_setcsr(csr);
     em2::MouseLookAngles mouse;
     // Single-player swaps retarget P0's camera; they do not select P1's camera.
-    if(em2::MouseCameraEnabled() && mouse_scope.mode==mode && slot==0) {
+    if(em2::CameraPresentationInputAllowed() && em2::MouseCameraEnabled() && mouse_scope.mode==mode && slot==0) {
         const bool allowed=dt>0 && !PPC_LOAD_U8(0x833FCA86) &&
             em2::IsNormalGameplayCamera(PPC_LOAD_U32(mode+20),base) &&
             !em2::net::GameplayInputGate().active() && !em2::net::NativeOnlineTiming().fixed_step;
@@ -424,16 +437,102 @@ void em2::ObserveNativeCameraUpdate(const PPCContext& ctx,uint8_t* base) noexcep
         // 833FCA54 into f30 and forwards that actual interval to camera modes.
         // Incoming f1 is not the camera timestep (it grows like absolute time).
         slot->Add(ReadFloat(0x833FCA54,base),ctx.r5.u32,ctx.r6.u32);
+        slot->Source(ctx.f1.f64,ReadFloat(0x833FCA4C,base));
         const auto elapsed=std::chrono::duration<double>(now-slot->started).count();
         if(elapsed>=5) {
             REXLOG_INFO("Native camera dispatch {:08X} mode {:08X} vtable {:08X}: {} calls / {:.3f}s, valid dt sum {:.6f}, dt {:.6f}..{:.6f}, paused {}, invalid {}, r5 {:08X}..{:08X}, r6 {:08X}..{:08X} (audited core delta833FCA54, not incoming f1; FFFFFFFF pools overflow controllers, not render FPS)",
                 slot->identity,slot->mode,mode?PPC_LOAD_U32(mode):0u,slot->calls,elapsed,slot->total,slot->minimum,slot->maximum,slot->paused,slot->invalid,
                 slot->minimum5,slot->maximum5,slot->minimum6,slot->maximum6);
+            REXLOG_INFO("Native camera absolute time {:08X}: {} samples, incoming f1 {:.9f}..{:.9f}, f1 minus scene833FCA4C {:.9f}..{:.9f}, invalid {}",
+                slot->identity,slot->source_samples,slot->source_min,slot->source_max,slot->offset_min,slot->offset_max,slot->source_invalid);
             *slot={};slot->identity=identity;slot->started=now;
         }
     }catch(...){} // Diagnostics must not replace the native camera update.
 }
 
+void em2::ObserveNativeCameraEntity(const PPCContext& ctx,uint8_t* base) noexcept {
+    if(!REXCVAR_GET(em2_trace_camera) || ctx.lr!=0x828515A8)return;
+    struct Restore {DWORD error=GetLastError();unsigned csr=_mm_getcsr();~Restore(){SetLastError(error);_mm_setcsr(csr);}} restore;
+    try{
+        static thread_local std::array<uint64_t,16> seen{};
+        const auto entity=ctx.r30.u32;if(!entity)return;
+        const auto table=PPC_LOAD_U32(entity);if(!table)return;
+        const auto components=PPC_LOAD_U32(entity+36),count=PPC_LOAD_U32(entity+44);
+        const auto key=((uint64_t(entity)<<32)|table)^uint64_t(count);
+        if(std::find(seen.begin(),seen.end(),key)!=seen.end())return;
+        const auto slot=std::find(seen.begin(),seen.end(),uint64_t(0));if(slot==seen.end())return;
+        *slot=key;
+        REXLOG_INFO("Native camera entity {:08X}: vtable {:08X}, update40 {:08X}, absolute {:.9f}, argument5 {:08X}, argument6 {:08X}",
+            entity,table,PPC_LOAD_U32(table+40),ctx.f29.f64,ctx.r19.u32,ctx.r18.u32);
+        if(components && count<=64)for(uint32_t i=0;i<count;++i){
+            const auto component=PPC_LOAD_U32(components+i*4);if(!component)continue;
+            const auto vtable=PPC_LOAD_U32(component);if(!vtable)continue;
+            REXLOG_INFO("Native camera entity component {:08X} {}/{}: interface {:08X}, vtable {:08X}, update40 {:08X}",
+                entity,i,count,component,vtable,PPC_LOAD_U32(vtable+40));
+        }
+    }catch(...){}
+}
+
+PPC_FUNC_IMPL(sub_82A5D278) {
+    // Identify the engine action dispatcher without synthesizing input or
+    // changing the native listener's arguments, side effects or ABI clobbers.
+    if(REXCVAR_GET(em2_trace_camera)) {
+        struct Restore {unsigned csr=_mm_getcsr();DWORD error=GetLastError();
+            ~Restore(){_mm_setcsr(csr);SetLastError(error);}}restore;
+        try {
+            static thread_local std::array<uint64_t,16> seen{};
+            const auto key=(uint64_t(ctx.r3.u32)<<32)|uint32_t(ctx.lr);
+            if(std::find(seen.begin(),seen.end(),key)==seen.end()) {
+                const auto free=std::find(seen.begin(),seen.end(),uint64_t(0));
+                if(free!=seen.end()) {
+                    *free=key;
+                    REXLOG_INFO("Native normal-camera look listener: mode {:08X}, caller {:08X}, event {:08X}, user {:08X}, axes {:.9f}/{:.9f}",
+                        ctx.r3.u32,uint32_t(ctx.lr),ctx.r4.u32,ctx.r5.u32,ctx.f1.f64,ctx.f2.f64);
+                    // 827C4310 forwards the action itself as r5 (828BB858 is
+                    // an identity getter). Inspect its bounded binding table
+                    // and authored curve rather than assume a stick mapping.
+                    const auto action=ctx.r5.u32;
+                    em2::GuestReadBatch reads;
+                    if(ctx.lr==0x827C439C && action>=4096 && uint64_t(action)+436<=0x100000000ull &&
+                        em2::GuestReadBatch::Readable(base+action,436)) {
+                        const auto count=PPC_LOAD_U32(action+408);
+                        REXLOG_INFO("Native camera action {:08X}: kind {}, curve mode {}, bindings {}, deadzone {:.9f}, saturation {:.9f}, exponent {:.9f}, gain {:.9f}",
+                            action,PPC_LOAD_U32(action+80),PPC_LOAD_U32(action+432),count,
+                            ReadFloat(action+416,base),ReadFloat(action+420,base),ReadFloat(action+424,base),ReadFloat(action+428,base));
+                        if(count<=10)for(unsigned i=0;i<count;++i) {
+                            const auto binding=action+88+i*32;
+                            REXLOG_INFO("Native camera action {:08X} binding {}: device {}, key {:08X}, component {}, inverted {}",
+                                action,i,PPC_LOAD_U32(binding),PPC_LOAD_U32(binding+4),PPC_LOAD_U32(binding+8),PPC_LOAD_U8(binding+16));
+                        }
+                    }
+                }
+            }
+        }catch(...){}
+    }
+    __imp__sub_82A5D278(ctx,base);
+}
+void em2::ObserveNativeCameraInputDevice(uint32_t device,const PPCContext& ctx,uint8_t* base) noexcept {
+    if(REXCVAR_GET(em2_trace_camera) && ctx.r3.u32 && device) {
+        struct Restore {unsigned csr=_mm_getcsr();DWORD error=GetLastError();
+            ~Restore(){_mm_setcsr(csr);SetLastError(error);}}restore;
+        try {
+            static thread_local std::array<uint32_t,8> seen{};
+            if(std::find(seen.begin(),seen.end(),device)==seen.end()) {
+                const auto free=std::find(seen.begin(),seen.end(),uint32_t(0));
+                if(free!=seen.end()) {
+                    *free=device;
+                    const auto history=PPC_LOAD_U32(device+60);
+                    if(history)for(unsigned axis=2;axis<4;++axis) {
+                        const auto record=history+axis*32;
+                        REXLOG_INFO("Native camera input device {:08X} axis {}: raw range {}..{}, published range {}..{}, inversion {:08X}",
+                            device,axis,int32_t(PPC_LOAD_U32(record+16)),int32_t(PPC_LOAD_U32(record+20)),
+                            int32_t(PPC_LOAD_U32(record+24)),int32_t(PPC_LOAD_U32(record+28)),PPC_LOAD_U32(device+68));
+                    }
+                }
+            }
+        }catch(...){}
+    }
+}
 PPC_FUNC_IMPL(sub_83207330) {AccelerateLook(ctx,base,ActiveResponse());}
 PPC_FUNC_IMPL(sub_82A515D0) {SmoothLook(ctx,base,ActiveResponse());}
 PPC_FUNC_IMPL(sub_82A517D0) {NativePitchWithMouse(ctx,base);}
@@ -447,7 +546,7 @@ PPC_FUNC_IMPL(sub_82A628A0) {
     bool activity=false;
     {
     struct RestoreMath {unsigned csr=_mm_getcsr();~RestoreMath(){_mm_setcsr(csr);}}restore_math;
-    if(em2::MouseCameraEnabled() && ValidInterval(float(ctx.f3.f64)) && ctx.f3.f64>0 && !PPC_LOAD_U8(0x833FCA86) &&
+    if(em2::CameraPresentationInputAllowed() && em2::MouseCameraEnabled() && ValidInterval(float(ctx.f3.f64)) && ctx.f3.f64>0 && !PPC_LOAD_U8(0x833FCA86) &&
         CameraSlot(ctx.r3.u32,base)==0 &&
         em2::IsNormalGameplayCamera(PPC_LOAD_U32(ctx.r3.u32+20),base) &&
         !em2::net::GameplayInputGate().active() && !em2::net::NativeOnlineTiming().fixed_step &&

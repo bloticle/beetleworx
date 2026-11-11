@@ -4,6 +4,8 @@
 #include "debug_level_browser.h"
 #include "ppc_context.h"
 #include "simulation.h"
+#include "camera_targets.h"
+#include "camera_cadence.h"
 #include "pc_settings.h"
 #include "shadow_resize.h"
 #include "render_options.h"
@@ -1395,6 +1397,7 @@ void StartTick(uint8_t* base,bool agreed=false,uint64_t input_tick=0) {
 }
 
 void ResetSimulationHistory(PPCContext& ctx,uint8_t* base) {
+    em2::ResetCameraPresentation();
     recording_epoch.store(0,std::memory_order_release);
     em2::interpolated_nodes.store(0,std::memory_order_relaxed);
     in_tick=false;
@@ -1491,6 +1494,7 @@ void FinishTick(PPCContext& ctx,uint8_t* base) {
     }
     ctx=saved;
     em2::simulation_steps.fetch_add(1,std::memory_order_relaxed);
+    em2::CaptureCameraPresentationTarget(ctx,base,tick_number);
 }
 
 void ApplyTransforms(PPCContext& ctx,uint8_t* base,bool restore) {
@@ -1514,6 +1518,7 @@ void ApplyTransforms(PPCContext& ctx,uint8_t* base,bool restore) {
                 WriteTransform(object,h.saved,base); h.applied=false;
             } else {
                 if(!h.moving) continue;
+                if(em2::PresentationOwnsCameraNode(object))continue;
                 h.saved=ReadTransform(object,base);
                 WriteTransform(object,InterpolateScene(h,cached?alpha:float(RenderAlpha())),base);
                 h.applied=true;
@@ -1789,6 +1794,7 @@ PPC_FUNC_IMPL(sub_829EC348) {
         ResetSimulationHistory(ctx,base);
         was_enabled=enabled;
     }
+    em2::BeginCameraPresentationFrame(enabled,double(elapsed)*1e-9);
     if(!enabled) {__imp__sub_829EC348(ctx,base);return;}
     frame_steps=em2::ScheduleSimulationFrame(scheduler,network_debt,elapsed,network,frame_halted,speed_percent);
     if(!network && !speed_percent)frame_steps+=manual_steps;
@@ -1878,6 +1884,7 @@ PPC_FUNC_IMPL(sub_829D8228) {
     }
     ApplySkinPoses(ctx,base);profile.Mark(0);
     WithRenderTransforms(ctx,base,[&] {
+        em2::RenderPresentationCamera(ctx,base,RenderAlpha());
         profile.Mark(1);
         {em2::NativeRenderSampleScope sample;__imp__sub_829D8228(ctx,base);}
         profile.Mark(2);
@@ -2194,6 +2201,8 @@ static bool TestNativeClockIntervals() {
     return true;
 }
 bool TestSimulation() {
+    if(!TestCameraTargetHistory())return false;
+    if(!TestCameraPresentation())return false;
     if(!TestRandomFailureHistory())return false;
     if(!TestRenderProfiling() || !TestNativeClockIntervals() || !TestPreparedSkinInterpolation())return false;
     bool ok=true;

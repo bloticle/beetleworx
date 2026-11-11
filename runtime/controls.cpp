@@ -1,6 +1,7 @@
 #include "ppc_context.h"
 #include "controls.h"
 #include "mouse_look.h"
+#include "camera_timing.h"
 #include "simulation.h"
 #include "players.h"
 #include "online.h"
@@ -28,6 +29,9 @@ PPC_EXTERN_FUNC(__imp__sub_831BB758);
 PPC_EXTERN_FUNC(sub_831BB758);
 PPC_EXTERN_FUNC(__imp__sub_830ACF88);
 PPC_EXTERN_FUNC(sub_830ACF88);
+PPC_EXTERN_FUNC(__imp__sub_830A7C10);
+PPC_EXTERN_FUNC(__imp__sub_830A7C70);
+PPC_EXTERN_FUNC(__imp__sub_827C3030);
 namespace {
 using namespace rex::input;
 using rex::X_RESULT;
@@ -204,6 +208,74 @@ int16_t QuantizeAxis(float positive,float negative) {
 bool HasShoulderChord(unsigned user) {
     const auto& profile=profiles[user*2+1];
     return std::find(profile.begin(),profile.end(),280)!=profile.end();
+}
+// This is the DEVICE axis consumer, before action binding inversion and
+// 828BBB78's deadzone/saturation/power/gain curve. In particular, it must not
+// substitute the differently filtered publisher record+4 for raw record+0.
+float NativeDeviceLookAxis(int16_t input,bool vertical,float deadzone) {
+    int raw=vertical?-int(input):int(input);
+    const int threshold=int(float(double(deadzone)*32768.));
+    if(std::abs(raw)<=threshold)raw=0;
+    const float fraction=float(double(float(raw+32768))/65535.);
+    const float scaled=float(double(fraction)*200.);
+    const int output=int(scaled)-100;
+    return float(double(float(output))*double(.01f));
+}
+bool TestNativeDeviceLookConsumer() {
+    auto* base=static_cast<uint8_t*>(VirtualAlloc(nullptr,0x100000000ull,MEM_RESERVE,PAGE_NOACCESS));
+    struct Restore {uint8_t* base;unsigned csr=_mm_getcsr();DWORD error=GetLastError();
+        ~Restore(){_mm_setcsr(csr);SetLastError(error);if(base)VirtualFree(base,0,MEM_RELEASE);}}restore{base};
+    if(!base)return false;
+    for(uint32_t address:{0u,0x82000000u,0x820A0000u,0x833B0000u})
+        if(!VirtualAlloc(base+address,0x10000,MEM_COMMIT,PAGE_READWRITE))return false;
+    if(!VirtualAlloc(base+PPC_IMAGE_BASE+PPC_IMAGE_SIZE,4096,MEM_COMMIT,PAGE_READWRITE))return false;
+    PPC_LOOKUP_FUNC(base,uint32_t(PPC_CODE_BASE))=__imp__sub_830A7C10;
+    PPC_LOOKUP_FUNC(base,uint32_t(PPC_CODE_BASE)+4)=__imp__sub_830A7C70;
+    // Retail 827C2D98 explicitly resolves these SDK axis keys to axes2/3.
+    // The 0x01000000 key flag instead selects the unrelated button consumer.
+    PPC_STORE_U32(0x5000+48,uint32_t(PPC_CODE_BASE));PPC_STORE_U32(0x5000+56,uint32_t(PPC_CODE_BASE)+4);
+    auto put_float=[&](uint32_t address,float value){PPC_STORE_U32(address,std::bit_cast<uint32_t>(value));};
+    put_float(0x8200422C,.01f);put_float(0x82003EA0,.5f);put_float(0x82003F48,1.f);put_float(0x820A82B8,32768.f);
+    constexpr uint32_t device=0x2000,history=0x3000,state=0x4000;
+    PPC_STORE_U32(device,0x5000);PPC_STORE_U32(device+56,4);PPC_STORE_U32(device+60,history);PPC_STORE_U32(device+68,0);
+    for(unsigned axis=0;axis<4;++axis){
+        const auto record=history+axis*32;
+        PPC_STORE_U32(record+16,uint32_t(-32768));PPC_STORE_U32(record+20,32767);
+        PPC_STORE_U32(record+24,uint32_t(-100));PPC_STORE_U32(record+28,100);
+    }
+    uint64_t comparisons=0;unsigned zero_checks=0;bool ok=true;
+    const auto context=[] {PPCContext ctx{};ctx.fpscr.InitHost();ctx.r1.u64=0xF000;ctx.lr=0x12345678;return ctx;};
+    for(float deadzone:{0.f,.1f,.2f,native_default_deadzone,.3f,.5f}) {
+        put_float(0x833B65FC,deadzone);
+        for(int raw=-32768;raw<=32767;++raw){
+            PPC_STORE_U16(state+12,uint16_t(raw));PPC_STORE_U16(state+14,uint16_t(raw));
+            auto producer=context();producer.r3.u64=device;producer.r4.u64=state;__imp__sub_830ACF88(producer,base);
+            for(unsigned axis=2;axis<4;++axis){
+                // Poison the differently filtered record before either getter.
+                PPC_STORE_U32(history+axis*32+4,0x12345678);
+                auto native=context();native.r3.u64=device;native.r4.u64=axis;
+                __imp__sub_830A7C10(native,base);
+                const auto published_raw=native.r3.s32;
+                native.r5.u64=native.r3.u64;native.r3.u64=device;native.r4.u64=axis;
+                __imp__sub_830A7C70(native,base);
+                const auto leaf_result=float(double(float(native.r3.s32))*double(.01f));
+                auto consumer=context();consumer.r5.u64=device;consumer.r6.u64=axis==2?0x02400019u:0x02400020u;
+                __imp__sub_827C3030(consumer,base);
+                const auto actual=float(consumer.f1.f64);
+                if(std::bit_cast<uint32_t>(actual)!=std::bit_cast<uint32_t>(leaf_result))return false;
+                const auto expected=NativeDeviceLookAxis(int16_t(raw),axis==3,deadzone);
+                if(std::bit_cast<uint32_t>(actual)!=std::bit_cast<uint32_t>(expected)){
+                    REXLOG_ERROR("Native device look consumer mismatch: raw {}, axis {}, deadzone {}, native raw {}, result {}, portable {}",raw,axis,deadzone,published_raw,actual,expected);return false;
+                }
+                const int signed_raw=axis==3?-raw:raw;
+                const int threshold=int(float(double(deadzone)*32768.));
+                if(std::abs(signed_raw)<=threshold){++zero_checks;if(published_raw || actual!=0)ok=false;}
+                ++comparisons;
+            }
+        }
+    }
+    if(ok)REXLOG_INFO("Native device look consumer passed {} bit-exact comparisons over every int16 value, both axes and six deadzones ({} zero-threshold checks): actual 830ACF88 producer, 830A7C10 raw getter, 830A7C70 [-100,100] conversion and full native virtual-dispatch consumer 827C3030; right-Y negation/+32768 endpoint; action binding/curve excluded",comparisons,zero_checks);
+    return ok;
 }
 bool TestLookStrengthNativeResponse() {
     auto* base=static_cast<uint8_t*>(VirtualAlloc(nullptr,0x100000000ull,MEM_RESERVE,PAGE_NOACCESS));
@@ -1255,7 +1327,7 @@ bool TestControls(const std::filesystem::path& directory) {
     }
     ControlOption(2000,-2,result);ControlKey(VK_ESCAPE,true);ControlOption(2200,-1,result);check(result==0,"escape cancels capture");
     ClearControlKeys();
-    ok=TestWheelBindings(directory) && TestLookStrengthNativeResponse() && ok;
+    ok=TestWheelBindings(directory) && TestNativeDeviceLookConsumer() && TestLookStrengthNativeResponse() && ok;
     {std::ofstream legacy(directory/"controls.ini");legacy<<"0.0=17\n";}
     LoadControls(directory);ControlOption(2000,-1,result);check(result==VK_CONTROL,"legacy user bindings retain their keys when movement actions are added");
     ControlOption(2026,-1,result);check(result==0,"a new dash default cannot duplicate an existing legacy key");
@@ -1304,6 +1376,8 @@ PPC_FUNC_IMPL(sub_831BB758) {
 }
 
 PPC_FUNC_IMPL(sub_830ACF88) {
+    const auto device=ctx.r3.u32;
     native_deadzone_bits.store(PPC_LOAD_U32(0x833B65FC),std::memory_order_relaxed);
     __imp__sub_830ACF88(ctx,base);
+    em2::ObserveNativeCameraInputDevice(device,ctx,base);
 }
