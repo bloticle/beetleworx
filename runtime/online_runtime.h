@@ -37,6 +37,9 @@ NativeSessionTiming NativeOnlineTiming();
 // Fast policy snapshot for UI/worker/simulation code. Includes retained startup
 // and failed sessions before an input gate exists, plus standalone QA gates.
 bool SynchronizedSessionActive() noexcept;
+// Retained legacy Session/InputGate ownership only; a Room bridge must not
+// accidentally acquire the same native controls or RNG lease.
+bool LegacyNativeSessionActive() noexcept;
 // Bind at the main guest entry, before its first synchronous asset load.
 bool BindNativeOnlineThread();
 // Startup thread only, before launching any guest threads. A temporary sole

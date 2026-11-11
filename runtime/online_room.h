@@ -10,10 +10,16 @@
 namespace em2::net {
 struct CheckpointBundle;
 struct RoomCheckpointPeer {uint64_t peer=0;std::size_t total=0,received=0;bool installed=false;};
+struct RoomBootstrapFrame {
+    uint64_t tick=0;
+    uint16_t players_mask=0;
+    std::array<Pad,kOnlineRoomCapacity> players{};
+    bool operator==(const RoomBootstrapFrame&)const=default;
+};
 // Native movement values, not raw stick axes. Ground-plane basis is captured
 // with the command; no receiving peer consults its local camera for this input.
 using RoomCommand=RoomMovement;
-enum class RoomState {Idle,Listening,Connecting,Transferring,Installing,Lobby,Loading,Running,Disconnected,Error};
+enum class RoomState {Idle,Listening,Connecting,Transferring,Installing,Lobby,Loading,Bootstrapping,Running,Disconnected,Error};
 // Single-thread-owned direct TCP transport. Up to 16 peers is a transport
 // capability only; Host capacity MUST come from the actual gameplay adapter.
 // Host/Join require a common installed checkpoint. Explicit WithCheckpoint
@@ -46,13 +52,29 @@ public:
     bool SetAppearance(LobbyCharacter,uint8_t color);
     bool SetReady(bool);
     bool Start();
+    // Explicit alternate start: synchronized native raw-Pad bootstrap, never
+    // interpreted Movement. Keeps the original negotiated gameplay delay.
+    bool StartNativeBootstrap();
+    // Negotiated mode remains true after gameplay activation. bootstrap_tick
+    // names the current raw round; normal next_tick is the gameplay timeline.
+    bool native_bootstrap()const;
+    uint64_t bootstrap_tick()const;
+    bool BootstrapWorldReady(const std::array<uint8_t,32>& loaded_world_token);
+    bool SubmitBootstrapPad(uint64_t tick,const Pad&);
+    bool PeekBootstrapFrame(RoomBootstrapFrame&)const;
+    bool TakeBootstrapFrame(RoomBootstrapFrame&);
+    // After consuming AND completing this native tick. All peers must report
+    // equal nonzero observations; gameplay starts at tick+1 only when every
+    // ready vote is true. Otherwise one ordered raw round is authorized.
+    bool CompleteBootstrap(uint64_t tick,bool ready_for_gameplay,const std::array<uint8_t,32>& observation_digest);
     // Start only freezes the roster and enters Loading. The caller explicitly
     // asserts native world load + actor admission with a common nonzero token.
     // No input/frame is admitted until all frozen peers assert the same token.
     // Repeating the same local token is idempotent; changing it is rejected.
     bool WorldReady(const std::array<uint8_t,32>& canonical_world_token);
     // Submit exactly next_submit_tick(), which includes negotiated input delay.
-    // The first input_delay ticks contain a common neutral command. Success
+    // The first gameplay input_delay ticks contain a common neutral command
+    // (after the final raw round when native bootstrap was selected). Success
     // queues intent; only a validated TakeFrame authorizes a simulation tick.
     bool SubmitLocal(uint64_t tick,const RoomCommand&);
     // Inspect without advancing the transport timeline. Native admission may
@@ -75,6 +97,8 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
     bool JoinInternal(const Identity&,std::string_view,uint16_t,std::string_view,bool checkpoint);
+    bool StartInternal(bool native_bootstrap);
+    bool WorldReadyInternal(const std::array<uint8_t,32>&,bool native_bootstrap);
 };
 bool TestOnlineRoom();
 }

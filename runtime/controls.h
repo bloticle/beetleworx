@@ -34,7 +34,14 @@ bool PublishSynchronizedControls(const net::Frame&);
 // Read-only admission proof. Returns only a fully published frame on the
 // thread that began this generation; never polls or consumes local input.
 bool ReadPublishedSynchronizedControls(uint64_t& generation,net::Frame& frame);
+// Owner-thread lease identity, including before the first frame is published.
+uint64_t SynchronizedControlsGeneration();
+// One-time raw-bootstrap -> local gameplay sampler cutover. No device poll,
+// controller republish/restart or RNG operation; all sampler caches must be unused.
+bool BeginSynchronizedGameplaySampling(uint64_t controls_generation,uint64_t completed_bootstrap_tick);
 void EndSynchronizedControls();
+// Generation-bound shutdown; cannot release a replacement controls owner.
+bool EndSynchronizedControls(uint64_t generation);
 // Sample once per sequential local tick, before adding the network delay.
 // Repeated calls for a tick return its cached sample, not newer device input.
 bool SampleLocalControls(rex::input::InputSystem&,unsigned user,uint64_t tick,net::Pad&);

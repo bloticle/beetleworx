@@ -45,7 +45,7 @@ bool OnlineRoomBoot::Host(BootPaths paths,const fs::path& source,std::string lis
     if(!local || !remote || local->ipv6()!=remote->ipv6())return false;
     std::array<uint8_t,16> nonce{};if(!NewSessionNonce(nonce))return false;
     if(!EncodeInvite(Invite{advertised,port?port:uint16_t(1),nonce,0,delay}))return false;
-    const auto initialization=ConfiguredNativeInitializationPolicy();
+    const auto initialization=paths.startup_policy==StartupPolicy::NativeMenu?InitializationPolicy::SharedNativeV1:ConfiguredNativeInitializationPolicy();
     p.paths=std::move(paths);p.host=true;p.listen=std::move(listen);p.advertised=std::move(advertised);p.name=std::move(name);p.port=port;p.capacity=capacity;
     p.status.state=BootState::Preparing;p.status.user_data=p.paths.new_user_data;
     const auto copied=p.paths;const auto step=p.step;const auto token=p.stop.get_token();
@@ -57,7 +57,7 @@ bool OnlineRoomBoot::Host(BootPaths paths,const fs::path& source,std::string lis
 bool OnlineRoomBoot::Join(BootPaths paths,std::string text,std::string name){
     auto& p=*impl_;if(p.status.state!=BootState::Idle || !NameValid(name))return false;
     const auto invite=DecodeInvite(text);if(!invite)return false;
-    const auto initialization=ConfiguredNativeInitializationPolicy();
+    const auto initialization=paths.startup_policy==StartupPolicy::NativeMenu?InitializationPolicy::SharedNativeV1:ConfiguredNativeInitializationPolicy();
     p.paths=std::move(paths);p.invite=invite;p.name=std::move(name);p.status.state=BootState::Preparing;p.status.user_data=p.paths.new_user_data;
     const auto copied=p.paths;const auto step=p.step;const auto token=p.stop.get_token();
     try{p.preparation=std::async(std::launch::async,[copied,initialization,step,token]{
@@ -122,6 +122,7 @@ bool OnlineRoomBoot::CanStart()const{
     const auto progress=p.room->checkpoint_peers();return progress.size()==lobby.players.size() && std::all_of(progress.begin(),progress.end(),[](const auto& peer){return peer.installed;});
 }
 bool OnlineRoomBoot::Start(){auto& p=*impl_;return CanStart() && p.room->Start();}
+bool OnlineRoomBoot::StartNativeBootstrap(){auto& p=*impl_;return CanStart() && p.room->identity().initialization_policy==InitializationPolicy::SharedNativeV1 && p.room->StartNativeBootstrap();}
 std::optional<RoomBootResult> OnlineRoomBoot::TakeStarted(){
     Poll();auto& p=*impl_;if(p.cancelling || p.Taken() || !p.room || p.preparation.valid() || p.installation.valid() ||
         p.room->state()!=RoomState::Loading || !p.room->lobby().locked || !p.room->checkpoint_ready())return {};
@@ -199,6 +200,26 @@ bool TestOnlineRoomBoot(const fs::path& root){
         check(room_pump([&]{RoomFrame frame;return std::all_of(results.begin(),results.end(),[&](const auto& r){return r.room->PeekFrame(frame);});}),"handed-off sockets deliver common authoritative frame");
         RoomFrame authoritative;check(results[0].room->TakeFrame(authoritative) && authoritative.players_mask==7 && authoritative.tick==0,"three-peer frozen mask survives ownership transfer");
         for(unsigned i=1;i<3;++i){RoomFrame frame;check(results[i].room->TakeFrame(frame) && frame==authoritative,"handed-off clients receive byte-identical native command frames");}
+        results.clear();
+        boots.push_back(std::make_unique<OnlineRoomBoot>());
+        auto native_paths=[&](std::string_view name){auto value=paths(name);value.startup_policy=StartupPolicy::NativeMenu;return value;};
+        if(!check(boots[0]->Host(native_paths("native-host"),base/"frozen","127.0.0.1","127.0.0.1",2,"Host",0,2) &&
+            pump([&]{return !boots[0]->status().invitation.empty();}),"native bootstrap coordinator hosts its verified shared checkpoint"))return false;
+        boots.push_back(std::make_unique<OnlineRoomBoot>());
+        if(!check(boots[1]->Join(native_paths("native-guest"),boots[0]->status().invitation,"Guest") && pump([&]{
+            const auto progress=boots[0]->checkpoint_progress();return progress.size()==2 &&
+                std::all_of(progress.begin(),progress.end(),[](const auto& peer){return peer.installed;}) && boots[1]->status().state==BootState::Ready;
+        }),"native bootstrap waits for worker installation before lobby readiness"))return false;
+        if(!check(boots[0]->SetReady(true) && boots[1]->SetReady(true) && pump([&]{return boots[0]->CanStart() && !boots[1]->profile_pending();}) &&
+            boots[0]->StartNativeBootstrap() && pump([&]{return boots[1]->room_state()==RoomState::Loading;}),"native bootstrap mode is chosen at the explicit host Start boundary"))return false;
+        for(auto& boot:boots){auto result=boot->TakeStarted();
+            if(!check(result && result->room->native_bootstrap() && !result->room->WorldReady(world) && result->room->BootstrapWorldReady(world),
+                "native handoff preserves raw initialization mode and cannot use direct gameplay activation"))return false;
+            results.push_back(std::move(*result));
+        }
+        boots.clear();
+        check(room_pump([&]{return std::all_of(results.begin(),results.end(),[](const auto& r){return r.room->state()==RoomState::Bootstrapping;});}),
+            "shared-save native handoff reaches only synchronized raw bootstrap after matching world assertions");
         results.clear();
         boots.push_back(std::make_unique<OnlineRoomBoot>());
         check(boots[0]->Host(paths("cancelled-host"),base/"frozen","127.0.0.1","127.0.0.1",3,"Host"),"cancellable preparation starts");boots[0]->Cancel();

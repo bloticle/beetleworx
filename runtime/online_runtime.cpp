@@ -1,4 +1,5 @@
 #include "online_runtime.h"
+#include "online_room_bootstrap.h"
 #include "online_continue.h"
 #include "online_uuid.h"
 #include "online_world_random.h"
@@ -125,7 +126,7 @@ bool StartNativeOnlinePrelaunchPolling() {
 }
 bool AdoptNativeOnlineSession(std::unique_ptr<Session>& ready,unsigned device) {
     auto& owner=RuntimeOwner();
-    if(!ready || ready->state()!=State::Ready || device>=2 || owner.session || GameplayInputGate().active())return false;
+    if(!ready || ready->state()!=State::Ready || device>=2 || owner.session || GameplayInputGate().active() || RoomBootstrapActive())return false;
     if(!owner.initialization.Arm(ready->identity()))return false;
     owner.session=std::move(ready);owner.device=device;owner.preparing=owner.attached=owner.menu_preparation=false;
     owner.thread.store(0,std::memory_order_release);
@@ -211,11 +212,12 @@ void FinishNativeOnlineContinue(bool accepted) {
 }
 NativeSessionTiming NativeOnlineTiming() {
     auto& owner=RuntimeOwner();std::lock_guard lock(owner.status_mutex);
-    return {owner.status.state!=NativeSessionState::None,owner.status.state==NativeSessionState::Failed};
+    return {owner.status.state!=NativeSessionState::None || RoomBootstrapActive(),owner.status.state==NativeSessionState::Failed || RoomBootstrapHalted()};
 }
-bool SynchronizedSessionActive() noexcept {
+bool LegacyNativeSessionActive() noexcept {
     return retained_session_active.load(std::memory_order_acquire) || GameplayInputGate().active();
 }
+bool SynchronizedSessionActive() noexcept {return LegacyNativeSessionActive() || RoomBootstrapActive();}
 bool UpdateNativeOnlineSession(uint8_t* base,bool advance_world) {
     auto& owner=RuntimeOwner();if(!owner.session)return false;
     if(!ClaimOwnerThread(owner))return true;

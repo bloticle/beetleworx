@@ -24,7 +24,8 @@ constexpr auto Timeout=std::chrono::seconds(15);
 constexpr auto StartupTimeout=std::chrono::seconds(180);
 constexpr auto TransferTimeout=std::chrono::seconds(120);
 enum class Wire:uint8_t {Hello=1,Welcome,Profile,Snapshot,Start,Input,Frame,Ping,Pong,ProfileReply,WorldReady,Activate,
-    CheckpointBegin,CheckpointChunk,CheckpointEnd,CheckpointProgress,CheckpointInstalled,CheckpointReady,CheckpointAck};
+    CheckpointBegin,CheckpointChunk,CheckpointEnd,CheckpointProgress,CheckpointInstalled,CheckpointReady,CheckpointAck,
+    BootstrapWorldReady,BootstrapBegin,BootstrapPad,BootstrapFrame,BootstrapComplete,BootstrapContinue,BootstrapActivate};
 bool Winsock(){
     struct Startup {bool ok=false;Startup(){WSADATA data{};ok=WSAStartup(MAKEWORD(2,2),&data)==0;}~Startup(){if(ok)WSACleanup();}};
     static Startup startup;return startup.ok;
@@ -40,7 +41,17 @@ struct Reader {
     std::string String(){const auto n=Byte();if(!good || n>bytes.size()-at){good=false;return {};}std::string s(reinterpret_cast<const char*>(bytes.data()+at),n);at+=n;return s;}
     bool Done()const{return good && at==bytes.size();}
 };
-Bytes Packet(Wire kind){return {'B','W','R','M',3,uint8_t(kind)};}
+Bytes Packet(Wire kind){return {'B','W','R','M',4,uint8_t(kind)};}
+using Hash=std::array<uint8_t,32>;
+bool Nonzero(const Hash& hash){return std::any_of(hash.begin(),hash.end(),[](auto n){return n!=0;});}
+void WritePad(Bytes& bytes,const Pad& pad){
+    U64(bytes,pad.buttons,2);U8(bytes,pad.left_trigger);U8(bytes,pad.right_trigger);
+    for(auto n:{pad.left_x,pad.left_y,pad.right_x,pad.right_y})U64(bytes,uint16_t(n),2);
+}
+Pad ReadPad(Reader& reader){
+    Pad pad;pad.buttons=uint16_t(reader.Number(2));pad.left_trigger=reader.Byte();pad.right_trigger=reader.Byte();
+    for(auto* n:{&pad.left_x,&pad.left_y,&pad.right_x,&pad.right_y})*n=std::bit_cast<int16_t>(uint16_t(reader.Number(2)));return pad;
+}
 void WriteIdentity(Bytes& b,const Identity& id){
     for(const auto* p:{&id.build,&id.content,&id.checkpoint})b.insert(b.end(),p->begin(),p->end());
     b.insert(b.end(),id.session.begin(),id.session.end());U64(b,id.first_tick);U8(b,id.input_delay);
@@ -157,8 +168,16 @@ struct Room::Impl {
     std::shared_ptr<Bytes> downloaded;
     std::optional<std::array<uint8_t,32>> local_world;
     std::array<std::optional<std::array<uint8_t,32>>,kOnlineRoomCapacity> worlds;
+    struct BootstrapProof {bool ready=false;Hash digest{};};
+    bool native_bootstrap=false,raw_consumed=false;
+    uint64_t raw_tick=0;
+    std::array<std::optional<Pad>,kOnlineRoomCapacity> raw_pads;
+    std::array<std::optional<BootstrapProof>,kOnlineRoomCapacity> raw_proofs;
+    std::optional<RoomBootstrapFrame> raw_frame;
+    std::optional<BootstrapProof> local_proof;
+    std::optional<Pad> local_raw_pad;
     ~Impl(){Close(listener);}
-    bool Active()const{return state==RoomState::Listening || state==RoomState::Connecting || state==RoomState::Transferring || state==RoomState::Installing || state==RoomState::Lobby || state==RoomState::Loading || state==RoomState::Running;}
+    bool Active()const{return state==RoomState::Listening || state==RoomState::Connecting || state==RoomState::Transferring || state==RoomState::Installing || state==RoomState::Lobby || state==RoomState::Loading || state==RoomState::Bootstrapping || state==RoomState::Running;}
     void Fail(std::string why){error=std::move(why);state=RoomState::Error;Close(listener);connections.clear();inputs.clear();echoes.clear();frames.clear();}
     bool Queue(Connection& c,const Bytes& p){if(c.Queue(p))return true;Fail("Room send queue exceeded its bounded capacity");return false;}
     bool Broadcast(const Bytes& p){for(auto& c:connections)if(c->welcomed && !c->Queue(p)){Fail("Room broadcast queue full");return false;}return true;}
@@ -183,11 +202,14 @@ struct Room::Impl {
         return true;
     }
     void BeginLoading(Clock::time_point now){state=RoomState::Loading;loading_started=now;Close(listener);}
-    void BeginRunning(Clock::time_point now){
-        state=RoomState::Running;submit_next=id.first_tick+id.input_delay;frame_next=consume_next=id.first_tick;
+    void ResetRawRound(uint64_t tick){raw_tick=tick;raw_pads={};raw_proofs={};raw_frame.reset();local_proof.reset();local_raw_pad.reset();raw_consumed=false;}
+    void BeginRaw(){state=RoomState::Bootstrapping;ResetRawRound(id.first_tick);}
+    void BeginRunning(Clock::time_point now,uint64_t first){
+        state=RoomState::Running;submit_next=first+id.input_delay;frame_next=consume_next=first;
+        raw_pads={};raw_proofs={};raw_frame.reset();local_proof.reset();local_raw_pad.reset();raw_consumed=false;
         progress=now;Close(listener);
         for(auto& c:connections){c->wire_next=submit_next;c->received=c->pinged=now;}
-        for(uint64_t t=id.first_tick;t<submit_next;++t){
+        for(uint64_t t=first;t<submit_next;++t){
             if(host)for(const auto& p:lobby.players)inputs[t][p.peer]=Neutral();
             else echoes[t]=Neutral();
         }
@@ -199,9 +221,31 @@ struct Room::Impl {
             const auto& token=worlds[p.peer-1];if(token && *token!=*local_world){Fail("Online peers loaded different native worlds");return false;}
         }
         for(const auto& p:lobby.players)if(!worlds[p.peer-1])return true;
-        auto packet=Packet(Wire::Activate);packet.insert(packet.end(),local_world->begin(),local_world->end());
+        auto packet=Packet(native_bootstrap?Wire::BootstrapBegin:Wire::Activate);packet.insert(packet.end(),local_world->begin(),local_world->end());
         U64(packet,lobby.revision);U64(packet,PlayerMask(),2);U64(packet,id.first_tick);
-        if(!Broadcast(packet))return false;BeginRunning(now);return true;
+        if(!Broadcast(packet))return false;if(native_bootstrap)BeginRaw();else BeginRunning(now,id.first_tick);return true;
+    }
+    bool EmitRawFrame(){
+        if(!host || state!=RoomState::Bootstrapping || raw_frame)return true;
+        for(const auto& player:lobby.players)if(!raw_pads[player.peer-1])return true;
+        RoomBootstrapFrame frame;frame.tick=raw_tick;frame.players_mask=PlayerMask();
+        auto packet=Packet(Wire::BootstrapFrame);U64(packet,raw_tick);U64(packet,frame.players_mask,2);
+        for(const auto& player:lobby.players){frame.players[player.peer-1]=*raw_pads[player.peer-1];WritePad(packet,frame.players[player.peer-1]);}
+        if(!Broadcast(packet))return false;raw_frame=frame;return true;
+    }
+    bool AdvanceRaw(Clock::time_point now){
+        if(!host || state!=RoomState::Bootstrapping || !raw_frame || !raw_consumed || !local_proof)return true;
+        if(now-loading_started>StartupTimeout){Fail("Online native bootstrap exceeded its 180-second startup deadline");return false;}
+        for(const auto& player:lobby.players)if(!raw_proofs[player.peer-1])return true;
+        bool ready=true;const auto digest=local_proof->digest;
+        for(const auto& player:lobby.players){const auto& proof=*raw_proofs[player.peer-1];
+            if(proof.digest!=digest){Fail("Native bootstrap completed worlds diverged");return false;}ready&=proof.ready;}
+        if(raw_tick==UINT64_MAX || (ready && raw_tick+1>UINT64_MAX-id.input_delay)){Fail("Native bootstrap tick range exhausted");return false;}
+        const auto next=raw_tick+1;
+        auto packet=Packet(ready?Wire::BootstrapActivate:Wire::BootstrapContinue);
+        packet.insert(packet.end(),local_world->begin(),local_world->end());U64(packet,lobby.revision);U64(packet,PlayerMask(),2);
+        U64(packet,raw_tick);U64(packet,next);packet.insert(packet.end(),digest.begin(),digest.end());
+        if(!Broadcast(packet))return false;if(ready)BeginRunning(now,next);else ResetRawRound(next);return true;
     }
     bool CompleteFrames(Clock::time_point now){
         while(!frame_exhausted && frames.size()<Window){
@@ -233,7 +277,7 @@ struct Room::Impl {
     // False means a protocol violation. Unadmitted connections are rejected
     // individually; a violation by an admitted participant stops every peer.
     bool Message(Connection& c,std::span<const uint8_t> bytes,Clock::time_point now){
-        Reader r{bytes};if(r.Number(4)!=0x4257524D || r.Byte()!=3)return false;const auto kind=Wire(r.Byte());
+        Reader r{bytes};if(r.Number(4)!=0x4257524D || r.Byte()!=4)return false;const auto kind=Wire(r.Byte());
         if(kind==Wire::Hello){
             if(!host || c.welcomed || (state!=RoomState::Listening && state!=RoomState::Lobby))return false;
             const auto identity=ReadIdentity(r);const auto mode=r.Byte();auto name=r.String();std::string normalized;
@@ -264,7 +308,7 @@ struct Room::Impl {
             if(!r.Done())return false;if(kind==Wire::Ping){auto p=Packet(Wire::Pong);return c.Queue(p);}return true;
         }
         if(kind>=Wire::CheckpointBegin && kind<=Wire::CheckpointAck){
-            if(!checkpoint_mode || state==RoomState::Loading || state==RoomState::Running)return false;
+            if(!checkpoint_mode || state==RoomState::Loading || state==RoomState::Bootstrapping || state==RoomState::Running)return false;
             if(kind==Wire::CheckpointBegin){
                 if(host || state!=RoomState::Transferring || checkpoint_size || c.transfer!=Connection::Transfer::Sending)return false;
                 const auto size=r.Number(4);std::array<uint8_t,32> digest{};for(auto& b:digest)b=r.Byte();
@@ -306,7 +350,7 @@ struct Room::Impl {
             return false;
         }
         if(kind==Wire::Profile){
-            if(!host || (state!=RoomState::Lobby && state!=RoomState::Loading && state!=RoomState::Running))return false;
+            if(!host || (state!=RoomState::Lobby && state!=RoomState::Loading && state!=RoomState::Bootstrapping && state!=RoomState::Running))return false;
             const auto sequence=uint32_t(r.Number(4));const auto action=r.Byte();std::string name;LobbyCharacter character{};uint8_t color=0,ready=0;
             if(action==1)name=r.String();else if(action==2){character=LobbyCharacter(r.Byte());color=r.Byte();}else if(action==3)ready=r.Byte();else return false;
             if(!r.Done() || ready>1 || sequence!=c.profile_next || !sequence)return false;
@@ -321,7 +365,7 @@ struct Room::Impl {
             return c.Queue(reply);
         }
         if(kind==Wire::ProfileReply){
-            if(host || (state!=RoomState::Lobby && state!=RoomState::Loading && state!=RoomState::Running))return false;
+            if(host || (state!=RoomState::Lobby && state!=RoomState::Loading && state!=RoomState::Bootstrapping && state!=RoomState::Running))return false;
             const auto sequence=uint32_t(r.Number(4));const auto result=r.Byte();const auto revision=r.Number(8);
             if(!r.Done() || !pending_profile || sequence!=pending_profile || revision!=lobby.revision || result>uint8_t(LobbyResult::NotReady))return false;
             pending_profile=0;profile_result=LobbyResult(result);return true;
@@ -336,25 +380,53 @@ struct Room::Impl {
         }
         if(kind==Wire::Start){
             if(host || state!=RoomState::Lobby)return false;
+            const auto mode=r.Byte();if(mode>1)return false;
             auto snapshot=ReadRoster(r);if(!r.Done() || !snapshot || !snapshot->locked || snapshot->players.size()<2 || snapshot->capacity!=lobby.capacity || snapshot->players.size()!=lobby.players.size())return false;
             auto expected=lobby;expected.locked=true;expected.revision=snapshot->revision;
             if(*snapshot!=expected || snapshot->revision<=lobby.revision)return false;
-            lobby=std::move(*snapshot);BeginLoading(now);return true;
+            lobby=std::move(*snapshot);native_bootstrap=mode!=0;BeginLoading(now);return true;
         }
-        if(kind==Wire::WorldReady){
-            if(!host || (state!=RoomState::Loading && state!=RoomState::Running))return false;
+        if(kind==Wire::WorldReady || kind==Wire::BootstrapWorldReady){
+            if(!host || native_bootstrap!=(kind==Wire::BootstrapWorldReady) ||
+                (state!=RoomState::Loading && state!=RoomState::Bootstrapping && state!=RoomState::Running))return false;
             std::array<uint8_t,32> token{};for(auto& b:token)b=r.Byte();
             if(!r.Done() || !std::any_of(token.begin(),token.end(),[](auto b){return b!=0;}))return false;
             auto& previous=worlds[c.peer-1];if(previous && *previous!=token)return false;
-            if(state==RoomState::Running)return previous && *previous==token;
+            if(state!=RoomState::Loading)return previous && *previous==token;
             previous=token;return ActivateIfReady(now);
         }
-        if(kind==Wire::Activate){
-            if(host || state!=RoomState::Loading || !local_world)return false;
+        if(kind==Wire::Activate || kind==Wire::BootstrapBegin){
+            if(host || state!=RoomState::Loading || !local_world || native_bootstrap!=(kind==Wire::BootstrapBegin))return false;
             std::array<uint8_t,32> token{};for(auto& b:token)b=r.Byte();
             const auto revision=r.Number(8),mask=r.Number(2),tick=r.Number(8);
             if(!r.Done() || token!=*local_world || revision!=lobby.revision || mask!=PlayerMask() || tick!=id.first_tick)return false;
-            BeginRunning(now);return true;
+            if(native_bootstrap)BeginRaw();else BeginRunning(now,id.first_tick);return true;
+        }
+        if(kind==Wire::BootstrapPad){
+            if(!host || state!=RoomState::Bootstrapping || !native_bootstrap || raw_frame)return false;
+            const auto tick=r.Number(8);const auto pad=ReadPad(r);
+            if(!r.Done() || tick!=raw_tick || raw_pads[c.peer-1])return false;raw_pads[c.peer-1]=pad;return true;
+        }
+        if(kind==Wire::BootstrapFrame){
+            if(host || state!=RoomState::Bootstrapping || !native_bootstrap || raw_frame || !local_raw_pad)return false;
+            RoomBootstrapFrame frame;frame.tick=r.Number(8);frame.players_mask=uint16_t(r.Number(2));
+            if(frame.tick!=raw_tick || frame.players_mask!=PlayerMask())return false;
+            for(const auto& player:lobby.players)frame.players[player.peer-1]=ReadPad(r);
+            if(!r.Done() || frame.players[peer-1]!=*local_raw_pad)return false;raw_frame=frame;return true;
+        }
+        if(kind==Wire::BootstrapComplete){
+            if(!host || state!=RoomState::Bootstrapping || !raw_frame || raw_proofs[c.peer-1])return false;
+            const auto tick=r.Number(8);const auto ready=r.Byte();BootstrapProof proof;proof.ready=ready!=0;for(auto& b:proof.digest)b=r.Byte();
+            if(!r.Done() || ready>1 || tick!=raw_tick || !Nonzero(proof.digest))return false;
+            raw_proofs[c.peer-1]=proof;return AdvanceRaw(now);
+        }
+        if(kind==Wire::BootstrapContinue || kind==Wire::BootstrapActivate){
+            if(host || state!=RoomState::Bootstrapping || !raw_consumed || !local_proof || !local_world)return false;
+            Hash token{},digest{};for(auto& b:token)b=r.Byte();const auto revision=r.Number(8),mask=r.Number(2),completed=r.Number(8),next=r.Number(8);for(auto& b:digest)b=r.Byte();
+            const bool activate=kind==Wire::BootstrapActivate;
+            if(!r.Done() || token!=*local_world || revision!=lobby.revision || mask!=PlayerMask() || completed!=raw_tick || completed==UINT64_MAX ||
+                next!=completed+1 || digest!=local_proof->digest || (activate && (!local_proof->ready || next>UINT64_MAX-id.input_delay)))return false;
+            if(activate)BeginRunning(now,next);else ResetRawRound(next);return true;
         }
         if(kind==Wire::Input){
             if(!host || state!=RoomState::Running)return false;
@@ -426,7 +498,7 @@ bool Room::ConfirmCheckpointInstalled(bool success){
     if(!p.Queue(c,packet))return false;p.install_reported=true;c.transfer=Connection::Transfer::AwaitAck;c.transfer_progress=Clock::now();return true;
 }
 bool Room::checkpoint_ready()const{
-    const auto& p=*impl_;return p.checkpoint_mode?(p.host || p.checkpoint_confirmed):(p.state==RoomState::Lobby || p.state==RoomState::Loading || p.state==RoomState::Running);
+    const auto& p=*impl_;return p.checkpoint_mode?(p.host || p.checkpoint_confirmed):(p.state==RoomState::Lobby || p.state==RoomState::Loading || p.state==RoomState::Bootstrapping || p.state==RoomState::Running);
 }
 std::vector<RoomCheckpointPeer> Room::checkpoint_peers()const{
     const auto& p=*impl_;std::vector<RoomCheckpointPeer> result;
@@ -444,7 +516,7 @@ std::vector<RoomCheckpointPeer> Room::checkpoint_peers()const{
 }
 void Room::Poll(Clock::time_point now){
     auto& p=*impl_;if(!p.Active())return;
-    if(p.state==RoomState::Loading && now-p.loading_started>StartupTimeout){p.Fail("Online native world startup exceeded its 180-second deadline");return;}
+    if((p.state==RoomState::Loading || p.state==RoomState::Bootstrapping) && now-p.loading_started>StartupTimeout){p.Fail("Online native world startup exceeded its 180-second deadline");return;}
     if(p.host && p.listener!=INVALID_SOCKET){
         // Bounded work per poll, including unauthenticated sockets.
         for(unsigned i=0;i<16;++i){auto socket=accept(p.listener,nullptr,nullptr);if(socket==INVALID_SOCKET)break;
@@ -481,9 +553,9 @@ void Room::Poll(Clock::time_point now){
         }
         const bool transferring=p.checkpoint_mode && c.welcomed && c.transfer!=Connection::Transfer::Complete;
         if(transferring && now-c.transfer_progress>TransferTimeout)alive=false;
-        if(now-c.received>(p.state==RoomState::Loading?StartupTimeout:transferring?TransferTimeout:Timeout))alive=false;
+        if(now-c.received>((p.state==RoomState::Loading || p.state==RoomState::Bootstrapping)?StartupTimeout:transferring?TransferTimeout:Timeout))alive=false;
         if(!alive){
-            if(!p.host || (c.welcomed && (p.state==RoomState::Loading || p.state==RoomState::Running))){p.Fail("Online room participant disconnected, timed out, or sent invalid data; simulation stopped");return;}
+            if(!p.host || (c.welcomed && (p.state==RoomState::Loading || p.state==RoomState::Bootstrapping || p.state==RoomState::Running))){p.Fail("Online room participant disconnected, timed out, or sent invalid data; simulation stopped");return;}
             const auto departed=c.welcomed?c.peer:0;
             p.connections.erase(p.connections.begin()+i);
             if(departed){
@@ -495,6 +567,7 @@ void Room::Poll(Clock::time_point now){
         }
         ++i;
     }
+    if(p.state==RoomState::Bootstrapping && !p.EmitRawFrame())return;
     if(p.state==RoomState::Running){
         if(p.host && !p.CompleteFrames(now))return;
         if(now-p.progress>Timeout)p.Fail("Online room is missing contiguous input; simulation stopped");
@@ -503,23 +576,51 @@ void Room::Poll(Clock::time_point now){
 bool Room::Rename(std::string_view name){return impl_->Profile(1,name);}
 bool Room::SetAppearance(LobbyCharacter c,uint8_t color){return impl_->Profile(2,{},c,color);}
 bool Room::SetReady(bool ready){return impl_->Profile(3,{},LobbyCharacter::Mickey,0,ready);}
-bool Room::Start(){
+bool Room::Start(){return StartInternal(false);}
+bool Room::StartNativeBootstrap(){return StartInternal(true);}
+bool Room::StartInternal(bool bootstrap){
     auto& p=*impl_;if(!p.host || p.state!=RoomState::Lobby || p.roster.players().size()<2)return false;
     if(p.checkpoint_mode && std::any_of(p.connections.begin(),p.connections.end(),[](const auto& c){return c->welcomed && c->transfer!=Connection::Transfer::Complete;}))return false;
     if(p.roster.Start()!=LobbyResult::Ok)return false;p.lobby=Snapshot(p.roster);
     // Pending unadmitted TCP sockets do not become gameplay participants.
     for(size_t i=0;i<p.connections.size();)if(!p.connections[i]->welcomed)p.connections.erase(p.connections.begin()+i);else ++i;
-    auto start=Packet(Wire::Start);WriteRoster(start,p.lobby);if(!p.Broadcast(start))return false;p.BeginLoading(Clock::now());return true;
+    auto start=Packet(Wire::Start);U8(start,uint8_t(bootstrap));WriteRoster(start,p.lobby);if(!p.Broadcast(start))return false;
+    p.native_bootstrap=bootstrap;p.BeginLoading(Clock::now());return true;
 }
-bool Room::WorldReady(const std::array<uint8_t,32>& token){
+bool Room::WorldReady(const std::array<uint8_t,32>& token){return WorldReadyInternal(token,false);}
+bool Room::BootstrapWorldReady(const std::array<uint8_t,32>& token){return WorldReadyInternal(token,true);}
+bool Room::WorldReadyInternal(const std::array<uint8_t,32>& token,bool bootstrap){
     auto& p=*impl_;
-    if(p.state!=RoomState::Loading && p.state!=RoomState::Running)return false;
+    if(p.native_bootstrap!=bootstrap || (p.state!=RoomState::Loading && p.state!=RoomState::Bootstrapping && p.state!=RoomState::Running))return false;
     if(p.local_world)return *p.local_world==token;
     if(p.state!=RoomState::Loading || !std::any_of(token.begin(),token.end(),[](auto b){return b!=0;}))return false;
     const auto now=Clock::now();if(now-p.loading_started>StartupTimeout){p.Fail("Online native world startup exceeded its 180-second deadline");return false;}
     p.local_world=token;
     if(p.host){p.worlds[p.peer-1]=token;return p.ActivateIfReady(now);}
-    auto packet=Packet(Wire::WorldReady);packet.insert(packet.end(),token.begin(),token.end());return p.Queue(*p.connections.front(),packet);
+    auto packet=Packet(bootstrap?Wire::BootstrapWorldReady:Wire::WorldReady);packet.insert(packet.end(),token.begin(),token.end());return p.Queue(*p.connections.front(),packet);
+}
+bool Room::native_bootstrap()const{return impl_->native_bootstrap;}
+uint64_t Room::bootstrap_tick()const{return impl_->raw_tick;}
+bool Room::SubmitBootstrapPad(uint64_t tick,const Pad& pad){
+    auto& p=*impl_;if(p.state!=RoomState::Bootstrapping || !p.native_bootstrap || tick!=p.raw_tick || p.local_raw_pad || p.raw_frame || p.local_proof)return false;
+    if(Clock::now()-p.loading_started>StartupTimeout){p.Fail("Online native bootstrap exceeded its 180-second startup deadline");return false;}
+    if(p.host)p.raw_pads[p.peer-1]=pad;
+    else {auto packet=Packet(Wire::BootstrapPad);U64(packet,tick);WritePad(packet,pad);if(!p.Queue(*p.connections.front(),packet))return false;}
+    p.local_raw_pad=pad;return true;
+}
+bool Room::PeekBootstrapFrame(RoomBootstrapFrame& frame)const{
+    const auto& p=*impl_;if(p.state!=RoomState::Bootstrapping || !p.raw_frame || p.raw_consumed)return false;frame=*p.raw_frame;return true;
+}
+bool Room::TakeBootstrapFrame(RoomBootstrapFrame& frame){
+    auto& p=*impl_;if(!PeekBootstrapFrame(frame))return false;p.raw_consumed=true;return true;
+}
+bool Room::CompleteBootstrap(uint64_t tick,bool ready,const Hash& digest){
+    auto& p=*impl_;if(p.state!=RoomState::Bootstrapping || !p.raw_consumed || !p.raw_frame || tick!=p.raw_tick || p.local_proof || !Nonzero(digest))return false;
+    if(Clock::now()-p.loading_started>StartupTimeout){p.Fail("Online native bootstrap exceeded its 180-second startup deadline");return false;}
+    p.local_proof=Impl::BootstrapProof{ready,digest};
+    if(p.host){p.raw_proofs[p.peer-1]=p.local_proof;return p.AdvanceRaw(Clock::now());}
+    auto packet=Packet(Wire::BootstrapComplete);U64(packet,tick);U8(packet,uint8_t(ready));packet.insert(packet.end(),digest.begin(),digest.end());
+    if(!p.Queue(*p.connections.front(),packet))return false;return true;
 }
 bool Room::SubmitLocal(uint64_t tick,const RoomCommand& command){
     auto& p=*impl_;if(p.state!=RoomState::Running || p.submit_exhausted || tick!=p.submit_next || tick<p.consume_next || tick-p.consume_next>=Window || !ValidCommand(command))return false;
@@ -830,6 +931,126 @@ bool TestOnlineRoom(){
         RoomFrame a,b;check(rooms[0]->TakeFrame(a) && rooms[1]->TakeFrame(b) && a==b && a.tick==0 && a.players_mask==3,"shared fixed frame preserves both active bits and absent slots");
     }
     id=saved;
+    // Actual zero-delay raw native bootstrap is distinct from interpreted
+    // gameplay and advances only at a completed all-peer observation barrier.
+    auto raw_loading=[&](unsigned count){
+        if(!setup(count))return false;for(auto& room:rooms)if(!room->SetReady(true))return false;
+        if(!pump([&]{return std::all_of(rooms[0]->lobby().players.begin(),rooms[0]->lobby().players.end(),[](const auto& player){return player.ready;}) &&
+            std::none_of(rooms.begin(),rooms.end(),[](const auto& room){return room->profile_pending();});}))return false;
+        return rooms[0]->StartNativeBootstrap() && pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& room){return room->state()==RoomState::Loading && room->native_bootstrap();});});
+    };
+    auto raw_started=[&](unsigned count){if(!raw_loading(count))return false;
+        for(auto& room:rooms)if(!room->BootstrapWorldReady(world))return false;
+        return pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& room){return room->state()==RoomState::Bootstrapping;});});
+    };
+    auto raw_take=[&](uint64_t tick){
+        for(unsigned i=0;i<rooms.size();++i){Pad pad;pad.buttons=uint16_t(i*101);pad.left_x=int16_t(-int(i)*777);pad.left_trigger=uint8_t(i*11);
+            if(!rooms[i]->SubmitBootstrapPad(tick,pad))return false;}
+        if(!pump([&]{RoomBootstrapFrame frame;return std::all_of(rooms.begin(),rooms.end(),[&](const auto& room){return room->PeekBootstrapFrame(frame);});}))return false;
+        RoomBootstrapFrame first;if(!rooms[0]->TakeBootstrapFrame(first))return false;
+        for(unsigned i=1;i<rooms.size();++i){RoomBootstrapFrame frame;if(!rooms[i]->TakeBootstrapFrame(frame) || frame!=first)return false;}return true;
+    };
+    if(!check(raw_loading(16),"sixteen real peers negotiate raw bootstrap Loading explicitly"))return false;
+    for(auto& room:rooms){RoomFrame interpreted;RoomBootstrapFrame raw;
+        check(!room->WorldReady(world) && !room->SubmitLocal(id.first_tick,Neutral()) && !room->SubmitBootstrapPad(id.first_tick,{}) &&
+            !room->PeekFrame(interpreted) && !room->PeekBootstrapFrame(raw),"Loading raw mode cannot use interpreted world assertion, input or either frame API");}
+    for(unsigned i=0;i<15;++i)check(rooms[i]->BootstrapWorldReady(world),"loaded single-player world assertion does not require gameplay producer readiness");
+    check(pump([&]{return std::count_if(rooms[0]->impl_->worlds.begin(),rooms[0]->impl_->worlds.end(),[](const auto& token){return bool(token);})==15;}),"raw bootstrap waits for final loaded native world");
+    const auto bootstrap_slow=Clock::now()+std::chrono::seconds(20);for(unsigned i=0;i<15;++i)rooms[i]->Poll(bootstrap_slow);
+    check(std::all_of(rooms.begin(),rooms.end(),[](const auto& room){return room->state()==RoomState::Loading;}),"last loader may block longer than runtime timeout without beginning a raw round");
+    check(rooms[15]->BootstrapWorldReady(world) && pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& room){return room->state()==RoomState::Bootstrapping;});}),"all matching loaded worlds open raw round at original first tick with zero delay");
+    for(unsigned round=0;round<3;++round){
+        const auto tick=id.first_tick+round;Hash digest{};digest[0]=uint8_t(50+round);
+        for(auto& room:rooms){RoomFrame interpreted;check(room->bootstrap_tick()==tick && !room->PeekFrame(interpreted) && !room->SubmitLocal(tick,Neutral()) &&
+            !room->CompleteBootstrap(tick,true,digest),"raw round is typed separately and cannot complete before consumed native frame");}
+        for(unsigned i=0;i<15;++i){Pad pad;pad.buttons=uint16_t(i*101);pad.left_x=int16_t(-int(i)*777);pad.left_trigger=uint8_t(i*11);check(rooms[i]->SubmitBootstrapPad(tick,pad),"only current raw round input accepted");}
+        for(unsigned i=0;i<3;++i)for(auto& room:rooms)room->Poll();RoomBootstrapFrame pending;
+        check(!rooms[0]->PeekBootstrapFrame(pending) && !rooms[0]->SubmitBootstrapPad(tick+1,{}),"one missing peer stalls raw frame and future round submission");
+        Pad last;last.buttons=1515;last.left_x=-11655;last.left_trigger=165;check(rooms[15]->SubmitBootstrapPad(tick,last),"last raw input completes full frozen roster");
+        check(pump([&]{RoomBootstrapFrame frame;return std::all_of(rooms.begin(),rooms.end(),[&](const auto& room){return room->PeekBootstrapFrame(frame);});}),"same authoritative raw frame reaches all sixteen clients/host");
+        RoomBootstrapFrame authoritative;
+        for(unsigned i=0;i<16;++i){RoomBootstrapFrame frame;check(rooms[i]->TakeBootstrapFrame(frame) && frame.tick==tick && frame.players_mask==0xFFFF &&
+            (i==0 || frame==authoritative),"raw input own-echo and complete frame agree before native tick");if(i==0)authoritative=frame;
+            check(!rooms[i]->TakeBootstrapFrame(frame) && !rooms[i]->CompleteBootstrap(tick+1,true,digest),"each raw frame consumed once; future completion rejected");}
+        for(unsigned i=0;i<15;++i){const bool ready=round==2 || (round==0?i!=5:true);
+            check(rooms[i]->CompleteBootstrap(tick,ready,digest) && !rooms[i]->CompleteBootstrap(tick,ready,digest),"completed native proof is one-shot with a fresh per-round readiness vote");}
+        for(unsigned i=0;i<3;++i)for(auto& room:rooms)room->Poll();
+        check(rooms[0]->state()==RoomState::Bootstrapping && rooms[0]->bootstrap_tick()==tick && !rooms[0]->SubmitBootstrapPad(tick+1,{}),"no Continue or cutover before last peer completed same native tick");
+        if(round==0){const auto slow_complete=Clock::now()+std::chrono::seconds(20);for(unsigned i=0;i<15;++i)rooms[i]->Poll(slow_complete);
+            check(rooms[0]->state()==RoomState::Bootstrapping && rooms[0]->bootstrap_tick()==tick,"delayed native completion beyond15seconds retains startup barrier");}
+        check(rooms[15]->CompleteBootstrap(tick,round!=1,digest),"last completed proof participates in this round only");
+        if(round<2)check(pump([&]{return std::all_of(rooms.begin(),rooms.end(),[&](const auto& room){return room->state()==RoomState::Bootstrapping && room->bootstrap_tick()==tick+1;});}),"one false current readiness vote orders Continue without sticky previous votes");
+        else check(pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& room){return room->state()==RoomState::Running;});}),"all-ready matching proofs at same completed tick atomically activate interpreted gameplay");
+    }
+    const auto first_game=id.first_tick+3;
+    for(auto& room:rooms){RoomBootstrapFrame raw;check(room->next_tick()==first_game && room->next_submit_tick()==first_game+id.input_delay &&
+        !room->PeekBootstrapFrame(raw) && !room->TakeBootstrapFrame(raw) && !room->SubmitBootstrapPad(first_game,{}),"cutover clears raw state and retains negotiated gameplay input delay at next exact tick");}
+    for(uint64_t tick=first_game;tick<first_game+id.input_delay;++tick){
+        check(pump([&]{RoomFrame frame;return std::all_of(rooms.begin(),rooms.end(),[&](const auto& room){return room->PeekFrame(frame);});}),"post-bootstrap neutral gameplay delay frame arrives");
+        for(auto& room:rooms){RoomFrame frame;check(room->TakeFrame(frame) && frame.tick==tick && frame.players_mask==0xFFFF &&
+            std::all_of(frame.players.begin(),frame.players.end(),[](const auto& movement){return movement==Neutral();}),"neutral seeds begin after completed raw tick, never overwrite raw history");}
+    }
+    for(auto& room:rooms)check(room->SubmitLocal(first_game+id.input_delay,Neutral()),"first genuine interpreted command follows raw cutover seeds");
+    check(pump([&]{RoomFrame frame;return std::all_of(rooms.begin(),rooms.end(),[&](const auto& room){return room->PeekFrame(frame);});}),"first full interpreted frame delivered after bootstrap");
+    for(auto& room:rooms){RoomFrame frame;check(room->TakeFrame(frame) && frame.tick==first_game+id.input_delay,"gameplay consumes only interpreted frame timeline after cutover");}
+    auto old_raw=Packet(Wire::BootstrapPad);U64(old_raw,first_game);WritePad(old_raw,{});rooms[1]->impl_->connections.front()->Queue(old_raw);
+    check(pump([&]{return rooms[0]->state()==RoomState::Error;}),"queued old raw input cannot survive interpreted gameplay cutover");
+    if(!check(raw_loading(2),"raw loaded-world mismatch fixture freezes roster"))return false;
+    check(rooms[0]->BootstrapWorldReady(world) && rooms[1]->BootstrapWorldReady(different) &&
+        pump([&]{return rooms[0]->state()==RoomState::Error;}),"raw bootstrap loaded-world assertions must match before any raw native input");
+    for(unsigned malformed=0;malformed<8;++malformed){
+        if(!check(raw_started(2),"malformed raw bootstrap fixture starts real two-peer room"))return false;
+        auto packet=Packet(Wire::BootstrapPad);U64(packet,malformed==7?id.first_tick-1:id.first_tick+(malformed==0?1:0));WritePad(packet,{});
+        if(malformed==1)U64(packet,1); // Spoofed sender field is not in the wire shape.
+        if(malformed==2){packet=Packet(Wire::BootstrapComplete);U64(packet,id.first_tick);U8(packet,1);packet.resize(packet.size()+32,1);}
+        if(malformed==3)packet=Packet(Wire::BootstrapBegin);
+        if(malformed==4)packet=Packet(Wire::BootstrapActivate);
+        if(malformed==5)packet=Packet(Wire::BootstrapContinue);
+        rooms[1]->impl_->connections.front()->Queue(packet);
+        if(malformed==6)rooms[1]->impl_->connections.front()->Queue(packet);
+        check(pump([&]{return rooms[0]->state()==RoomState::Error;}),"future/spoofed/duplicate raw input, premature completion and guest authority forgery rejected");
+    }
+    if(!check(raw_started(2) && raw_take(id.first_tick),"raw observation mismatch fixture consumes same frame"))return false;
+    Hash observation{};observation[0]=1;auto mismatch=observation;++mismatch[0];
+    check(rooms[0]->CompleteBootstrap(id.first_tick,true,observation) && rooms[1]->CompleteBootstrap(id.first_tick,true,mismatch) &&
+        pump([&]{return rooms[0]->state()==RoomState::Error;}),"unequal completed native observations stop bootstrap instead of cutting over");
+    for(unsigned malformed=0;malformed<5;++malformed){
+        if(!check(raw_started(2) && raw_take(id.first_tick),"invalid raw completion fixture consumes common native tick"))return false;
+        auto packet=Packet(Wire::BootstrapComplete);U64(packet,malformed==4?id.first_tick-1:id.first_tick+(malformed==0?1:0));U8(packet,malformed==1?2:1);
+        packet.resize(packet.size()+32,malformed==2?0:1);rooms[1]->impl_->connections.front()->Queue(packet);
+        if(malformed==3)rooms[1]->impl_->connections.front()->Queue(packet);
+        check(pump([&]{return rooms[0]->state()==RoomState::Error;}),"future tick, invalid ready flag, empty digest and duplicate completed proof rejected");
+    }
+    if(!check(raw_started(2),"raw own-input echo fixture starts"))return false;
+    check(rooms[1]->SubmitBootstrapPad(id.first_tick,{}),"client retains immutable raw sample for own echo");
+    auto fake_raw=Packet(Wire::BootstrapFrame);U64(fake_raw,id.first_tick);U64(fake_raw,3,2);WritePad(fake_raw,{});Pad altered;altered.buttons=1;WritePad(fake_raw,altered);
+    rooms[0]->impl_->connections.front()->Queue(fake_raw);
+    check(pump([&]{return rooms[1]->state()==RoomState::Error;}) && rooms[0]->state()==RoomState::Bootstrapping,"client rejects raw authoritative own-input tampering before native delivery");
+    for(unsigned malformed=0;malformed<4;++malformed){
+        if(!check(raw_started(2) && raw_take(id.first_tick),"raw client-control validation fixture consumes common native tick"))return false;
+        if(malformed!=3)check(rooms[1]->CompleteBootstrap(id.first_tick,malformed!=0,observation),"client retains completed proof before validating server round control");
+        auto packet=Packet(malformed==1 || malformed==3?Wire::BootstrapContinue:Wire::BootstrapActivate);
+        auto token=world;if(malformed==2)++token[0];packet.insert(packet.end(),token.begin(),token.end());U64(packet,rooms[0]->lobby().revision);U64(packet,3,2);
+        U64(packet,id.first_tick);U64(packet,id.first_tick+(malformed==1?2:1));packet.insert(packet.end(),observation.begin(),observation.end());
+        rooms[0]->impl_->connections.front()->Queue(packet);
+        check(pump([&]{return rooms[1]->state()==RoomState::Error;}) && rooms[0]->state()==RoomState::Bootstrapping,
+            "client rejects activation against false own-ready vote, wrong Continue tick/world and control before own completion");
+    }
+    if(!check(raw_started(2),"raw absolute startup timeout fixture starts"))return false;
+    const auto raw_clock=Clock::now();for(unsigned seconds=10;seconds<=170;seconds+=10)for(auto& room:rooms)room->Poll(raw_clock+std::chrono::seconds(seconds));
+    check(rooms[0]->state()==RoomState::Bootstrapping,"heartbeats allow bounded slow native bootstrap rounds");rooms[0]->Poll(raw_clock+StartupTimeout+std::chrono::seconds(1));
+    check(rooms[0]->state()==RoomState::Error,"raw bootstrap cannot extend absolute startup deadline with heartbeats or repeated rounds");
+    if(!check(raw_started(2),"raw peer loss fixture starts"))return false;rooms[1]->Disconnect();
+    check(pump([&]{return rooms[0]->state()==RoomState::Error;}),"peer loss during synchronized native bootstrap stops whole room");
+    const auto raw_saved=id;id.first_tick=UINT64_MAX-Window;
+    if(!check(raw_started(2),"raw tick overflow fixture begins within valid identity range"))return false;
+    for(unsigned round=0;round<Window+1;++round){const auto tick=id.first_tick+round;
+        if(!check(raw_take(tick),"raw overflow fixture never skips a transport round"))return false;
+        const bool last=round==Window;check(rooms[0]->CompleteBootstrap(tick,last,observation) && rooms[1]->CompleteBootstrap(tick,last,observation),"overflow proof submitted after actual frame consumption");
+        if(last)check(pump([&]{return rooms[0]->state()==RoomState::Error;}),"UINT64_MAX completed round cannot wrap into another raw/gameplay tick");
+        else if(!check(pump([&]{return rooms[0]->bootstrap_tick()==tick+1 && rooms[1]->bootstrap_tick()==tick+1;}),"raw continuation increments exact uint64 tick"))return false;
+    }
+    id=raw_saved;
     // Real checkpoint format and worker installation, using an exclusively
     // created temporary fixture root. No production save/content paths enter.
     namespace fs=std::filesystem;

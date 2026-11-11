@@ -20,6 +20,7 @@
 #include "native_engine.h"
 #include "online.h"
 #include "online_runtime.h"
+#include "online_room_bootstrap.h"
 #include "world_observation.h"
 #include "native_entity_probe.h"
 #include <rex/cvar.h>
@@ -1253,19 +1254,30 @@ struct CameraMotion {
 
 void CompleteNetworkObservation(PPCContext& ctx,uint8_t* base) {
     auto& gate=em2::net::GameplayInputGate();
-    const bool report=gate.active() && gate.completion_pending();
+    auto* room=em2::net::CurrentRoomBootstrapGate();
+    const bool room_report=room && room->active() && room->completion_pending();
+    if(room && room->active() && gate.active()){
+        room->ObservationFailed();gate.ObservationFailed();return;
+    }
+    const bool legacy_report=gate.active() && gate.completion_pending();
+    const bool report=room_report || legacy_report;
     const bool trace=REXCVAR_GET(em2_trace_online_observations) && tick_number%30==0;
     if(!report && !trace) return;
     const auto saved=ctx;const auto mxcsr=_mm_getcsr();
     struct Restore {
-        PPCContext& ctx;PPCContext saved;unsigned mxcsr;
-        ~Restore(){ctx=saved;_mm_setcsr(mxcsr);}
-    } restore{ctx,saved,mxcsr};
+        PPCContext& ctx;std::array<uint8_t,sizeof(PPCContext)> saved;unsigned mxcsr;DWORD error=GetLastError();
+        Restore(PPCContext& value,unsigned csr):ctx(value),mxcsr(csr){std::memcpy(saved.data(),&ctx,sizeof(ctx));}
+        ~Restore(){std::memcpy(&ctx,saved.data(),sizeof(ctx));_mm_setcsr(mxcsr);SetLastError(error);}
+    } restore{ctx,mxcsr};
     em2::net::GameplayObservation state;
     auto& observations=state.players;
+    // Probe the real admitted actor/producer contract before freezing the
+    // observation and CRT counters for this same completed native update.
+    const bool room_ready=room_report?room->CheckGameplayReadiness(ctx,base):false;
+    ctx=saved;_mm_setcsr(mxcsr);
     const bool valid=em2::ReadNativeGameplayObservation(ctx,base,state);
     state.random=random_observation;
-    const auto observed_tick=report?gate.committed_tick():tick_number;
+    const auto observed_tick=room_report?room->committed_tick():(legacy_report?gate.committed_tick():tick_number);
     if(report && valid && state.players[0].mode==0 && state.players[1].mode==0)em2::TraceNativeEntitySnapshot(base,observed_tick);
     const auto digest=valid?em2::net::HashGameplayObservation(observed_tick,state):std::nullopt;
     ctx=saved;_mm_setcsr(mxcsr);
@@ -1298,7 +1310,10 @@ void CompleteNetworkObservation(PPCContext& ctx,uint8_t* base) {
     }
     if(report) {
         if(observed_tick==12 && script_wait_trace_size)LogScriptWaitTrace();
-        if(digest) gate.Complete(*digest);else gate.ObservationFailed();
+        if(room_report){
+            if(!digest)room->ObservationFailed();
+            else if(room->Complete(room_ready,*digest) && !room->SetJoining(!em2::NativeCoopReady(base)))room->ObservationFailed();
+        }else if(digest) gate.Complete(*digest);else gate.ObservationFailed();
     }
 }
 thread_local std::unordered_map<uint32_t,CameraMotion> camera_motion;
@@ -1385,7 +1400,7 @@ void StartTick(uint8_t* base,bool agreed=false,uint64_t input_tick=0) {
         if(!random_failure_history)random_failure_history=std::make_unique<RandomFailureHistory>();
         random_failure_history->Begin(input_tick);
     }else if(random_failure_history)random_failure_history->current=nullptr;
-    record_random=em2::net::GameplayInputGate().active() || REXCVAR_GET(em2_trace_online_observations);
+    record_random=em2::net::GameplayInputGate().active() || em2::net::RoomBootstrapActive() || REXCVAR_GET(em2_trace_online_observations);
     ui_containers.clear();
     ++tick_number;
     if(REXCVAR_GET(em2_trace_render)) { std::lock_guard lock(skin_output_mutex); skin_output_samples.clear(); }
@@ -1781,14 +1796,14 @@ PPC_FUNC_IMPL(sub_829EC348) {
     em2::MaybeQueueNativeStartLevel();
     em2::em1::MaybeProbeRegisteredLevelEntry();
     em2::em1::TickArchitecturePreview(ctx,base);
-    if(!em2::net::UpdateNativeOnlineSession(base))em2::net::UpdateOnlineQASession(base);
+    if(!em2::net::RoomBootstrapActive() && !em2::net::UpdateNativeOnlineSession(base))em2::net::UpdateOnlineQASession(base);
     static thread_local auto previous=Clock::now();
     static thread_local bool was_enabled=false;
     static thread_local bool was_network=false;
     const auto now=Clock::now();
     const auto elapsed=std::chrono::duration_cast<std::chrono::nanoseconds>(now-previous).count();
     previous=now;
-    const bool network=em2::net::GameplayInputGate().active();
+    const bool network=em2::net::GameplayInputGate().active() || em2::net::RoomBootstrapActive();
     const auto retained=em2::net::NativeOnlineTiming();
     frame_halted=retained.halted;
     const auto selected_cap=em2::FrameLimit();
@@ -1827,9 +1842,24 @@ PPC_FUNC_IMPL(sub_829ED310) {
     const auto arguments=ctx;
     application_delta=PPC_LOAD_U32(arguments.r3.u32+76);
     em2::net::Frame network_frame{};
-    const bool network_budget=em2::net::GameplayInputGate().active();
-    bool network_tick=false;
+    em2::net::RoomBootstrapFrame room_frame{};
+    auto* room=em2::net::CurrentRoomBootstrapGate();
+    const bool room_budget=em2::net::RoomBootstrapActive();
+    const bool network_budget=em2::net::GameplayInputGate().active() || room_budget;
+    bool network_tick=false,room_tick=false;
     const auto batch=em2::RunSimulationBatch(frame_steps,[&] {
+        network_tick=room_tick=false;
+        if(em2::net::RoomBootstrapActive()){
+            // A worker/current-owner mismatch, terminal state or gameplay
+            // cutover cannot accidentally fall through to an offline update.
+            if(!room || !room->active())return false;
+            if(em2::net::GameplayInputGate().active()){
+                room->ObservationFailed();em2::net::GameplayInputGate().ObservationFailed();return false;
+            }
+            room_tick=room->Prepare(room_frame)==em2::net::BootstrapAdmission::Ready;
+            return room_tick;
+        }
+        if(room_budget)return false;
         const auto admission=em2::net::GameplayInputGate().Prepare(network_frame);
         network_tick=admission==em2::net::Admission::Ready;
         return network_tick || admission==em2::net::Admission::Inactive;
@@ -1840,11 +1870,20 @@ PPC_FUNC_IMPL(sub_829ED310) {
     },[&] {
         // Finish the preceding tick with its original controller frame before
         // publishing the next agreed frame for the native update.
+        if(room_tick && !room->Commit(room_frame))return false;
         if(network_tick && !em2::net::GameplayInputGate().Commit(network_frame)) return false;
+        em2::NativeJoinTick join;
+        if(room_tick){
+            join.joining=room->joining();
+            if(!room->PublishedRetailFrame(join.owner_generation,join.raw_retail)){
+                room->ObservationFailed();return false;
+            }
+        }
         ctx=arguments;
         PPC_STORE_U32(arguments.r3.u32+76,std::bit_cast<uint32_t>(1.f/30.f));
-        StartTick(base,network_tick,network_frame.tick);
-        if(network_tick)em2::RunNativeSynchronizedJoin(ctx,base,network_frame.players[1].buttons);
+        StartTick(base,network_tick || room_tick,room_tick?room_frame.tick:network_frame.tick);
+        if(room_tick)em2::RunNativeSynchronizedJoin(ctx,base,join);
+        else if(network_tick)em2::RunNativeSynchronizedJoin(ctx,base,network_frame.players[1].buttons);
         const auto started=Clock::now();
         __imp__sub_829ED310(ctx,base);
         em2::em1::TickArchitectureScripts(ctx,base,std::bit_cast<float>(PPC_LOAD_U32(0x833FCA54)));
@@ -1859,8 +1898,9 @@ PPC_FUNC_IMPL(sub_829ED310) {
         // across attachment.
         ctx=arguments;
         em2::UpdateNativeJoinedPlayerControls(ctx,base);
-        em2::net::UpdateNativeOnlineSession(base,true);
-        return (network_budget || !em2::net::GameplayInputGate().active()) && !em2::net::NativeOnlineTiming().halted;
+        if(!em2::net::RoomBootstrapActive())em2::net::UpdateNativeOnlineSession(base,true);
+        return (network_budget || (!em2::net::GameplayInputGate().active() && !em2::net::RoomBootstrapActive())) &&
+            !em2::net::NativeOnlineTiming().halted && !em2::net::RoomBootstrapHalted();
     });
     frame_steps=batch.steps;
     if(network_budget && !network_debt.Consume(batch.steps)) {
@@ -2268,6 +2308,30 @@ bool TestSimulation() {
         }
         check(attached && ordered && !pending && updates==3 && finishes==3 && boundaries==4,
             "startup attachment happens at the same completed tick across presentation rates and multi-tick stalls, without carrying pre-world ticks across attachment");
+    }
+    for(const auto terminal:{net::BootstrapAdmission::Gameplay,net::BootstrapAdmission::Stopped}){
+        unsigned updates=0,post_updates=0,completed=0,readiness_probes=0,observations=0;
+        bool pending=false,ordered=true;net::BootstrapAdmission admission=net::BootstrapAdmission::Ready;
+        auto finish=[&]{
+            ordered &= pending && post_updates==completed;
+            ++post_updates; // Original native post-update precedes readiness.
+            ordered &= post_updates==updates;++readiness_probes;
+            ordered &= readiness_probes==post_updates;++observations;
+            ordered &= observations==readiness_probes;++completed;pending=false;
+            admission=completed==3?terminal:net::BootstrapAdmission::Ready;
+        };
+        for(unsigned presentation=0;presentation<8;++presentation){
+            // One full native update owns its raw pad until outer finalization.
+            // Waiting for its completion is NOT permission for offline fallback.
+            const auto batch=RunSimulationBatch(8,[&]{
+                if(pending)return false;
+                return admission==net::BootstrapAdmission::Ready;
+            },finish,[&]{ordered &= !pending;pending=true;++updates;return true;});
+            if(batch.finish_pending)finish(); // Actual outer829D95B8 responsibility.
+            else ordered &= !pending;
+        }
+        check(ordered && !pending && updates==3 && post_updates==3 && readiness_probes==3 && observations==3 && completed==3,
+            "raw Room completion waits finalize native post-update/readiness/observation exactly once; gameplay/stopped admission never falls through offline");
     }
     for(unsigned planned=0;planned<=8;++planned) for(unsigned available=0;available<=planned;++available) {
         unsigned started=0,finished=0,admissions=0;

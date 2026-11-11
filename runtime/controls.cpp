@@ -18,6 +18,7 @@
 #include <cstring>
 #include <fstream>
 #include <functional>
+#include <thread>
 #include <mutex>
 #include <optional>
 #include <vector>
@@ -78,7 +79,7 @@ uint64_t controls_generation=0;
 uint64_t view_poll_epoch=0;
 struct SynchronizedControls {
     DWORD owner_thread=0;
-    bool active=false,has_frame=false,exhausted=false;
+    bool active=false,has_frame=false,exhausted=false,gameplay_sampling_started=false;
     uint64_t next=0;
     em2::net::Frame frame{};
     struct Sample {bool valid=false,exhausted=false;uint64_t tick=0,next=0;em2::net::Pad pad{};};
@@ -570,13 +571,38 @@ bool ReadPublishedSynchronizedControls(uint64_t& generation,net::Frame& frame){
        synchronized_controls.owner_thread!=GetCurrentThreadId())return false;
     generation=controls_generation;frame=synchronized_controls.frame;return true;
 }
-void EndSynchronizedControls() {
+uint64_t SynchronizedControlsGeneration(){
     std::lock_guard lock(controls_mutex);
+    return synchronized_controls.active && synchronized_controls.owner_thread==GetCurrentThreadId()?controls_generation:0;
+}
+bool BeginSynchronizedGameplaySampling(uint64_t generation,uint64_t completed){
+    std::lock_guard lock(controls_mutex);
+    auto& state=synchronized_controls;
+    if(!generation || generation!=controls_generation || !state.active || state.owner_thread!=GetCurrentThreadId() ||
+       !state.has_frame || state.frame.tick!=completed || completed==UINT64_MAX || state.exhausted ||
+       state.next!=completed+1 || state.gameplay_sampling_started || sampling_local_controls)return false;
+    for(const auto& sample:state.samples)if(sample.valid || sample.exhausted)return false;
+    for(auto& sample:state.samples)sample.next=completed+1;
+    state.gameplay_sampling_started=true;
+    ++view_poll_epoch;
+    ResetWheelInputs();
+    for(auto& pending:pending_keys)pending.fill(false);
+    for(auto& valid:latched_valid)valid.fill(false);
+    for(auto& buttons:mod_buttons)buttons.store(0,std::memory_order_relaxed);
+    return true;
+}
+static void EndSynchronizedControlsLocked() {
     ++view_poll_epoch;
     ResetWheelInputs();
     synchronized_controls={};
     for(auto& pending:pending_keys) pending.fill(false);
     for(auto& valid:latched_valid) valid.fill(false);
+}
+void EndSynchronizedControls(){std::lock_guard lock(controls_mutex);EndSynchronizedControlsLocked();}
+bool EndSynchronizedControls(uint64_t generation){
+    std::lock_guard lock(controls_mutex);
+    if(!generation || generation!=controls_generation || !synchronized_controls.active)return false;
+    EndSynchronizedControlsLocked();return true;
 }
 bool ConvertNativeDeviceLook(const LiveLookInput& look,float deadzone,std::array<float,2>& output) {
     output={};
@@ -1154,6 +1180,42 @@ bool TestControls(const std::filesystem::path& directory) {
         check(!SampleLocalControls(physical_input,0,tick,sampled) && sampled==net::Pad{} &&
             SampleLocalControls(physical_input,0,tick,sampled) && sampled==net::Pad{},
             "session replacement during device polling discards the stale result and clears old latches");
+        EndSynchronizedControls();check(BeginSynchronizedControls(50),"bootstrap sampler fixture starts fresh ownership");
+        check(!BeginSynchronizedGameplaySampling(controls_generation,50),"an unpublished bootstrap frame cannot authorize sampler cutover");
+        net::Frame bootstrap;bootstrap.players[1].buttons=0x10;
+        for(uint64_t raw_tick=50;raw_tick<=58;++raw_tick){bootstrap.tick=raw_tick;check(PublishSynchronizedControls(bootstrap),"raw bootstrap ticks publish without physical sampling");}
+        uint64_t bootstrap_generation=0;net::Frame snapshot;
+        check(ReadPublishedSynchronizedControls(bootstrap_generation,snapshot) && snapshot==bootstrap,"bootstrap exact published frame can authorize sampler cutover");
+        const auto before_cutover_reads=physical_source->reads;
+        bool foreign_cutover=true;std::thread foreign([&]{foreign_cutover=BeginSynchronizedGameplaySampling(bootstrap_generation,58);});foreign.join();
+        check(!foreign_cutover && !BeginSynchronizedGameplaySampling(bootstrap_generation+1,58) &&
+            !BeginSynchronizedGameplaySampling(bootstrap_generation,57),"sampler cutover rejects wrong thread, generation and completed raw tick");
+        ControlKey(VK_SPACE,true);ControlKey(VK_SPACE,false);ControlWheel(0,60);
+        check(BeginSynchronizedGameplaySampling(bootstrap_generation,58) && physical_source->reads==before_cutover_reads,
+            "cutover advances unused sampler clocks once without polling physical controls");
+        uint64_t after_generation=0;net::Frame after_frame;
+        check(ReadPublishedSynchronizedControls(after_generation,after_frame) && after_generation==bootstrap_generation && after_frame==bootstrap &&
+            !BeginSynchronizedGameplaySampling(bootstrap_generation,58),"sampler cutover preserves generation/native raw frame and rejects repeated cutover");
+        {std::lock_guard lock(controls_mutex);bool cleared=wheel_remainder==std::array<int64_t,2>{};
+            for(unsigned user=0;user<2;++user){cleared &= synchronized_controls.samples[user].next==59 && !synchronized_controls.samples[user].valid;
+                cleared &= std::none_of(pending_keys[user].begin(),pending_keys[user].end(),[](bool value){return value;});
+                cleared &= std::none_of(latched_valid[user].begin(),latched_valid[user].end(),[](bool value){return value;});}
+            check(cleared,"cutover clears bootstrap tap/wheel/latch history without manufacturing samples");}
+        physical_source->pad={};physical_source->pad.thumb_lx=12345;
+        check(!SampleLocalControls(physical_input,0,58,sampled) && SampleLocalControls(physical_input,0,59,sampled) &&
+            sampled.left_x==12345 && sampled.buttons==0 && physical_source->reads==before_cutover_reads+1,
+            "first gameplay sample at completed bootstrap plus one polls actual physical input, without old taps");
+        const auto cached_sample=sampled;physical_source->pad.thumb_lx=-12345;
+        check(SampleLocalControls(physical_input,0,59,sampled) && sampled==cached_sample && physical_source->reads==before_cutover_reads+1 &&
+            ReadPublishedSynchronizedControls(after_generation,after_frame) && after_frame==bootstrap,
+            "first gameplay sample remains cached once and never overwrites last published bootstrap pad");
+        EndSynchronizedControls();check(BeginSynchronizedControls(80),"used sampler rejection fixture starts");bootstrap.tick=80;
+        check(PublishSynchronizedControls(bootstrap) && ReadPublishedSynchronizedControls(bootstrap_generation,snapshot) &&
+            SampleLocalControls(physical_input,0,80,sampled) && !BeginSynchronizedGameplaySampling(bootstrap_generation,80),
+            "an already used physical sampler cannot have its clock rewritten at cutover");
+        EndSynchronizedControls();check(BeginSynchronizedControls(UINT64_MAX),"cutover overflow fixture starts");bootstrap.tick=UINT64_MAX;
+        check(PublishSynchronizedControls(bootstrap) && ReadPublishedSynchronizedControls(bootstrap_generation,snapshot) &&
+            !BeginSynchronizedGameplaySampling(bootstrap_generation,UINT64_MAX),"bootstrap maximum tick cannot wrap gameplay sampling to zero");
     }
     {
         std::lock_guard lock(controls_mutex);

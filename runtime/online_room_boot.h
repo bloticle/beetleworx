@@ -33,6 +33,9 @@ public:
     bool SetReady(bool);
     bool CanStart()const;
     bool Start();
+    // NativeMenu preparation always negotiates shared native initialization;
+    // this path cannot start with the legacy Original RNG policy.
+    bool StartNativeBootstrap();
     std::optional<RoomBootResult> TakeStarted();
 private:
     struct Impl;
