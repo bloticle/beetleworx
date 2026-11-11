@@ -81,6 +81,18 @@ bool CheckBackend(em2::Em2CommandProcessor& cp,rex::graphics::GraphicsSystem& gr
     ScopeExit release_packet{[&]{heap->Release(packet,nullptr);}};
     const auto physical=memory->GetPhysicalAddress(packet);if(physical==UINT32_MAX)return false;
     auto* words=memory->TranslateVirtual<uint32_t*>(packet);
+    for(bool inline_writes:{false,true}) {
+        REXCVAR_SET(em2_inline_gpu_constant_writes,inline_writes);
+        texture_sync=UINT32_MAX;
+        cb_f.up_to_date=true;
+        em2::InvalidateTextureFetchBindings(cp);
+        if(texture_sync || cb_f.up_to_date ||
+           std::memcmp(saved_regs.data(),regs,sizeof(*regs))) {
+            REXLOG_ERROR("Live texture compatibility change did not invalidate all bindings without altering registers");
+            return false;
+        }
+    }
+    REXLOG_INFO("Live texture compatibility invalidation passed both GPU register writers");
     constexpr std::array<uint32_t,10> bits={0,0x80000000u,1,0x7F800000u,0xFF800000u,0x7FC12345u,0x7F812345u,0xFFFFFFFFu,0x3F800000u,0xCF000000u};
     unsigned cases=0;
     std::array<uint32_t,RegisterFile::kRegisterCount> before{},expected{};

@@ -791,8 +791,13 @@ public:
                     });
                 }
                 if (index==6 || index==7 || index==8 || index==10 || index==12 || index==17 || index==18) {
-                    runtime_->graphics_system()->command_processor()->CallInThread([request] {
-                        if(em2::IsCurrentPCSettingRequest(request))em2::ApplyPCLiveGPUSetting(request.index);
+                    auto* cp=static_cast<em2::Em2CommandProcessor*>(runtime_->graphics_system()->command_processor());
+                    cp->CallInThread([cp,request] {
+                        if(!em2::IsCurrentPCSettingRequest(request))return;
+                        const bool previous=REXCVAR_GET(gpu_allow_invalid_fetch_constants);
+                        em2::ApplyPCLiveGPUSetting(request.index);
+                        if(request.index==8 && previous!=REXCVAR_GET(gpu_allow_invalid_fetch_constants))
+                            em2::InvalidateTextureFetchBindings(*cp);
                     });
                 }
             });

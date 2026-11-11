@@ -176,12 +176,41 @@ std::string Redact(std::string s,const fs::path&exe,const fs::path&user){
  std::istringstream input(s);std::string line,out;while(std::getline(input,line)){auto low=Lower(line);if(low.find("token")!=std::string::npos||low.find("password")!=std::string::npos||low.find("authorization")!=std::string::npos||low.find("invite")!=std::string::npos||low.find("invitation")!=std::string::npos||low.find("join secret")!=std::string::npos||low.find("join code")!=std::string::npos)out+="<sensitive log line omitted>\n";else out+=line+'\n';}return out;
 }
 std::string Tail(const fs::path&p,size_t maximum){if(!fs::is_regular_file(p)||Reparse(p))return "(not present)\n";auto n=fs::file_size(p),take=std::min<uint64_t>(n,maximum);std::ifstream f(p,std::ios::binary);f.seekg(std::streamoff(n-take));std::string s(size_t(take),0);f.read(s.data(),s.size());s.resize(size_t(f.gcount()));return(n>take?"(bounded recent tail)\n":"")+s;}
+std::string GameLogExcerpt(const fs::path& path) {
+ constexpr size_t budget=131072, startup_bytes=24576;
+ if(!fs::is_regular_file(path)||Reparse(path))return "(not present)\n";
+ const auto size=fs::file_size(path);
+ if(size<=budget)return Tail(path,budget);
+ std::ifstream log(path,std::ios::binary);
+ std::string startup(startup_bytes,'\0');
+ log.read(startup.data(),startup.size());
+ startup.resize(size_t(log.gcount()));
+ const auto last_line=startup.rfind('\n');
+ if(last_line!=std::string::npos)startup.resize(last_line+1);
+ else startup.clear();
+ std::string recent(budget-startup_bytes,'\0');
+ log.clear();
+ log.seekg(std::streamoff(size-recent.size()-1));
+ const auto previous=log.get();
+ log.read(recent.data(),recent.size());
+ recent.resize(size_t(log.gcount()));
+ if(previous!='\n'){
+  const auto end=recent.find('\n');
+  recent.erase(0,end==std::string::npos?recent.size():end+1);
+ }
+ return "(bounded startup excerpt)\n"+startup+"(bounded recent tail)\n"+recent;
+}
 std::string Report(const fs::path&exe,const fs::path&user,const std::string&version,const std::string&description){
  SYSTEM_INFO sys{};GetNativeSystemInfo(&sys);MEMORYSTATUSEX mem{sizeof(mem)};GlobalMemoryStatusEx(&mem);DISPLAY_DEVICEW display{sizeof(display)};EnumDisplayDevicesW(nullptr,0,&display,0);
  std::ostringstream s;s<<"Beetleworx diagnostic report\nVersion: "<<version<<"\nBuild SHA-256: ";try{s<<HashFile(exe/"beetleworx.exe");}catch(...){s<<"unavailable";}s<<"\nWindows architecture: "<<sys.wProcessorArchitecture<<"\nLogical processors: "<<sys.dwNumberOfProcessors<<"\nRAM MiB: "<<(mem.ullTotalPhys/(1024*1024))<<"\nGPU: "<<Utf8(display.DeviceString)<<"\n\nDescription:\n"<<description.substr(0,4096)<<"\n\nPrivacy: bounded text logs/settings only. No saves, ROMs, memory dumps, account credentials or automatic upload. Review this text before export.\n";
  for(auto name:{"release-manifest.json"}){s<<"\n--- "<<name<<" ---\n";auto p=exe/name;if(fs::is_regular_file(p)&&fs::file_size(p)<=8*1024*1024){try{auto m=ManifestFrom(String(Read(p,8*1024*1024)));s<<"Product: Beetleworx\nVersion: "<<m.version<<"\nTag: "<<m.tag<<"\nExecutable: "<<m.exe_sha<<"\nManifest files: "<<m.files.size()<<"\nManifest SHA-256: "<<HashFile(p)<<'\n';}catch(...){s<<"Unavailable/invalid manifest\n";}}}
  const std::array<std::pair<const char*,fs::path>,5> paths={{{"pc-settings.ini",user/"pc-settings.ini"},{"beetleworx.log",exe/"beetleworx.log"},{"user diagnostic log",user/"diagnostics"/"beetleworx.log"},{"crash.log",exe/"crash.log"},{"user crash.log",user/"diagnostics"/"crash.log"}}};
- for(auto&[name,p]:paths)s<<"\n--- "<<name<<" ---\n"<<Redact(Tail(p,name==std::string_view("pc-settings.ini")?32768:131072),exe,user);
+ for(auto&[name,p]:paths){
+  const std::string_view section=name;
+  const auto excerpt=section=="beetleworx.log"||section=="user diagnostic log"
+      ?GameLogExcerpt(p):Tail(p,section=="pc-settings.ini"?32768:131072);
+  s<<"\n--- "<<name<<" ---\n"<<Redact(excerpt,exe,user);
+ }
  return PrintableUtf8(s.str());
 }
 std::string Encode(std::string_view s){std::string out;for(unsigned char c:s){if((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='-'||c=='_'||c=='.'||c=='~')out+=char(c);else{out+='%';out+="0123456789ABCDEF"[c>>4];out+="0123456789ABCDEF"[c&15];}}return out;}
@@ -293,6 +322,14 @@ bool TestDemoSupport(std::string&error){
   struct Cleanup {fs::path root,temp;~Cleanup(){try{if(root.parent_path()==temp&&root.filename().string().starts_with("beetleworx-support-test-")&&!Reparse(root)){std::error_code ec;fs::remove_all(root,ec);}}catch(...){}}}cleanup{root,temp};
   auto putRelease=[&](const fs::path&where,const Manifest&m,const Bytes&exe,const Bytes&data){Write(where/"beetleworx.exe",exe);Write(where/"pc-assets/data.bin",data);WriteText(where/"release-manifest.json",m.raw);};
   putRelease(root,old,old_exe,old_data);WriteText(root/"user_data"/"save.txt","save must survive");
+  const auto game_log=root/"beetleworx.log";
+  WriteText(game_log,"GPU startup\n"+std::string(150000,'x')+"\n[gpu] Texture fetch warning\n");
+  const auto report_log=GameLogExcerpt(game_log);
+  Need(report_log.find("GPU startup\n")!=std::string::npos &&
+       report_log.ends_with("[gpu] Texture fetch warning\n") &&
+       report_log.find("xxxx")==std::string::npos,"Diagnostic log lost startup or recent messages");
+  WriteText(game_log,"short log\n");
+  Need(GameLogExcerpt(game_log)=="short log\n","Diagnostic excerpt changed a short log");
   auto zip=[](const std::vector<std::pair<std::string,Bytes>>&files){Bytes out,central;auto u16=[](Bytes&o,uint16_t n){o.push_back(uint8_t(n));o.push_back(uint8_t(n>>8));};auto u32=[&](Bytes&o,uint32_t n){u16(o,uint16_t(n));u16(o,uint16_t(n>>16));};for(auto&[name,data]:files){auto offset=uint32_t(out.size()),crc=Crc(data);u32(out,0x04034B50);u16(out,20);u16(out,0);u16(out,0);u32(out,0);u32(out,crc);u32(out,uint32_t(data.size()));u32(out,uint32_t(data.size()));u16(out,uint16_t(name.size()));u16(out,0);out.insert(out.end(),name.begin(),name.end());out.insert(out.end(),data.begin(),data.end());u32(central,0x02014B50);u16(central,20);u16(central,20);u16(central,0);u16(central,0);u32(central,0);u32(central,crc);u32(central,uint32_t(data.size()));u32(central,uint32_t(data.size()));u16(central,uint16_t(name.size()));for(int i=0;i<4;++i)u16(central,0);u32(central,0);u32(central,offset);central.insert(central.end(),name.begin(),name.end());}auto start=uint32_t(out.size());out.insert(out.end(),central.begin(),central.end());u32(out,0x06054B50);u16(out,0);u16(out,0);u16(out,uint16_t(files.size()));u16(out,uint16_t(files.size()));u32(out,uint32_t(central.size()));u32(out,start);u16(out,0);return out;};
   auto archive=zip({{"beetleworx.exe",new_exe},{"pc-assets/data.bin",new_data},{"release-manifest.json",b(next.raw)}});
   auto compressed=em1::DeflateNativePakResource(new_data);Need(compressed.size()>6,"Compressed fixture is invalid");Bytes raw(compressed.begin()+2,compressed.end()-4);Need(Unzip(raw,{"compressed.bin",0,uint32_t(raw.size()),uint32_t(new_data.size()),Crc(new_data),8})==new_data,"Real raw-Deflate ZIP payload regression");

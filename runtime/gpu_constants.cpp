@@ -339,6 +339,15 @@ bool em2::IsDeduplicatedConstantRange(uint32_t index,uint32_t count) {
 bool em2::IsBulkGpuRegisterRange(uint32_t index,uint32_t count) {
     return IsDeduplicatedConstantRange(index,count) || (count && index>=0x4800 && uint64_t(index)+count-1<=0x48BF);
 }
+void em2::InvalidateTextureFetchBindings(Em2CommandProcessor& cp) {
+    using namespace rex::graphics;
+    // Re-evaluate the active bindings on the next draw. Rewriting each
+    // descriptor's first word marks the binding dirty in either SDK writer.
+    for(uint32_t slot=0;slot<xenos::kTextureFetchConstantCount;++slot) {
+        const auto index=XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0+slot*6;
+        cp.WriteRegister(index,cp.ConstantRegisterValues()[index]);
+    }
+}
 void em2::Em2CommandProcessor::WriteRegister(uint32_t index,uint32_t value) {
     if(index==rex::graphics::XE_GPU_REG_PA_SU_SC_MODE_CNTL && REXCVAR_GET(em1_trace_draw_state) && em1::ArchitecturePreviewGraphicsReady()) {
         try {

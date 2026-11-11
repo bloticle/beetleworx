@@ -50,9 +50,15 @@ std::shared_ptr<em2::StencilTransferScratch> em2::AcquireStencilTransferScratch(
 }
 void em2::ShutdownStencilTransfers(const void* owner){std::lock_guard lock(mutex);pools.erase(owner);}
 uint64_t em2::StencilValueTransferMeshes(){return meshes;}
-void em2::CountStencilValueTransfer(){if((++meshes&255)==1)REXLOG_INFO("Native R8 stencil value transfers: {} meshes; one value draw replaces eight bit draws per mesh",meshes);}
+void em2::CountStencilValueTransfer(){
+ if(++meshes==1)REXLOG_INFO("Native R8 stencil value transfers active");
+ else if((meshes&255)==1)REXLOG_DEBUG("Native R8 stencil value transfers: {} meshes",meshes);
+}
 uint64_t em2::FusedDepthStencilTransferMeshes(){return fused_meshes;}
-void em2::CountFusedDepthStencilTransfer(){if((++fused_meshes&255)==1)REXLOG_INFO("Native fused depth/stencil transfers: {} meshes; one MRT+DSV draw replaces separate depth and R8 draws, original stencil-plane copies retained",fused_meshes);}
+void em2::CountFusedDepthStencilTransfer(){
+ if(++fused_meshes==1)REXLOG_INFO("Native fused depth/stencil transfers active");
+ else if((fused_meshes&255)==1)REXLOG_DEBUG("Native fused depth/stencil transfers: {} meshes",fused_meshes);
+}
 uint64_t em2::StencilScratchClearOmissions(){return clear_omissions;}
 void em2::CountStencilScratchClearOmission(){++clear_omissions;}
 uint64_t em2::StencilPlaneBarrierTransfers(){return plane_barrier_transfers;}
