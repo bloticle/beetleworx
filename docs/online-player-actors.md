@@ -181,3 +181,13 @@ the process for read/query only; it does not execute factory calls, create
 actors, write process memory, suspend threads or send input. Changing motion
 values can still occur during observation; stability does not imply an atomic
 whole-frame snapshot.
+
+## Independent actor input boundary
+
+`online_actor_input.cpp` introduces explicit peer-to-native-actor ownership for extra Mickey actors, validated through the world registry, entity handle and typed Mickey controller. Registered extras are quarantined from ordinary human-input broadcasts; the two retail players retain the original route. Ownership expires when the registry, handle, entity or controller changes, and disabled extras remain quarantined until their native listeners have been removed.
+
+The base movement lookup is scoped to its audited native call site (`8276B968`, return `82783EB0`) and the explicitly replayed listener. It never allocates a third retail player slot. Native callback fixtures send opposite movement samples to two extra controller caches through the original base handler and verify that retail record/health/view sentinels remain untouched. Those sentinels are not a physics or death/respawn test.
+
+Production action replay currently rejects with `BasisRouteUnverified`. Native navigation consumes a camera-relative basis later than the input callback; substituting one of the two retail cameras would make additional actors move relative to somebody else's view. A typed per-peer basis alone cannot fix that consumer. This boundary is preparatory work, not working sixteen-player movement, and it is not wired to automatically spawn additional actors.
+
+The next audited input dependency is the retained camera reference: native `8276C0C0` resolves a retail actor, looks up type `833DAE58` and invokes virtual `+108` with the camera entity returned by `82850FF0`; fallback `82761990` uses virtual `+120`. Setter `827DDD88` retains that reference at component `+80` through native `8308B3E8`. Because navigation consumes it after the action callback, a temporary callback-only camera override is insufficient. Per-extra-actor consumers and reference ownership still require verification; viewport normalization `8276BC90` is not the movement yaw basis.

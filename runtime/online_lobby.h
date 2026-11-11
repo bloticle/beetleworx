@@ -29,6 +29,7 @@ struct LobbyPlayer {
     LobbyCharacter character=LobbyCharacter::Oswald;
     uint8_t color=0;
     bool ready=false;
+    bool operator==(const LobbyPlayer&) const = default;
 };
 enum class LobbyResult { Ok, Full, DuplicatePeer, InvalidName, UnknownPeer,
     ColorInUse, InvalidCharacter, InvalidColor, Locked, NotReady };
@@ -55,6 +56,13 @@ private:
     uint64_t revision_=0;
     bool locked_=false;
     std::vector<LobbyPlayer> players_;
+};
+struct LobbySnapshot {
+    uint64_t revision=0;
+    uint8_t capacity=0;
+    bool locked=false;
+    std::vector<LobbyPlayer> players;
+    bool operator==(const LobbySnapshot&) const = default;
 };
 bool TestOnlineLobby();
 }

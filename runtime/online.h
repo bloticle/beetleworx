@@ -1,4 +1,5 @@
 #pragma once
+#include "online_lobby.h"
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -73,6 +74,14 @@ public:
     bool CanRequestLobbyStart() const;
     bool RequestLobbyStart();
     bool LobbyStartConfirmed() const;
+    // Host validates each request against its owned roster; clients cannot select
+    // another peer's identity. Queue success is distinct from host acceptance.
+    bool RenameLobbyPlayer(std::string_view name);
+    bool SetLobbyAppearance(LobbyCharacter,uint8_t color);
+    bool SetLobbyReady(bool ready);
+    const LobbySnapshot& lobby() const;
+    LobbyResult last_lobby_result() const;
+    bool lobby_request_pending() const;
     void Poll(std::chrono::steady_clock::time_point now=std::chrono::steady_clock::now());
     bool SubmitLocal(uint64_t tick,const Pad&);
     bool TakeFrame(Frame&);

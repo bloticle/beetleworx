@@ -36,6 +36,7 @@ public:
     void Poll();
     void Cancel();
     BootStatus status() const;
+    LobbySnapshot lobby() const;
     bool ArmLobbyStart();
     bool CanRequestLobbyStart() const;
     bool RequestLobbyStart();

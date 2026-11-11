@@ -23,8 +23,8 @@ namespace {
 using Clock=std::chrono::steady_clock;
 using Bytes=std::vector<uint8_t>;
 constexpr size_t kWindow=256,kQueueLimit=256,kStreamLimit=4096;
-constexpr uint16_t kVersion=7;
-enum class Kind:uint8_t {Hello=1,Input=2,Frame=3,Ping=4,Pong=5,Digest=6,CheckpointBegin=7,CheckpointChunk=8,CheckpointEnd=9,CheckpointInstalled=10,CheckpointReady=11,CheckpointProgress=12,Load=13,LobbyStart=14};
+constexpr uint16_t kVersion=8;
+enum class Kind:uint8_t {Hello=1,Input=2,Frame=3,Ping=4,Pong=5,Digest=6,CheckpointBegin=7,CheckpointChunk=8,CheckpointEnd=9,CheckpointInstalled=10,CheckpointReady=11,CheckpointProgress=12,Load=13,LobbyStart=14,LobbyProfile=15,LobbySnapshot=16,LobbyReply=17};
 enum class LobbyStart:uint8_t {ClientReady=1,Start=2,Acknowledge=3};
 enum class LobbyStartPhase {Waiting,ClientReady,Requested,Confirmed};
 struct Hello {Identity identity;uint8_t role;bool checkpoint=false;bool operator==(const Hello&) const=default;};
@@ -38,7 +38,20 @@ struct CheckpointProgress {uint32_t received;bool operator==(const CheckpointPro
 struct CheckpointEnd {uint32_t size;bool operator==(const CheckpointEnd&)const=default;};
 struct CheckpointInstalled {std::array<uint8_t,32> identity;bool operator==(const CheckpointInstalled&)const=default;};
 struct CheckpointReady {std::array<uint8_t,32> identity;bool operator==(const CheckpointReady&)const=default;};
-using Message=std::variant<Hello,Input,Frame,Ping,Pong,Digest,CheckpointBegin,CheckpointChunk,CheckpointEnd,CheckpointInstalled,CheckpointReady,CheckpointProgress,LoadPoint,LobbyStart>;
+enum class ProfileAction:uint8_t {Rename=1,Appearance=2,Ready=3};
+struct LobbyProfile {
+    uint32_t sequence=0;ProfileAction action=ProfileAction::Rename;
+    uint8_t character=0,color=0;bool ready=false;std::array<char,96> name{};
+    bool operator==(const LobbyProfile&)const=default;
+};
+struct LobbyReply {
+    uint32_t sequence=0;LobbyResult result=LobbyResult::Ok;uint64_t revision=0;
+    bool operator==(const LobbyReply&)const=default;
+};
+LobbySnapshot Snapshot(const LobbyRoster& roster) {
+    return {roster.revision(),roster.capacity(),roster.locked(),roster.players()};
+}
+using Message=std::variant<Hello,Input,Frame,Ping,Pong,Digest,CheckpointBegin,CheckpointChunk,CheckpointEnd,CheckpointInstalled,CheckpointReady,CheckpointProgress,LoadPoint,LobbyStart,LobbyProfile,LobbySnapshot,LobbyReply>;
 bool ValidLoadPoint(const LoadPoint& p) {
     if(p.phase!=LoadPhase::Begin && p.phase!=LoadPhase::End)return false;
     if(p.phase==LoadPhase::Begin && p.success)return false;
@@ -108,6 +121,9 @@ size_t BodySize(Kind kind) {
         case Kind::Digest:return 40;
         case Kind::Load:return 116;
         case Kind::LobbyStart:return 1;
+        case Kind::LobbyProfile:return 104;
+        case Kind::LobbySnapshot:return 1740;
+        case Kind::LobbyReply:return 16;
         case Kind::Ping:case Kind::Pong:return 4;
         default:return 0;
     }
@@ -144,6 +160,21 @@ Bytes Encode(const Message& message) {
         } else if constexpr(std::is_same_v<T,CheckpointInstalled> || std::is_same_v<T,CheckpointReady>) {
             kind=std::is_same_v<T,CheckpointInstalled>?Kind::CheckpointInstalled:Kind::CheckpointReady;
             body.insert(body.end(),value.identity.begin(),value.identity.end());
+        } else if constexpr(std::is_same_v<T,LobbyProfile>) {
+            kind=Kind::LobbyProfile;Put(body,value.sequence,4);Put(body,uint8_t(value.action),1);
+            Put(body,value.character,1);Put(body,value.color,1);Put(body,value.ready,1);
+            body.insert(body.end(),value.name.begin(),value.name.end());
+        } else if constexpr(std::is_same_v<T,LobbyReply>) {
+            kind=Kind::LobbyReply;Put(body,value.sequence,4);Put(body,uint8_t(value.result),1);Put(body,0,3);Put(body,value.revision,8);
+        } else if constexpr(std::is_same_v<T,LobbySnapshot>) {
+            kind=Kind::LobbySnapshot;Put(body,value.revision,8);Put(body,value.capacity,1);
+            Put(body,value.players.size(),1);Put(body,value.locked,1);Put(body,0,1);
+            for(size_t i=0;i<16;++i) {
+                if(i>=value.players.size()){body.resize(body.size()+108,0);continue;}
+                const auto& p=value.players[i];Put(body,p.peer,8);Put(body,uint8_t(p.character),1);
+                Put(body,p.color,1);Put(body,p.ready,1);Put(body,p.name.size(),1);
+                body.insert(body.end(),p.name.begin(),p.name.end());body.resize(body.size()+96-p.name.size(),0);
+            }
         } else if constexpr(std::is_same_v<T,LobbyStart>) {
             kind=Kind::LobbyStart;Put(body,uint8_t(value),1);
         } else {
@@ -169,6 +200,46 @@ std::optional<Message> Decode(Kind kind,std::span<const uint8_t> body) {
         std::copy_n(body.begin()+at,hello.identity.session.size(),hello.identity.session.begin());
         if(!ValidIdentity(hello.identity,hello.checkpoint && hello.role==1)) return {};
         return hello;
+    }
+    if(kind==Kind::LobbyProfile) {
+        LobbyProfile p;p.sequence=uint32_t(Get(body,at,4));p.action=ProfileAction(Get(body,at,1));
+        p.character=uint8_t(Get(body,at,1));p.color=uint8_t(Get(body,at,1));auto ready=Get(body,at,1);
+        if(!p.sequence || uint8_t(p.action)<1 || uint8_t(p.action)>3 || ready>1)return {};
+        p.ready=ready!=0;std::copy_n(body.begin()+at,96,p.name.begin());
+        const bool empty=std::all_of(p.name.begin(),p.name.end(),[](char c){return c==0;});
+        if(p.action!=ProfileAction::Rename && !empty)return {};
+        if(p.action!=ProfileAction::Appearance && (p.character || p.color))return {};
+        if(p.action!=ProfileAction::Ready && p.ready)return {};
+        return p;
+    }
+    if(kind==Kind::LobbyReply) {
+        LobbyReply p;p.sequence=uint32_t(Get(body,at,4));p.result=LobbyResult(Get(body,at,1));
+        if(!p.sequence || uint8_t(p.result)>uint8_t(LobbyResult::NotReady) || Get(body,at,3))return {};
+        p.revision=Get(body,at,8);return p;
+    }
+    if(kind==Kind::LobbySnapshot) {
+        LobbySnapshot snap;snap.revision=Get(body,at,8);snap.capacity=uint8_t(Get(body,at,1));
+        auto count=Get(body,at,1),locked=Get(body,at,1);
+        if(!snap.capacity || snap.capacity>16 || count>snap.capacity || locked>1 || Get(body,at,1))return {};
+        snap.locked=locked!=0;LobbyRoster validation(snap.capacity);
+        for(size_t i=0;i<16;++i) {
+            if(i>=count){for(size_t j=0;j<108;++j)if(Get(body,at,1))return {};continue;}
+            LobbyPlayer p;p.peer=Get(body,at,8);p.character=LobbyCharacter(Get(body,at,1));p.color=uint8_t(Get(body,at,1));
+            auto ready=Get(body,at,1),length=Get(body,at,1);if(ready>1 || !length || length>96)return {};
+            p.ready=ready!=0;p.name.assign(reinterpret_cast<const char*>(body.data()+at),size_t(length));at+=size_t(length);
+            for(size_t j=size_t(length);j<96;++j)if(Get(body,at,1))return {};
+            if(validation.Join(p.peer,p.name)!=LobbyResult::Ok || validation.Find(p.peer)->name!=p.name)return {};
+            snap.players.push_back(std::move(p));
+        }
+        // Validate final choices after all joins, so default-color allocation
+        // cannot spuriously conflict with a valid swapped palette.
+        std::array<bool,16> colors{};
+        for(const auto& p:snap.players) {
+            if(uint8_t(p.character)>1 || p.color>=16 || colors[p.color])return {};
+            colors[p.color]=true;if(snap.locked && !p.ready)return {};
+        }
+        if(snap.locked && count<2)return {};
+        return snap;
     }
     if(kind==Kind::Input) {
         Input input{};input.tick=Get(body,at,8);input.player=uint8_t(Get(body,at,1));
@@ -410,6 +481,24 @@ struct Session::Impl {
     bool local_digest_exhausted=false,remote_digest_exhausted=false;
     std::optional<Digest> last_local_digest,last_remote_digest;
     LoadExchange loads;
+    LobbyRoster roster{2};LobbySnapshot lobby;
+    uint32_t profile_sequence=0,remote_profile_sequence=0,pending_profile=0;
+    LobbyResult profile_result=LobbyResult::Ok;
+    bool PublishLobby(){lobby=Snapshot(roster);return channel.Queue(lobby);}
+    LobbyResult ApplyProfile(uint64_t peer,const LobbyProfile& p) {
+        if(p.action==ProfileAction::Appearance)return roster.SetAppearance(peer,LobbyCharacter(p.character),p.color);
+        if(p.action==ProfileAction::Ready)return roster.SetReady(peer,p.ready);
+        const auto end=std::find(p.name.begin(),p.name.end(),char(0));
+        if(std::any_of(end,p.name.end(),[](char c){return c!=0;}))return LobbyResult::InvalidName;
+        return roster.Rename(peer,std::string_view(p.name.data(),size_t(end-p.name.begin())));
+    }
+    bool Profile(LobbyProfile p) {
+        if(state!=State::Ready || gameplay_started || pending_profile || lobby_start==LobbyStartPhase::Requested || lobby_start==LobbyStartPhase::Confirmed)return false;
+        if(!role){profile_result=ApplyProfile(1,p);return PublishLobby();}
+        if(profile_sequence==UINT32_MAX)return false;
+        p.sequence=profile_sequence+1;if(!channel.Queue(p))return false;
+        profile_sequence=p.sequence;pending_profile=p.sequence;return true;
+    }
     Clock::time_point started{},last_received{},last_ping{};uint32_t ping_sequence=0,last_pong=0,peer_ping=0;
     bool checkpoint_mode=false,checkpoint_begin=false,checkpoint_end=false,checkpoint_installed=false;
     bool gameplay_started=false;Clock::time_point ready_at{};
@@ -431,7 +520,9 @@ struct Session::Impl {
         router.reset();ticks.Reset(id.first_tick);identity=id;role=host?0:1;hello_sent=false;wire_exhausted=false;
         digests.Reset(id.first_tick);local_digest_next=remote_digest_next=id.first_tick;
         local_digest_exhausted=remote_digest_exhausted=false;last_local_digest.reset();last_remote_digest.reset();
-        loads=LoadExchange{};
+        loads=LoadExchange{};roster=LobbyRoster(2);lobby={};
+        profile_sequence=remote_profile_sequence=pending_profile=0;profile_result=LobbyResult::Ok;
+        if(host)roster.Join(1,"Player 1");
         wire_tick=id.first_tick;ping_sequence=last_pong=peer_ping=0;error.clear();started=Clock::now();last_received=last_ping=started;
         checkpoint_mode=transfer;checkpoint_begin=checkpoint_end=checkpoint_installed=false;
         gameplay_started=false;ready_at={};
@@ -461,9 +552,31 @@ struct Session::Impl {
             else if(compatible.checkpoint!=identity.checkpoint)mismatch="Different saves. Start from the shared host save before connecting.";
             if(mismatch){Fail(mismatch);return;}
             if(checkpoint_mode && role)identity.checkpoint=hello->identity.checkpoint;
-            state=checkpoint_mode?State::Transferring:State::Ready;last_transfer_progress=now;ready_at=now;last_received=now;return;
+            if(!role)roster.Join(2,"Player 2");
+            state=checkpoint_mode?State::Transferring:State::Ready;last_transfer_progress=now;ready_at=now;last_received=now;
+            if(!role && !PublishLobby())Fail("Lobby snapshot queue full");return;
         }
         if(state==State::Transferring || state==State::Ready) {
+            if(const auto* snapshot=std::get_if<LobbySnapshot>(&message)) {
+                if(!role || snapshot->capacity!=2 || snapshot->players.size()!=2 ||
+                   snapshot->players[0].peer!=1 || snapshot->players[1].peer!=2 ||
+                   snapshot->revision<lobby.revision || (snapshot->revision==lobby.revision && *snapshot!=lobby)) {
+                    Fail("Invalid authoritative lobby roster");return;
+                }
+                lobby=*snapshot;last_received=now;return;
+            }
+            if(const auto* request=std::get_if<LobbyProfile>(&message)) {
+                if(role || request->sequence!=remote_profile_sequence+1 || remote_profile_sequence==UINT32_MAX){Fail("Invalid lobby profile request ordering or direction");return;}
+                remote_profile_sequence=request->sequence;
+                auto result=(state!=State::Ready || gameplay_started || lobby_start==LobbyStartPhase::Requested || lobby_start==LobbyStartPhase::Confirmed)
+                    ?LobbyResult::Locked:ApplyProfile(2,*request);
+                if(!PublishLobby() || !channel.Queue(LobbyReply{request->sequence,result,roster.revision()})){Fail("Lobby reply queue full");return;}
+                last_received=now;return;
+            }
+            if(const auto* reply=std::get_if<LobbyReply>(&message)) {
+                if(!role || !pending_profile || reply->sequence!=pending_profile || reply->revision!=lobby.revision){Fail("Invalid lobby profile acknowledgement");return;}
+                pending_profile=0;profile_result=reply->result;last_received=now;return;
+            }
             if(const auto* ping=std::get_if<Ping>(&message)) {
                 if(!ping->sequence || ping->sequence<=peer_ping){Fail("Invalid heartbeat sequence");return;}
                 peer_ping=ping->sequence;if(!channel.Queue(Pong{ping->sequence})){Fail("Heartbeat send queue full");return;}
@@ -510,9 +623,9 @@ struct Session::Impl {
                 Fail("Unexpected lobby start message");
                 return;
             }
-            if(!role && lobby_start==LobbyStartPhase::Waiting && *action==LobbyStart::ClientReady){
+            if(!role && lobby_start==LobbyStartPhase::Waiting && *action==LobbyStart::ClientReady && roster.Find(2) && roster.Find(2)->ready){
                 lobby_start=LobbyStartPhase::ClientReady;
-            }else if(role && lobby_start==LobbyStartPhase::ClientReady && *action==LobbyStart::Start){
+            }else if(role && lobby_start==LobbyStartPhase::ClientReady && *action==LobbyStart::Start && lobby.locked){
                 if(!channel.Queue(LobbyStart::Acknowledge)){Fail("Lobby start acknowledgement queue full");return;}
                 lobby_start=LobbyStartPhase::Confirmed;
                 ready_at=now;
@@ -559,23 +672,39 @@ struct Session::Impl {
 };
 Session::Session():impl_(std::make_unique<Impl>()) {}
 Session::~Session()=default;
+const LobbySnapshot& Session::lobby()const{return impl_->lobby;}
+LobbyResult Session::last_lobby_result()const{return impl_->profile_result;}
+bool Session::lobby_request_pending()const{return impl_->pending_profile!=0;}
+bool Session::RenameLobbyPlayer(std::string_view name){
+    if(name.size()>96)return false;LobbyProfile p;p.action=ProfileAction::Rename;
+    std::copy(name.begin(),name.end(),p.name.begin());return impl_->Profile(p);
+}
+bool Session::SetLobbyAppearance(LobbyCharacter character,uint8_t color){
+    LobbyProfile p;p.action=ProfileAction::Appearance;p.character=uint8_t(character);p.color=color;return impl_->Profile(p);
+}
+bool Session::SetLobbyReady(bool ready){LobbyProfile p;p.action=ProfileAction::Ready;p.ready=ready;return impl_->Profile(p);}
 bool Session::ArmLobbyStart(){
     auto& p=*impl_;
     if(p.state!=State::Ready || !p.UsesLobbyStart() || !p.role)return false;
-    if(p.lobby_start!=LobbyStartPhase::Waiting)return true;
-    if(!p.channel.Queue(LobbyStart::ClientReady))return false;
+    if(p.lobby_start!=LobbyStartPhase::Waiting){
+        if(p.lobby_start==LobbyStartPhase::ClientReady && !p.pending_profile && p.lobby.players.size()==2 && !p.lobby.players[1].ready)return SetLobbyReady(true);
+        return true;
+    }
+    if(!SetLobbyReady(true))return false;
+    if(!p.channel.Queue(LobbyStart::ClientReady)){p.Fail("Lobby ready queue full");return false;}
     p.lobby_start=LobbyStartPhase::ClientReady;
     return true;
 }
 bool Session::CanRequestLobbyStart()const{
     const auto& p=*impl_;
     return p.state==State::Ready && p.UsesLobbyStart() && !p.role &&
-        p.lobby_start==LobbyStartPhase::ClientReady;
+        p.lobby_start==LobbyStartPhase::ClientReady && p.roster.Find(2) && p.roster.Find(2)->ready;
 }
 bool Session::RequestLobbyStart(){
     if(!CanRequestLobbyStart())return false;
     auto& p=*impl_;
-    if(!p.channel.Queue(LobbyStart::Start))return false;
+    if(p.roster.SetReady(1,true)!=LobbyResult::Ok || p.roster.Start()!=LobbyResult::Ok)return false;
+    if(!p.PublishLobby() || !p.channel.Queue(LobbyStart::Start)){p.Fail("Lobby start queue full");return false;}
     p.lobby_start=LobbyStartPhase::Requested;
     p.lobby_requested_at=Clock::now();
     return true;
@@ -857,6 +986,22 @@ bool TestOnlineSession() {
         state.Process(CheckpointProgress{scenario==0?1025u:scenario==1?511u:1024u},Clock::now());
         if(!check(malformed.state()==State::Error && malformed.error()=="Invalid save transfer progress acknowledgement","out-of-range, regressing, premature and wrong-direction progress are rejected"))return false;
     }
+    {
+        Session receiving;auto& p=*receiving.impl_;p.state=State::Ready;p.role=0;
+        LobbyRoster forged(2);forged.Join(1,"Host");forged.Join(2,"Client");
+        p.Process(Snapshot(forged),Clock::now());
+        if(!check(receiving.state()==State::Error,"client cannot replace authoritative host roster"))return false;
+    }
+    {
+        Session receiving;auto& p=*receiving.impl_;p.state=State::Ready;p.role=1;
+        p.Process(LobbyReply{1,LobbyResult::Ok,0},Clock::now());
+        if(!check(receiving.state()==State::Error,"unsolicited profile acknowledgements rejected"))return false;
+    }
+    {
+        Session receiving;auto& p=*receiving.impl_;p.state=State::Ready;p.role=0;
+        LobbyProfile replay;replay.sequence=2;p.Process(replay,Clock::now());
+        if(!check(receiving.state()==State::Error,"out of order profile request rejected"))return false;
+    }
     REXLOG_INFO("Save transfer deadline tests passed: progressive 300/400-second transfers, explicit partial-receipt acknowledgement after OS buffering, stalled download and installation despite live heartbeats/repeated byte acknowledgements; invalid progress bounds/direction (injected policy clock, connected loopback transport)");
     const Pad a{0xF3FF,123,255,-32768,32767,-12345,718},b{0x1000,0,91,32767,-32768,999,-999};
     LoadPoint load;load.destination[0]='a';load.tick=identity.first_tick;
@@ -888,6 +1033,29 @@ bool TestOnlineSession() {
             const auto bytes=Encode(bad);Decoder invalid;
             if(!check(invalid.Append(bytes) && !invalid.Next() && invalid.failed(),"noncanonical load messages rejected by wire decoder"))return false;
         }
+    }
+    {
+        LobbyRoster roster(16);for(uint64_t peer=1;peer<=16;++peer)roster.Join(peer,"Player");
+        auto snapshot=Snapshot(roster);const Message message=snapshot;auto bytes=Encode(message);Decoder decoder;
+        for(size_t i=0;i<bytes.size();++i){
+            if(!check(decoder.Append(std::span(bytes).subspan(i,1)),"maximum roster fragmented append"))return false;
+            auto next=decoder.Next();if(!check(i+1==bytes.size()?next==std::optional<Message>(message):!next,"sixteen-entry roster fragmented roundtrip"))return false;
+        }
+        for(unsigned field:{0u,1u,2u,3u,4u}) {
+            auto bad=snapshot;
+            if(field==0)bad.players[1].color=bad.players[0].color;
+            if(field==1)bad.players[1].peer=bad.players[0].peer;
+            if(field==2)bad.players[1].name="bad\nname";
+            if(field==3)bad.players[1].character=LobbyCharacter(99);
+            if(field==4)bad.locked=true;
+            Decoder invalid;invalid.Append(Encode(bad));invalid.Next();if(!check(invalid.failed(),"invalid authoritative roster rejected at decoder"))return false;
+        }
+        LobbyProfile request;request.sequence=1;request.action=ProfileAction::Ready;request.ready=true;
+        for(Message value:{Message(request),Message(LobbyReply{1,LobbyResult::ColorInUse,12})}){
+            Decoder d;d.Append(Encode(value));if(!check(d.Next()==std::optional<Message>(value),"profile request and rejection reply codec"))return false;
+        }
+        request.name[0]='x';Decoder invalid;invalid.Append(Encode(request));invalid.Next();
+        if(!check(invalid.failed(),"noncanonical profile fields rejected"))return false;
     }
     unsigned decoded=0;
     for(const auto& message:messages) {
@@ -943,6 +1111,25 @@ bool TestOnlineSession() {
         REXLOG_ERROR("Loopback states {} / {}, errors '{}' / '{}'",int(host.state()),int(client.state()),host.error(),client.error());return false;
     };
     if(!check(pump_until([&]{return host.state()==State::Ready && client.state()==State::Ready;}),"compatible role/build/content/checkpoint/session handshake")) return false;
+    if(!check(pump_until([&]{return client.lobby()==host.lobby() && client.lobby().players.size()==2;}),"real TCP host roster replicates default red Mickey/blue Oswald"))return false;
+    if(!check(client.SetLobbyAppearance(LobbyCharacter::Mickey,0) && client.lobby_request_pending() &&
+        !client.SetLobbyReady(true) && pump_until([&]{return !client.lobby_request_pending();}) &&
+        client.last_lobby_result()==LobbyResult::ColorInUse && client.lobby()==host.lobby() &&
+        client.lobby().players[1].color==1,"host rejects occupied color without disconnecting or speculative client mutation"))return false;
+    if(!check(client.SetLobbyAppearance(LobbyCharacter::Mickey,2) && pump_until([&]{return !client.lobby_request_pending();}) &&
+        client.last_lobby_result()==LobbyResult::Ok && client.lobby()==host.lobby() && client.lobby().players[1].color==2 &&
+        client.lobby().players[0].character==LobbyCharacter::Mickey && client.lobby().players[1].character==LobbyCharacter::Mickey,
+        "same character accepted with unique green color across real peers"))return false;
+    if(!check(client.RenameLobbyPlayer("  Remote player  ") && pump_until([&]{return !client.lobby_request_pending();}) &&
+        client.lobby().players[1].name=="Remote player" && host.lobby().players[0].name=="Player 1",
+        "client can rename only its assigned identity, host normalizes names"))return false;
+    if(!check(client.RenameLobbyPlayer("bad\nname") && pump_until([&]{return !client.lobby_request_pending();}) &&
+        client.last_lobby_result()==LobbyResult::InvalidName && host.lobby().players[1].name=="Remote player",
+        "invalid name rejected by host without roster corruption"))return false;
+    if(!check(host.SetLobbyReady(true) && client.SetLobbyReady(true) && pump_until([&]{return !client.lobby_request_pending() && client.lobby()==host.lobby();}) &&
+        host.lobby().players[0].ready && host.lobby().players[1].ready,"ready state replicates in both directions"))return false;
+    if(!check(host.SetLobbyAppearance(LobbyCharacter::Oswald,3) && pump_until([&]{return client.lobby()==host.lobby();}) &&
+        !host.lobby().players[0].ready && !client.lobby().players[1].ready,"appearance changes invalidate both ready states over TCP"))return false;
     if(!check(!host.SubmitStateDigest(identity.first_tick,identity.checkpoint) && !host.verified_tick(),"unconsumed input is not a completed world tick")) return false;
     for(uint64_t i=0;i<300;++i) {
         const auto tick=identity.first_tick+i;auto local=a;auto remote=b;local.buttons=uint16_t(i);remote.right_x=int16_t(int(i)-150);

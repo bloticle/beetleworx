@@ -187,6 +187,7 @@ void OnlineBoot::Poll() {
         }
     }catch(const std::exception& error){p.Fail(error.what());p.DrainCancellation();}
 }
+LobbySnapshot OnlineBoot::lobby()const{return impl_->session?impl_->session->lobby():LobbySnapshot{};}
 bool OnlineBoot::ArmLobbyStart(){return impl_->session && impl_->session->ArmLobbyStart();}
 bool OnlineBoot::CanRequestLobbyStart()const{return impl_->session && impl_->session->CanRequestLobbyStart();}
 bool OnlineBoot::RequestLobbyStart(){return impl_->session && impl_->session->RequestLobbyStart();}
@@ -285,6 +286,8 @@ bool TestOnlineBoot(const fs::path& root) {
                 "only the host can request start and host waits for acknowledgement"))return false;
             if(!check(pump(host,&client,[&]{return host.LobbyStartConfirmed() && client.LobbyStartConfirmed();}),
                 "one host action confirms both native handoffs over the original TCP connection"))return false;
+            if(!check(host.lobby().locked && client.lobby().locked && host.lobby()==client.lobby(),
+                "native start freezes the same replicated roster before either handoff"))return false;
             auto h=host.TakeReady(),c=client.TakeReady();
             if(!check(h && c && h->session->identity().startup_policy==StartupPolicy::NativeMenu &&
                 c->session->identity().startup_policy==StartupPolicy::NativeMenu &&

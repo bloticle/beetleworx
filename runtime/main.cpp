@@ -80,6 +80,7 @@
 #include "native_player_spawn.h"
 #include "demo_setup.h"
 #include "online.h"
+#include "online_actor_input.h"
 #include "online_identity.h"
 #include "online_invite.h"
 #include "online_checkpoint.h"
@@ -482,7 +483,7 @@ public:
             std::string em1_collision_error;
             const auto em1_collision_ok=em2::em1::TestLevelPartitionClassification(em1_collision_error) && em2::em1::TestKeyframeColorEvaluator(em1_collision_error) && em2::em1::TestNifContainerCompatibility(em1_collision_error) && em2::em1::TestEm1HavokCollision(em1_collision_error) && em2::em1::TestNifFixedPointUvPromotion(em1_collision_error) && em2::em1::TestPortableBcPixels(em1_collision_error) && em2::em1::TestPreviewDiffusePeState(em1_collision_error) && em2::em1::TestLevelOriginalScriptLibrary() && em2::em1::TestLevelOriginalAudioOwnership();
             if(!em1_collision_ok)REXLOG_ERROR("EM1 compatibility regression: {}",em1_collision_error);
-            const auto success=em1_collision_ok && em2::net::TestOnlineSession() && em2::net::TestOnlineGameplay() && em2::TestNativePlayerActions() && em2::TestCanonicalNativeJoin() && em2::TestNativePlayerSpawn() && em2::TestRenderOptions() && em2::TestRenderLogFilter() && em2::TestNativeRenderSampler(test_dir/"native-samples.tsv") && em2::TestNativePropertyLookup() && em2::TestNativeBindingCache() && em2::TestNativeVisibilityScan() && em2::TestNativeRegisterBank() && em2::TestNativeShaderUpload() && em2::TestNativeMemoryCopy() && em2::TestNativeVideoBlocks() && em2::TestNativeSkinning() && em2::TestNativeCameraTiming() && em2::TestNativeCameraProjection() && em2::TestSceneDrawInputs() && em2::TestSimulation() && em2::TestGpuCommandProfiling() && em2::TestTransferScissors() && em2::TestStencilZeroProof() && em2::TestFencedScratchCache() && settings_ok && controls_ok && lowering_ok;
+            const auto success=em1_collision_ok && em2::net::TestOnlineSession() && em2::net::TestOwnedActorInput() && em2::net::TestOnlineGameplay() && em2::TestNativePlayerActions() && em2::TestCanonicalNativeJoin() && em2::TestNativePlayerSpawn() && em2::TestRenderOptions() && em2::TestRenderLogFilter() && em2::TestNativeRenderSampler(test_dir/"native-samples.tsv") && em2::TestNativePropertyLookup() && em2::TestNativeBindingCache() && em2::TestNativeVisibilityScan() && em2::TestNativeRegisterBank() && em2::TestNativeShaderUpload() && em2::TestNativeMemoryCopy() && em2::TestNativeVideoBlocks() && em2::TestNativeSkinning() && em2::TestNativeCameraTiming() && em2::TestNativeCameraProjection() && em2::TestSceneDrawInputs() && em2::TestSimulation() && em2::TestGpuCommandProfiling() && em2::TestTransferScissors() && em2::TestStencilZeroProof() && em2::TestFencedScratchCache() && settings_ok && controls_ok && lowering_ok;
             spdlog::shutdown();
             ExitProcess(success?0:1);
         }

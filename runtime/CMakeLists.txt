@@ -476,3 +476,5 @@ target_sources(EM2Recomp PRIVATE em1_jigsaw_havok_probe.cpp)
 target_sources(EM2Recomp PRIVATE em1_behavior_schemas.cpp em1_behavior_probe.cpp)
 target_sources(EM2Recomp PRIVATE debug_level_browser.cpp)
 set_property(SOURCE em1_audio_output.cpp PROPERTY INCLUDE_DIRECTORIES "${REXSDK}/include/SDL2")
+
+target_sources(EM2Recomp PRIVATE online_actor_input.cpp)
