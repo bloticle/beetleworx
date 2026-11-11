@@ -18,9 +18,11 @@
 #include <stdexcept>
 #include <cstdio>
 #include <algorithm>
+#include <chrono>
 
 REXCVAR_DECLARE(bool,dxbc_switch);
 REXCVAR_DEFINE_BOOL(em2_pretranslated_shaders,true,"GPU","Reuse validated PC shader bytecode and resource bindings across renderer rebuilds and runs");
+REXCVAR_DEFINE_BOOL(em2_skip_packed_shader_duplicates,true,"GPU","Skip loose shader records already represented in a validated shader pack");
 extern "C" bool EM2OriginalTranslateShader(rex::graphics::ShaderTranslator*,rex::graphics::Shader::Translation*);
 namespace {
 using D=rex::graphics::DxbcShader;using T=rex::graphics::DxbcShaderTranslator;
@@ -45,7 +47,7 @@ EM2_SHADER_FIELD(Used,D,used_texture_mask_)
 EM2_SHADER_FIELD(Setup,D,bindings_setup_entered_)
 #undef EM2_SHADER_FIELD
 constexpr size_t max_record=8*1024*1024,max_library=256*1024*1024,max_queue=32*1024*1024,max_entries=16384;
-struct Counters {std::atomic<uint64_t>hits{0},misses{0},loaded{0},rejected{0},saved{0},dropped{0};} counters;
+struct Counters {std::atomic<uint64_t>hits{0},misses{0},loaded{0},rejected{0},saved{0},dropped{0},file_reads{0},packed_duplicates_skipped{0};} counters;
 std::array<std::mutex,64> shader_locks;
 std::mutex default_mutex;std::weak_ptr<em2::PcShaderLibrary> default_library;
 thread_local std::optional<std::shared_ptr<em2::PcShaderLibrary>> local_library;
@@ -118,6 +120,7 @@ bool Restore(const Record& record,Translation& translation,D& shader){
 }
 }
 class em2::PcShaderLibrary {
+    friend bool em2::TestPcShaderLibraryLoad(const std::filesystem::path&,const std::filesystem::path&);
     std::filesystem::path root_;std::mutex mutex_;std::condition_variable changed_;bool closing_=false,busy_=false;
     std::unordered_multimap<uint64_t,std::shared_ptr<const Record>> records_;size_t bytes_=0,queued_=0;
     std::deque<std::shared_ptr<const Record>> queue_;std::thread writer_;
@@ -144,10 +147,26 @@ class em2::PcShaderLibrary {
     }
     void Load(const std::filesystem::path& directory,bool seed=false){
         if(!std::filesystem::is_directory(directory))return;size_t scanned=0;
-        if(LoadPack(directory/"library.em2dxbcpack") && seed)return;
+        const bool packed=LoadPack(directory/"library.em2dxbcpack");
+        if(packed && seed)return;
         for(const auto& entry:std::filesystem::directory_iterator(directory)){
             if(entry.path().extension()!=L".em2dxbc")continue;if(++scanned>max_entries || bytes_>=max_library)break;
-            try{auto size=entry.file_size();if(size>max_record || size<64)throw std::runtime_error("shader file size invalid");Bytes bytes(size);std::ifstream file(entry.path(),std::ios::binary);if(!file.read(reinterpret_cast<char*>(bytes.data()),size))throw std::runtime_error("shader file read failed");auto record=Decode(bytes);if(Add(record,false))++counters.loaded;}catch(...){++counters.rejected;}
+            // Persisted filenames are the hash of the full translation key.
+            // A validated pack already has precedence for the same key. Read
+            // unknown filenames normally so new runtime variants still load.
+            if(packed && REXCVAR_GET(em2_skip_packed_shader_duplicates)){
+                const auto name=entry.path().stem().native();uint64_t hash=0;bool valid=name.size()==16;
+                if(valid)for(auto character:name){
+                    unsigned value;
+                    if(character>=L'0' && character<=L'9')value=unsigned(character-L'0');
+                    else if(character>=L'a' && character<=L'f')value=unsigned(character-L'a')+10;
+                    else if(character>=L'A' && character<=L'F')value=unsigned(character-L'A')+10;
+                    else{valid=false;break;}
+                    hash=(hash<<4)|value;
+                }
+                if(valid && records_.contains(hash)){++counters.packed_duplicates_skipped;continue;}
+            }
+            try{auto size=entry.file_size();if(size>max_record || size<64)throw std::runtime_error("shader file size invalid");Bytes bytes(size);++counters.file_reads;std::ifstream file(entry.path(),std::ios::binary);if(!file.read(reinterpret_cast<char*>(bytes.data()),size))throw std::runtime_error("shader file read failed");auto record=Decode(bytes);if(Add(record,false))++counters.loaded;}catch(...){++counters.rejected;}
         }
     }
 public:
@@ -180,7 +199,32 @@ std::shared_ptr<em2::PcShaderLibrary> em2::OpenPcShaderLibrary(const std::filesy
 void em2::UsePcShaderLibrary(const std::shared_ptr<PcShaderLibrary>& library){std::lock_guard lock(default_mutex);default_library=library;}
 void em2::FlushPcShaderLibrary(const std::shared_ptr<PcShaderLibrary>& library){if(library)library->Flush();}
 bool em2::SavePcShaderLibraryPack(const std::shared_ptr<PcShaderLibrary>& library,const std::filesystem::path& output){return library && library->SavePack(output);}
-em2::PcShaderLibraryStats em2::GetPcShaderLibraryStats(){return {counters.hits.load(),counters.misses.load(),counters.loaded.load(),counters.rejected.load(),counters.saved.load(),counters.dropped.load()};}
+em2::PcShaderLibraryStats em2::GetPcShaderLibraryStats(){return {counters.hits.load(),counters.misses.load(),counters.loaded.load(),counters.rejected.load(),counters.saved.load(),counters.dropped.load(),counters.file_reads.load(),counters.packed_duplicates_skipped.load()};}
+bool em2::TestPcShaderLibraryLoad(const std::filesystem::path& source,const std::filesystem::path& output){
+    if(!std::filesystem::is_regular_file(source/"translated-dxbc-v1"/"library.em2dxbcpack"))return false;
+    struct Restore {bool previous=REXCVAR_GET(em2_skip_packed_shader_duplicates);~Restore(){REXCVAR_SET(em2_skip_packed_shader_duplicates,previous);}} restore;
+    std::filesystem::create_directories(output);std::ofstream report(output/"shader-load-results.json");
+    report<<"{\"scope\":\"Same-process cache-load comparison; all decoded record bytes compared exactly. OS cache order can affect timing. No gameplay FPS claim.\",\"phases\":[";
+    std::vector<Bytes> expected;unsigned phase=0;bool success=true;
+    for(bool skip:{false,true,false,true}){
+        REXCVAR_SET(em2_skip_packed_shader_duplicates,skip);
+        REXLOG_INFO("PC shader load comparison phase {}: skip packed duplicates {}",phase,skip);
+        const auto before=GetPcShaderLibraryStats();const auto started=std::chrono::steady_clock::now();
+        auto library=OpenPcShaderLibrary(source);
+        const auto ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
+        const auto after=GetPcShaderLibraryStats();std::vector<Bytes> records;
+        {std::lock_guard lock(library->mutex_);for(const auto& [hash,record]:library->records_)records.push_back(Encode(*record));}
+        std::sort(records.begin(),records.end());
+        const bool identical=!phase || records==expected;
+        if(!phase)expected=std::move(records);
+        success=success && identical && !expected.empty();
+        if(phase)report<<',';
+        report<<"{\"skip_duplicates\":"<<(skip?"true":"false")<<",\"milliseconds\":"<<ms<<",\"record_count\":"<<expected.size()<<",\"loose_file_reads\":"<<after.file_reads-before.file_reads<<",\"duplicates_skipped\":"<<after.packed_duplicates_skipped-before.packed_duplicates_skipped<<",\"identical\":"<<(identical?"true":"false")<<'}';report.flush();
+        REXLOG_INFO("PC shader load phase {}: {:.2f}ms, {} loose reads, {} duplicates skipped, exact record equality {}",phase,ms,after.file_reads-before.file_reads,after.packed_duplicates_skipped-before.packed_duplicates_skipped,identical);
+        ++phase;
+    }
+    report<<"],\"passed\":"<<(success?"true":"false")<<"}\n";return success && report.good();
+}
 em2::PcShaderLibraryScope::PcShaderLibraryScope(std::shared_ptr<PcShaderLibrary> library):had_previous_(local_library.has_value()){if(had_previous_)previous_=*local_library;local_library=std::move(library);}
 em2::PcShaderLibraryScope::~PcShaderLibraryScope(){if(had_previous_)local_library=std::move(previous_);else local_library.reset();}
 bool rex::graphics::ShaderTranslator::TranslateAnalyzedShader(Shader::Translation& translation){

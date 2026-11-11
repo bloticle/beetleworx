@@ -8,6 +8,7 @@
 #include "ppc_config.h"
 #include "em2_game_build.h"
 #include "game_build.h"
+#include "pc_shader_library.h"
 #include <rex/sha256.h>
 #include "ppc_recomp_shared.h"
 #include "crash_handler.h"
@@ -179,6 +180,8 @@ REXCVAR_DEFINE_STRING(em2_analyze_shadow_shader_path,"","Debug","Export translat
 REXCVAR_DEFINE_STRING(em2_analyze_bloom_shader_path,"","Debug","Export translated native bloom programs without a window or guest execution; absolute output directory required");
 REXCVAR_DEFINE_STRING(em2_test_shader_storage_path,"","Debug","Optional shared directory for isolated cross-process renderer-cache diagnostics");
 REXCVAR_DEFINE_STRING(em2_test_game_build_directory,"","Debug","With shader storage diagnostics, verify locally generated XEX encoding and rejection fixtures without guest execution");
+REXCVAR_DEFINE_BOOL(em2_test_pc_shader_library,false,"Debug","With shader storage diagnostics, verify only PC shader library persistence and recovery");
+REXCVAR_DEFINE_STRING(em2_test_shader_library_load_path,"","Debug","With shader storage diagnostics, compare duplicate-read policies for this existing PC shader library without guest execution");
 REXCVAR_DEFINE_STRING(em2_verify_draw_extent_default,"","Debug","Exit after checking title draw-extent default and expected parsed true/false value; no guest execution");
 REXCVAR_DEFINE_BOOL(em2_test_lowering,false,"Debug","Run generated instruction tests in this executable without opening the game");
 REXCVAR_DEFINE_BOOL(em2_test_allocation_crash,false,"Debug","Diagnostic: deliberately fault inside tracked allocation without starting the guest");
@@ -667,6 +670,15 @@ public:
         verify_dispatch("after XEX load");
 
         if(shader_storage_test) {
+            if(!REXCVAR_GET(em2_test_shader_library_load_path).empty()){
+                const bool success=em2::TestPcShaderLibraryLoad(REXCVAR_GET(em2_test_shader_library_load_path),shader_storage_test_root);
+                runtime_.reset();REXLOG_INFO("PC shader library load diagnostic {} (no guest execution)",success?"passed":"failed");spdlog::shutdown();ExitProcess(success?0:1);
+            }
+            if(REXCVAR_GET(em2_test_pc_shader_library)){
+                auto* cp=static_cast<em2::Em2CommandProcessor*>(runtime_->graphics_system()->command_processor());
+                const bool success=em2::TestPcShaderLibrary(cp->GetD3D12Provider(),shader_storage_test_root/"pc-shader-library");
+                runtime_.reset();REXLOG_INFO("PC shader library diagnostic {} (no guest execution)",success?"passed":"failed");spdlog::shutdown();ExitProcess(success?0:1);
+            }
             if(REXCVAR_GET(em1_test_ink_pixels)){
                 auto* cp=static_cast<em2::Em2CommandProcessor*>(runtime_->graphics_system()->command_processor());
                 const bool success=em2::TestOriginalInkPixels(cp->GetD3D12Provider(),std::filesystem::path(REXCVAR_GET(em1_test_ink_effect_path)),shader_storage_test_root/"ink");

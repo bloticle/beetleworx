@@ -13,6 +13,7 @@
 #include <atomic>
 #include <span>
 REXCVAR_DECLARE(bool,em2_pretranslated_shaders);
+REXCVAR_DECLARE(bool,em2_skip_packed_shader_duplicates);
 namespace {
 using D=rex::graphics::DxbcShader;using T=rex::graphics::DxbcShaderTranslator;
 struct Output {std::vector<uint8_t> binary;std::vector<D::TextureBinding> textures;std::vector<D::SamplerBinding> samplers;uint32_t used=0;};
@@ -47,6 +48,34 @@ bool TestPcShaderLibrary(const rex::ui::d3d12::D3D12Provider& provider,const std
     std::atomic<unsigned> parallel_failures{0};std::vector<std::thread> threads;
     for(unsigned i=0;i<8;++i)threads.emplace_back([&,i]{PcShaderLibraryScope scope(reopened);Output result;const unsigned p=i%programs.size();if(!translate(p,cases[0],result) || !Equal(result,references[p]))++parallel_failures;});for(auto& thread:threads)thread.join();failures+=parallel_failures.load();
     const auto warm=GetPcShaderLibraryStats();reopened.reset();
+    // A complete pack may coexist with its loose originals and newer runtime
+    // variants. Skip only the originals; an invalid pack must retain the full
+    // loose-record fallback, with exact native binaries and bindings.
+    struct DuplicateFlag{bool saved=REXCVAR_GET(em2_skip_packed_shader_duplicates);~DuplicateFlag(){REXCVAR_SET(em2_skip_packed_shader_duplicates,saved);}} duplicate_flag;
+    REXCVAR_SET(em2_skip_packed_shader_duplicates,true);
+    const auto overlay=directory/"packed-overlay",overlay_records=overlay/"translated-dxbc-v1";
+    std::filesystem::create_directories(overlay_records);
+    const auto overlay_pack=overlay_records/"library.em2dxbcpack";
+    std::filesystem::copy_file(directory/"pack-seed"/"translated-dxbc-v1"/"library.em2dxbcpack",overlay_pack);
+    for(const auto& entry:std::filesystem::directory_iterator(directory/"translated-dxbc-v1"))if(entry.path().extension()==L".em2dxbc")
+        std::filesystem::copy_file(entry.path(),overlay_records/entry.path().filename());
+    Case extra=cases[0];extra.map=true;extra.scale=2;Output extra_reference;
+    {PcShaderLibraryScope native(nullptr);if(!translate(0,extra,extra_reference))return false;}
+    auto packed=OpenPcShaderLibrary(overlay);
+    {PcShaderLibraryScope scope(packed);Output result;if(!translate(0,extra,result) || !Equal(result,extra_reference))++failures;}
+    FlushPcShaderLibrary(packed);packed.reset();
+    const auto overlay_before=GetPcShaderLibraryStats();packed=OpenPcShaderLibrary(overlay);const auto overlay_loaded=GetPcShaderLibraryStats();
+    {PcShaderLibraryScope scope(packed);size_t i=0;for(auto config:cases)for(unsigned p=0;p<programs.size();++p){Output result;if(!translate(p,config,result) || !Equal(result,references[i++]))++failures;}Output result;if(!translate(0,extra,result) || !Equal(result,extra_reference))++failures;}
+    const auto overlay_checked=GetPcShaderLibraryStats();packed.reset();
+    const auto skipped=overlay_loaded.packed_duplicates_skipped-overlay_before.packed_duplicates_skipped;
+    const auto loose=overlay_loaded.file_reads-overlay_before.file_reads;
+    if(skipped!=references.size() || loose!=1 || overlay_checked.misses!=overlay_loaded.misses)++failures;
+    {std::fstream file(overlay_pack,std::ios::binary|std::ios::in|std::ios::out);file.put('X');if(!file.good())return false;}
+    const auto fallback_before=GetPcShaderLibraryStats();packed=OpenPcShaderLibrary(overlay);const auto fallback_loaded=GetPcShaderLibraryStats();
+    {PcShaderLibraryScope scope(packed);size_t i=0;for(auto config:cases)for(unsigned p=0;p<programs.size();++p){Output result;if(!translate(p,config,result) || !Equal(result,references[i++]))++failures;}Output result;if(!translate(0,extra,result) || !Equal(result,extra_reference))++failures;}
+    const auto fallback_checked=GetPcShaderLibraryStats();packed.reset();
+    const auto fallback_reads=fallback_loaded.file_reads-fallback_before.file_reads;
+    if(fallback_reads!=references.size()+1 || fallback_loaded.rejected!=fallback_before.rejected+1 || fallback_checked.misses!=fallback_loaded.misses)++failures;
     // Damage only the isolated fixture library, then demand a real native
     // compile rather than accepting any corrupt program or binding layout.
     unsigned damaged=0;for(const auto& entry:std::filesystem::directory_iterator(directory/"translated-dxbc-v1"))if(entry.path().extension()==L".em2dxbc"){
@@ -56,7 +85,7 @@ bool TestPcShaderLibrary(const rex::ui::d3d12::D3D12Provider& provider,const std
     {PcShaderLibraryScope scope(corrupt);Output result;if(!translate(0,cases[0],result) || !Equal(result,references[0]))++failures;}
     FlushPcShaderLibrary(corrupt);const auto recovered=GetPcShaderLibraryStats();
     const size_t count=references.size();if(populated.hits-before.hits<count || loaded.loaded-populated.loaded<count || warm.hits-loaded.hits<count+8 || rejected.rejected-warm.rejected<damaged || recovered.misses-rejected.misses!=1)++failures;
-    std::ofstream report(directory/"pc-shader-library-results.json");report<<"{\"program_profiles\":"<<count<<",\"reopened_programs\":"<<loaded.loaded-populated.loaded<<",\"parallel_hits\":8,\"corrupt_records_rejected\":"<<rejected.rejected-warm.rejected<<",\"native_recovery_compiles\":"<<recovered.misses-rejected.misses<<",\"failures\":"<<failures<<",\"native_ms\":"<<native_ms<<",\"hit_ms\":"<<hit_ms<<",\"scope\":\"Exact native DXBC and texture/sampler/used-mask equality on fresh shader objects, nine translator profiles including scale, binding model, ROV, gamma, MSAA and source maps; disk reopen, concurrent lookups and damaged-cache native recovery. CPU translation timing only; no gameplay FPS or full offline variant coverage claim.\"}\n";
+    std::ofstream report(directory/"pc-shader-library-results.json");report<<"{\"program_profiles\":"<<count<<",\"reopened_programs\":"<<loaded.loaded-populated.loaded<<",\"parallel_hits\":8,\"packed_duplicates_skipped\":"<<skipped<<",\"new_loose_records_loaded\":"<<loose<<",\"corrupt_pack_loose_reads\":"<<fallback_reads<<",\"corrupt_records_rejected\":"<<rejected.rejected-warm.rejected<<",\"native_recovery_compiles\":"<<recovered.misses-rejected.misses<<",\"failures\":"<<failures<<",\"native_ms\":"<<native_ms<<",\"hit_ms\":"<<hit_ms<<",\"scope\":\"Exact native DXBC and texture/sampler/used-mask equality on fresh shader objects, nine translator profiles including scale, binding model, ROV, gamma, MSAA and source maps; disk reopen, concurrent lookups, packed duplicate skipping, new loose variants, corrupt-pack fallback and damaged-cache native recovery. CPU translation timing only; no gameplay FPS or full offline variant coverage claim.\"}\n";
     REXLOG_INFO("PC shader library: {} profiles, {} reopened, {} corrupt records rejected, {} failures; native {:.3f}ms, warm {:.3f}ms (translation fixture only)",count,loaded.loaded-populated.loaded,rejected.rejected-warm.rejected,failures,native_ms,hit_ms);return !failures && report.good();
 }
 }
