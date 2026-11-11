@@ -1,5 +1,7 @@
 /build/
 /generated/
+/config/em2.toml
+/config/em2_switch_tables.toml
 /private/
 /analysis/
 /tools/downloads/
