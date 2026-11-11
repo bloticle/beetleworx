@@ -499,3 +499,5 @@ target_sources(EM2Recomp PRIVATE online_behavior_trace.cpp)
 
 target_sources(EM2Recomp PRIVATE native_launch_defaults.cpp)
 target_sources(EM2Recomp PRIVATE native_character_physics.cpp)
+target_sources(EM2Recomp PRIVATE online_input_clock.cpp)
+target_sources(EM2Recomp PRIVATE online_native_triggers.cpp)

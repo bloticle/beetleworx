@@ -14,6 +14,7 @@
 #include "native_sampler.h"
 #include "native_random.h"
 #include "online_behavior_trace.h"
+#include "online_input_clock.h"
 #include "skinning.h"
 #include "physics_timing.h"
 #include "players.h"
@@ -1787,6 +1788,7 @@ void em2::RecordNativeRandom(bool reseed,uint32_t caller,uint32_t state,uint32_t
 }
 
 PPC_FUNC_IMPL(sub_826C9F38) {
+    if(em2::net::TryNativeInputClockQuery(ctx,base))return;
     if(!in_clock_update) { __imp__sub_826C9F38(ctx,base); return; }
     PPC_STORE_U64(ctx.r3.u32,tick_counter);
     ctx.r3.u64=1;

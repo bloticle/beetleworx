@@ -2,6 +2,7 @@
 #include "online_room.h"
 #include "online_room_bootstrap.h"
 #include "online_local_jump.h"
+#include "online_native_triggers.h"
 #include "online_movement_frame.h"
 #include "controls.h"
 #include <rex/input/input_system.h>
@@ -13,6 +14,8 @@
 #include <functional>
 #include <thread>
 #include <type_traits>
+#include <cstring>
+#include <bit>
 
 namespace em2::net {
 using rex::X_STATUS;
@@ -77,6 +80,16 @@ bool TestNativeLocalSource(PPCContext& ctx,uint8_t* base,const NativeLocalMoveme
     static_assert(!std::is_constructible_v<NativeRoutedPadSample,Pad>);
     if(!check(!route.active && !em2::SynchronizedControlsGeneration() && !RoomBootstrapActive() && binding.retail_slot==1 && binding.user==1 &&
         BindingCurrent(binding,ctx,base),"fixture owns real human Oswald slot1/nativeuser1 binding and no controls/source owner"))return false;
+    struct ClockFixture {
+        uint8_t* base;uint8_t initialized;uint32_t threshold;std::array<uint8_t,16> a;std::array<uint8_t,12> b;
+        ClockFixture(uint8_t* p):base(p),initialized(PPC_LOAD_U8(0x83396930)),threshold(PPC_LOAD_U32(0x833B65F8)){
+            std::memcpy(a.data(),base+0x833D03C0,a.size());std::memcpy(b.data(),base+0x833D04D8,b.size());
+            PPC_STORE_U8(0x83396930,0);PPC_STORE_U64(0x833D03C0,100000000);PPC_STORE_U64(0x833D03C8,1000003);
+            PPC_STORE_U64(0x833D04D8,1000003);PPC_STORE_U32(0x833D04E0,std::bit_cast<uint32_t>(float(1./1000003.)));PPC_STORE_U32(0x833B65F8,32);
+        }
+        ~ClockFixture(){std::memcpy(base+0x833D03C0,a.data(),a.size());std::memcpy(base+0x833D04D8,b.data(),b.size());
+            PPC_STORE_U8(0x83396930,initialized);PPC_STORE_U32(0x833B65F8,threshold);}
+    }clock_fixture{base};
     std::unique_ptr<Room> host,client;
     RoomBootstrapGate gate;
     struct Cleanup {RoomBootstrapGate& gate;~Cleanup(){DisarmNativeLocalSource();DisarmNativeLocalJump();if(gate.active())gate.Detach();else em2::EndSynchronizedControls();}} cleanup{gate};
@@ -109,7 +122,7 @@ bool TestNativeLocalSource(PPCContext& ctx,uint8_t* base,const NativeLocalMoveme
         rex::X_RESULT GetKeystroke(uint32_t,uint32_t,rex::input::X_INPUT_KEYSTROKE*)override{return X_ERROR_EMPTY;}
     };
     rex::input::InputSystem input(nullptr);auto driver=std::make_unique<Device>();auto* hardware=driver.get();input.AddDriver(std::move(driver));
-    hardware->pads[0].thumb_lx=23000;hardware->pads[0].thumb_ly=-14000;hardware->pads[1].thumb_lx=-30000;
+    hardware->pads[0].thumb_lx=23000;hardware->pads[0].thumb_ly=-14000;hardware->pads[0].buttons=0x1000;hardware->pads[1].thumb_lx=-30000;
     NativeRoutedPadSample sample;
     if(!check(connect(true) && gate.Attach(*client) && gate.SetJoining(false),"real guest Room owns agreed raw bootstrap gate"))return false;
     check(!ArmNativeLocalSource(*client,0,binding,ctx,base),"source route cannot arm before a committed native round boundary");
@@ -124,7 +137,13 @@ bool TestNativeLocalSource(PPCContext& ctx,uint8_t* base,const NativeLocalMoveme
     // provenance. This test never casts a raw frame into interpreted Movement,
     // installs a readiness probe, or emits a bootstrap gameplay-ready vote.
     identity.first_tick=1000;
-    if(!check(connect(false) && em2::BeginSynchronizedControls(identity.first_tick),"direct running fixture owns one local sampler generation"))return false;
+    if(!check(connect(false) && em2::BeginSynchronizedControls(identity.first_tick-1),"direct running fixture owns one local sampler generation"))return false;
+    // The real menu/bootstrap settles the existing release-before-input gate.
+    // Do that through the actual sampler here too; never bypass its guard to
+    // manufacture a first press. Source-read counts below start after baseline.
+    const auto configured_pad=hardware->pads[0];hardware->pads[0]={};Pad baseline;
+    if(!check(em2::SampleLocalControls(input,0,identity.first_tick-1,baseline) && baseline==Pad{},"neutral physical baseline settles the real sampler release gate"))return false;
+    hardware->pads[0]=configured_pad;hardware->reads={};
     check(!ArmNativeLocalSource(*host,0,binding,ctx,base) && !ArmNativeLocalSource(*client,2,binding,ctx,base),"retail slot/local-room-peer mismatch and nonexistent physical user rejected");
     if(!check(ArmNativeLocalSource(*client,0,binding,ctx,base) && SampleNativeLocalSource(*client,input,1000,ctx,base,sample),"actual physical0 poll mints canonical nativeuser1 Oswald source token"))return false;
     Pad cached;check(sample.physical_user()==0 && sample.native_user()==1 && sample.retail_slot()==1 && sample.source_tick()==1000 &&
@@ -134,6 +153,21 @@ bool TestNativeLocalSource(PPCContext& ctx,uint8_t* base,const NativeLocalMoveme
         !SampleNativeLocalSource(*client,input,1002,ctx,base,again),"same tick reuses exact token without repoll; source tick gaps reject");
     NativeLocalJumpBinding jump;
     if(!check(DiscoverNativeLocalJumpBinding(binding,ctx,base,jump) && ArmNativeLocalJump(jump,1,1000,ctx,base),"typed source fixture arms original native Jump math at correct source tick"))return false;
+    NativeTriggerBinding button_binding;NativeTriggerSource button_source;NativeTriggerBatch button_batch;
+    if(!check(DiscoverNativeTriggerBinding(binding,ctx,base,button_binding,NativeButtonScope::DigitalAndTriggers),"native Oswald digital binding discovery") ||
+       !check(button_binding.actions.size()==2,"native Oswald digital binding has exact Jump pair") ||
+       !check(ArmNativeTriggers(button_source,button_binding,1,1000,ctx,base),"native Oswald button source arms from neutral live history") ||
+       !check(ProduceNativeTriggers(*client,button_source,button_binding,sample,1,ctx,base,button_batch),"sealed native Oswald button interpreter completes"))return false;
+    if(button_batch.count!=2 || !button_batch.actions[0].dispatch || button_batch.actions[1].dispatch)
+        REXLOG_ERROR("Native button source fixture: remapped buttons {:04X}, count {}, first '{}' kind {} dispatch {}, second '{}' kind {} dispatch {}",
+            sample.pad().buttons,button_batch.count,button_binding.actions[0].name,button_binding.actions[0].kind,button_batch.actions[0].dispatch,
+            button_binding.actions[1].name,button_binding.actions[1].kind,button_batch.actions[1].dispatch);
+    if(!check(button_batch.count==2 && button_batch.actions[0].dispatch && !button_batch.actions[1].dispatch && hardware->reads[0]==1 && hardware->reads[1]==0,
+        "sealed real hardware0 sample drives original Oswald nativeuser1 digital press without repolling or relabelling a raw Pad"))return false;
+    if(!check(!ProduceNativeTriggers(button_source,button_binding,sample.pad(),0,1,1000,ctx,base,button_batch) &&
+        !ProduceNativeTriggers(*host,button_source,button_binding,sample,1,ctx,base,button_batch) &&
+        !ProduceNativeTriggers(*client,button_source,button_binding,NativeRoutedPadSample{},1,ctx,base,button_batch),
+        "raw physical-user shortcut, wrong Room and unissued source token cannot authorize native button production"))return false;
     RoomMovement movement;NativeLocalJumpEvents events;
     check(ProduceNativeLocalRoomMovement(*client,binding,sample,1,ctx,base,movement) && movement.pad==sample.pad() && ValidRoomMovement(movement) &&
         ProduceNativeLocalJump(*client,jump,sample,1,ctx,base,events),"typed Movement and Jump consume identical physical0 proof through nativeuser1 common math");
@@ -160,6 +194,9 @@ bool TestNativeLocalSource(PPCContext& ctx,uint8_t* base,const NativeLocalMoveme
     hardware->pads[0].thumb_lx=-22000;
     NativeRoutedPadSample next;check(SampleNativeLocalSource(*client,input,1001,ctx,base,next) && hardware->reads[0]==2 && hardware->reads[1]==0 &&
         !ValidateNativeLocalSource(*client,sample,binding,ctx,base) && ValidateNativeLocalSource(*client,next,binding,ctx,base),"new source tick invalidates older token without polling canonicaldevice1");
+    check(!ProduceNativeTriggers(*client,button_source,button_binding,sample,1,ctx,base,button_batch) &&
+        ProduceNativeTriggers(*client,button_source,button_binding,next,1,ctx,base,button_batch) && !button_batch.actions[0].dispatch && !button_batch.actions[1].dispatch,
+        "stale physical token cannot advance button histories; the new held sample executes the original interpreter without a second press");
     hardware->on_poll=[] {DisarmNativeLocalSource();};
     check(!SampleNativeLocalSource(*client,input,1002,ctx,base,again) && hardware->reads[0]==3,"route teardown during SDK poll cannot mint stale provenance");hardware->on_poll={};
     check(!ValidateNativeLocalSource(*client,next,binding,ctx,base) && ArmNativeLocalSource(*client,0,binding,ctx,base) &&
