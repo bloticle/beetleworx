@@ -126,6 +126,25 @@ bool TestNativeButtonActions(){
         if(!check(!EncodeNativeButtonActions(b,bad,wire) && wire==stable,"partial, unowned, reordered and non-boolean/signed-zero argument batches cannot lose data silently"))return false;
     }
     {auto bad=b;std::swap(bad.actions[1],bad.actions[2]);if(!check(!HashNativeButtonSchema(bad),"unordered native definitions reject"))return false;}
+    RoomFrame phase;phase.tick=40;phase.players_mask=3;
+    for(unsigned i=0;i<2;++i){phase.players[i].actor_epoch=1;phase.players[i].source=RoomMovementSource::NativeActionV1;}
+    if(!check(ClassifyRetailButtonFrame(phase,40,2)==RetailButtonPhase::StartupNeutral,
+        "negotiated startup frames remain exact original neutral commands"))return false;
+    auto changed=phase;changed.players[1].x=std::bit_cast<float>(0x80000000u);
+    if(!check(ClassifyRetailButtonFrame(changed,40,2)==RetailButtonPhase::Invalid,
+        "startup seed cannot hide even a signed-zero command substitution"))return false;
+    phase.tick=42;
+    if(!check(ClassifyRetailButtonFrame(phase,40,2)==RetailButtonPhase::Invalid,
+        "legacy neutral cannot delay the native button transition"))return false;
+    for(unsigned i=0;i<2;++i){auto& c=phase.players[i];c.source=RoomMovementSource::NativeActionV3;c.jump_button_mask=0x1000;
+        c.button_actions=stable;c.button_actions.source_tick=40;}
+    if(!check(ClassifyRetailButtonFrame(phase,40,2)==RetailButtonPhase::NativeButtons &&
+        ClassifyRetailButtonFrame(phase,42,0)==RetailButtonPhase::Invalid,
+        "button commands own their negotiated delayed source ticks, including zero delay"))return false;
+    changed=phase;changed.players[1].button_actions.source_tick=41;
+    if(!check(ClassifyRetailButtonFrame(changed,40,2)==RetailButtonPhase::Invalid &&
+        ClassifyRetailButtonFrame(phase,UINT64_MAX,2)==RetailButtonPhase::Invalid,
+        "later-slot source mismatch and cutover overflow reject the whole frame"))return false;
     REXLOG_INFO("Native button schema passed {} canonical relocation/definition/bitmap/UI/transaction checks; metadata only, no native dispatch",checks);return true;
 }
 }

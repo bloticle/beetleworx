@@ -37,7 +37,29 @@ missing tick ownership, later-slot schema rejection, duplicate delivery,
 neutral frames, nested foreign input and a task exception before the second
 actor. It does not establish live paint, interaction, animation or damage.
 
-The live Room still uses Movement/Jump V2. Connecting V3 source production and
-delivery needs an explicit transition across the input-delay startup frames;
-those currently contain neutral V1 commands. Aim, tool targeting and lifecycle
-handling remain unfinished. The public online menu is still disabled.
+The live Room uses Movement/Jump V2 by default. Experimental V3 is available
+with `em2_room_native_buttons=true` on both peers, or `-Gameplay -NativeButtons`
+in the private pair launcher. This is a development test option, not an online
+menu or a negotiated public lobby capability.
+
+Readiness captures both receiver definitions and a neutral native button
+baseline. Each sealed local hardware sample then feeds the original native
+button interpreter. Its decisions travel through SubmitLocal and the normal
+authoritative echo before the retail delivery adapter may consume them. The
+outgoing source clock is ahead of the receiver by the negotiated input delay;
+outgoing metadata checks never advance the receiver's history.
+
+The initial delayed frames remain the Room's exact neutral V1 commands. At the
+first genuine input frame, both slots must switch to V3 with the correct source
+ticks. Early V3, late legacy commands, mixed phases, altered startup commands,
+and cutover overflow reject. V3 Jump events use button delivery exclusively;
+the older Jump adapter remains responsible for the neutral startup prefix.
+
+Two private neutral-input pairs matched 1,655 and 1,696 recorded V5
+character-physics ticks while V3 commands flowed. The final pair ran without
+Lua-owner tracing. No gameplay controls or screenshots were automated.
+This establishes that transition and recorded-field comparison, not complete
+world determinism or live paint, aiming, interaction and damage. Another pair
+diverged in native random calls during bootstrap before V3 activated; that
+intermittent initialization issue remains unresolved. Aim, tool targeting and
+lifecycle handling also remain unfinished. The public online menu is disabled.

@@ -125,4 +125,19 @@ struct RoomFrame {
     std::array<RoomMovement,kOnlineRoomCapacity> players{};
     bool operator==(const RoomFrame&) const = default;
 };
+enum class RetailButtonPhase { Invalid, StartupNeutral, NativeButtons };
+// The two-retail-player V3 cutover keeps the negotiated delay seeds intact.
+// A late legacy command, early button command or wrong source clock is never
+// an implicit neutral frame. Receiver schemas/history are checked separately.
+inline RetailButtonPhase ClassifyRetailButtonFrame(const RoomFrame& frame,uint64_t first,uint64_t delay){
+    if(frame.players_mask!=3 || frame.tick<first || first>UINT64_MAX-delay)return RetailButtonPhase::Invalid;
+    if(frame.tick<first+delay){
+        RoomMovement neutral;neutral.actor_epoch=1;neutral.source=RoomMovementSource::NativeActionV1;
+        return frame.players[0]==neutral && frame.players[1]==neutral?RetailButtonPhase::StartupNeutral:RetailButtonPhase::Invalid;
+    }
+    for(unsigned i=0;i<2;++i){const auto& command=frame.players[i];
+        if(command.source!=RoomMovementSource::NativeActionV3 || !ValidRoomMovement(command) ||
+           command.button_actions.source_tick!=frame.tick-delay)return RetailButtonPhase::Invalid;}
+    return RetailButtonPhase::NativeButtons;
+}
 }
