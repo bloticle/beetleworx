@@ -56,6 +56,7 @@ OwnedFrameResult OwnedMovementFrames::Preflight(const RoomFrame& frame,PPCContex
         if(!(roster_&(1u<<i))){if(movement!=RoomMovement{})return OwnedFrameResult::InvalidRoster;continue;}
         if(movement.actor_epoch!=epochs_[i])return OwnedFrameResult::EpochMismatch;
         if(!ValidRoomMovement(movement))return OwnedFrameResult::InvalidMovement;
+        if(movement.source==RoomMovementSource::NativeActionV3)return OwnedFrameResult::UnsupportedIntent;
         // Retail input is still published through its existing raw gate; that
         // adapter does not yet consume V2 interpreted edges. Never drop them.
         if(retail_&(1u<<i)){
@@ -234,6 +235,8 @@ bool TestOwnedJumpMovementFrames(PPCContext& ctx,uint8_t* base,uint64_t first_pe
         std::array<std::array<uint8_t,800>,2> before;std::memcpy(before[0].data(),base+a.controller,800);std::memcpy(before[1].data(),base+b.controller,800);
         auto unchanged=[&]{return !std::memcmp(before[0].data(),base+a.controller,800) && !std::memcmp(before[1].data(),base+b.controller,800);};
         auto bad=received;bad.players[1].pad.buttons|=0x2000;
+        if(n==0){auto buttons=received;buttons.players[1].source=RoomMovementSource::NativeActionV3;buttons.players[1].button_actions.schema[0]=1;
+            if(!check(coordinator.Deliver(buttons,ctx,base)==OwnedFrameResult::UnsupportedIntent && unchanged(),"V3 button decisions never get discarded by the Movement/Jump-only extra adapter"))return false;}
         if(!check(coordinator.Deliver(bad,ctx,base)==OwnedFrameResult::UnsupportedIntent && unchanged(),"unsupported extra controls reject before either actor receives Movement"))return false;
         if(n==0){
             OwnedMovementFrames retail_adapter;

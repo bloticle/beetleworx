@@ -3,6 +3,7 @@
 #include "online_room_bootstrap.h"
 #include "online_local_jump.h"
 #include "online_native_triggers.h"
+#include "online_button_actions.h"
 #include "online_movement_frame.h"
 #include "controls.h"
 #include <rex/input/input_system.h>
@@ -164,6 +165,10 @@ bool TestNativeLocalSource(PPCContext& ctx,uint8_t* base,const NativeLocalMoveme
             button_binding.actions[1].name,button_binding.actions[1].kind,button_batch.actions[1].dispatch);
     if(!check(button_batch.count==2 && button_batch.actions[0].dispatch && !button_batch.actions[1].dispatch && hardware->reads[0]==1 && hardware->reads[1]==0,
         "sealed real hardware0 sample drives original Oswald nativeuser1 digital press without repolling or relabelling a raw Pad"))return false;
+    RoomButtonActions interpreted_buttons;std::vector<NativeActorAction> matched_buttons;
+    if(!check(EncodeNativeButtonActions(button_binding,button_batch,interpreted_buttons) &&
+        MatchNativeButtonActions(button_binding,interpreted_buttons,matched_buttons) && matched_buttons.size()==1 &&
+        matched_buttons[0].action==jump.actions[0].action,"real native button output encodes and matches the local Oswald definition schema"))return false;
     if(!check(!ProduceNativeTriggers(button_source,button_binding,sample.pad(),0,1,1000,ctx,base,button_batch) &&
         !ProduceNativeTriggers(*host,button_source,button_binding,sample,1,ctx,base,button_batch) &&
         !ProduceNativeTriggers(*client,button_source,button_binding,NativeRoutedPadSample{},1,ctx,base,button_batch),
@@ -171,7 +176,8 @@ bool TestNativeLocalSource(PPCContext& ctx,uint8_t* base,const NativeLocalMoveme
     RoomMovement movement;NativeLocalJumpEvents events;
     check(ProduceNativeLocalRoomMovement(*client,binding,sample,1,ctx,base,movement) && movement.pad==sample.pad() && ValidRoomMovement(movement) &&
         ProduceNativeLocalJump(*client,jump,sample,1,ctx,base,events),"typed Movement and Jump consume identical physical0 proof through nativeuser1 common math");
-    auto produced=movement;produced.source=RoomMovementSource::NativeActionV2;produced.jump_button_mask=events.button_mask;produced.jump_count=events.count;produced.jump_events=events.events;
+    auto produced=movement;produced.source=RoomMovementSource::NativeActionV3;produced.jump_button_mask=events.button_mask;produced.jump_count=events.count;produced.jump_events=events.events;
+    produced.button_actions=interpreted_buttons;
     RoomMovement neutral;neutral.source=RoomMovementSource::NativeActionV1;neutral.actor_epoch=1;
     check(host->SubmitLocal(1000,neutral) && client->SubmitLocal(1000,produced),"sealed source0/native1 output enters actual authoritative Room frame without relabelling raw input");
     RoomFrame authoritative,received;

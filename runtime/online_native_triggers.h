@@ -28,6 +28,7 @@ struct NativeTriggerContext {
 struct NativeTriggerBinding {
     NativeLocalMovementBinding parent;
     NativeButtonScope scope=NativeButtonScope::TriggersOnly;
+    std::string active_context_name;
     uint32_t threshold=0,buttons=0,button_count=0;
     std::vector<NativeTriggerAction> actions;
     std::vector<NativeTriggerExclusion> excluded;
@@ -59,6 +60,9 @@ bool DiscoverNativeTriggerBinding(const NativeLocalMovementBinding&,PPCContext&,
     NativeButtonScope scope=NativeButtonScope::TriggersOnly);
 bool ArmNativeTriggers(NativeTriggerSource&,const NativeTriggerBinding&,uint64_t source_epoch,uint64_t first_source_tick,PPCContext&,uint8_t*);
 bool ResetNativeTriggers(NativeTriggerSource&);
+// Read-only receiver snapshot check. Does not require/rebind the one local
+// physical producer lease and never grants native callback permission.
+bool ValidateNativeButtonDefinitionSnapshot(const NativeTriggerBinding&,uint8_t*);
 // Strict provenance: sampled_native_user is the actual selected native source,
 // not a room peer ID. No physical0->native1 shortcut is provided here.
 bool ProduceNativeTriggers(NativeTriggerSource&,const NativeTriggerBinding&,const Pad&,unsigned sampled_native_user,

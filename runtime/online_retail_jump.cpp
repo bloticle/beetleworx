@@ -129,6 +129,7 @@ Result Validate(unsigned slot,const RoomMovement& command,PPCContext& ctx,uint8_
     if(!Owner(base))return Result::WrongThread;if(permit)return Result::Nested;
     if(!Current(slot,ctx,base))return Result::Stale;
     if(!ValidRoomMovement(command) || command.actor_epoch!=state.slots[slot].target.actor.actor_epoch)return Result::InvalidInput;
+    if(command.source==RoomMovementSource::NativeActionV3)return Result::UnsupportedAction;
     // Camera intent is separately admitted by the Movement/camera adapter.
     if(command.pad.left_trigger || command.pad.right_trigger || (command.pad.buttons&~command.jump_button_mask))return Result::UnsupportedAction;
     auto stream=state.slots[slot].stream;

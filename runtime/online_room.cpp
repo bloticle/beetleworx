@@ -81,6 +81,10 @@ bool UniqueName(const LobbySnapshot& lobby,uint64_t except,std::string_view name
     return std::none_of(lobby.players.begin(),lobby.players.end(),[&](const auto& p){return p.peer!=except && p.name==name;});
 }
 bool ValidCommand(const RoomCommand& c){return c.actor_epoch==1 && ValidRoomMovement(c);}
+bool ValidCommandTick(const RoomCommand& c,uint64_t tick,unsigned delay){
+    return ValidCommand(c) && (c.source!=RoomMovementSource::NativeActionV3 ||
+        (tick>=delay && c.button_actions.source_tick==tick-delay));
+}
 RoomCommand Neutral(){RoomCommand c;c.actor_epoch=1;c.source=RoomMovementSource::NativeActionV1;return c;}
 void WriteCommand(Bytes& b,const RoomCommand& c){
     for(float n:{c.x,c.y,c.forward_x,c.forward_z})U64(b,std::bit_cast<uint32_t>(n),4);
@@ -89,6 +93,10 @@ void WriteCommand(Bytes& b,const RoomCommand& c){
     for(auto n:{p.left_x,p.left_y,p.right_x,p.right_y})U64(b,uint16_t(n),2);
     U64(b,c.jump_button_mask,2);U8(b,c.jump_count);
     for(unsigned i=0;i<c.jump_count && i<kMaxRoomJumpEvents;++i){U64(b,c.jump_events[i].sequence);U8(b,uint8_t(c.jump_events[i].edge));}
+    if(c.source==RoomMovementSource::NativeActionV3){
+        b.insert(b.end(),c.button_actions.schema.begin(),c.button_actions.schema.end());U64(b,c.button_actions.source_tick);
+        b.insert(b.end(),c.button_actions.fired.begin(),c.button_actions.fired.end());
+    }
 }
 RoomCommand ReadCommand(Reader& r){
     RoomCommand c;c.x=std::bit_cast<float>(uint32_t(r.Number(4)));c.y=std::bit_cast<float>(uint32_t(r.Number(4)));
@@ -99,6 +107,10 @@ RoomCommand ReadCommand(Reader& r){
     c.jump_button_mask=uint16_t(r.Number(2));c.jump_count=r.Byte();
     if(c.jump_count>kMaxRoomJumpEvents){r.good=false;return c;}
     for(unsigned i=0;i<c.jump_count;++i){c.jump_events[i].sequence=r.Number(8);c.jump_events[i].edge=RoomJumpEdge(r.Byte());}
+    if(c.source==RoomMovementSource::NativeActionV3){
+        for(auto& byte:c.button_actions.schema)byte=r.Byte();c.button_actions.source_tick=r.Number(8);
+        for(auto& byte:c.button_actions.fired)byte=r.Byte();
+    }
     return c;
 }
 LobbySnapshot Snapshot(const LobbyRoster& roster){
@@ -486,7 +498,7 @@ struct Room::Impl {
         if(kind==Wire::Input){
             if(!host || state!=RoomState::Running)return false;
             const auto tick=r.Number(8);const auto command=ReadCommand(r);
-            if(!r.Done() || !ValidCommand(command) || c.wire_exhausted || tick!=c.wire_next || tick<consume_next || tick-consume_next>=Window || inputs[tick].contains(c.peer))return false;
+            if(!r.Done() || !ValidCommandTick(command,tick,id.input_delay) || c.wire_exhausted || tick!=c.wire_next || tick<consume_next || tick-consume_next>=Window || inputs[tick].contains(c.peer))return false;
             auto jump_state=submitted_jumps[c.peer-1];if(!AdvanceRoomJumpStream(jump_state,command))return false;
             submitted_jumps[c.peer-1]=jump_state;
             inputs[tick][c.peer]=command;if(c.wire_next==UINT64_MAX)c.wire_exhausted=true;else ++c.wire_next;return true;
@@ -496,7 +508,7 @@ struct Room::Impl {
             RoomFrame frame;frame.tick=r.Number(8);const auto count=r.Byte();
             if(frame.tick!=frame_next || count!=lobby.players.size())return false;
             for(unsigned i=0;i<count;++i){const auto entry_peer=r.Number(8);const auto command=ReadCommand(r);
-                if(entry_peer!=lobby.players[i].peer || !ValidCommand(command))return false;
+                if(entry_peer!=lobby.players[i].peer || !ValidCommandTick(command,frame.tick,id.input_delay))return false;
                 frame.players_mask|=uint16_t(1u<<(entry_peer-1));frame.players[entry_peer-1]=command;}
             const auto echo=echoes.find(frame.tick);
             if(!r.Done() || echo==echoes.end() || !(frame.players_mask&(1u<<(peer-1))) || frame.players[peer-1]!=echo->second)return false;
@@ -681,7 +693,7 @@ bool Room::CompleteBootstrap(uint64_t tick,bool ready,const Hash& digest){
     if(!p.Queue(*p.connections.front(),packet))return false;return true;
 }
 bool Room::SubmitLocal(uint64_t tick,const RoomCommand& command){
-    auto& p=*impl_;if(p.state!=RoomState::Running || p.submit_exhausted || tick!=p.submit_next || tick<p.consume_next || tick-p.consume_next>=Window || !ValidCommand(command))return false;
+    auto& p=*impl_;if(p.state!=RoomState::Running || p.submit_exhausted || tick!=p.submit_next || tick<p.consume_next || tick-p.consume_next>=Window || !ValidCommandTick(command,tick,p.id.input_delay))return false;
     auto jump_state=p.submitted_jumps[p.peer-1];if(!AdvanceRoomJumpStream(jump_state,command))return false;
     if(p.host)p.inputs[tick][p.peer]=command;
     else {auto packet=Packet(Wire::Input);U64(packet,tick);WriteCommand(packet,command);if(!p.Queue(*p.connections.front(),packet))return false;p.echoes[tick]=command;}
@@ -820,11 +832,16 @@ bool TestOnlineRoom(){
         check(complete_fixture_tick(tick),"native edge fixture completion agrees across sixteen peers");
     }
     for(uint64_t tick=111;tick<111+Window;++tick)for(unsigned i=0;i<16;++i){auto command=commands[i];command.jump_count=2;
+        command.source=RoomMovementSource::NativeActionV3;command.button_actions.schema[0]=uint8_t(i+1);
+        command.button_actions.source_tick=tick-id.input_delay;std::fill_n(command.button_actions.fired.begin(),32,uint8_t(255));
         command.jump_events={RoomJumpEvent{5+(tick-111)*2,RoomJumpEdge::Pressed},RoomJumpEvent{6+(tick-111)*2,RoomJumpEdge::Released}};
-        check(rooms[i]->SubmitLocal(tick,command),"full legal V2 frame window queues bounded two-edge native batches");}
-    check(pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& r){return r->impl_->frames.size()==Window;});}),"sixteen-peer maximum V2 burst fits the bounded receive budget");
-    for(uint64_t tick=111;tick<111+Window;++tick){RoomFrame expected;check(rooms[0]->TakeFrame(expected) && expected.tick==tick,"host drains full V2 window contiguously");
-        for(unsigned i=1;i<16;++i){RoomFrame actual;check(rooms[i]->TakeFrame(actual) && actual==expected,"maximum native edge payload remains identical across all sixteen peers");}
+        check(rooms[i]->SubmitLocal(tick,command),"full V3 window carries 256 native button decisions plus both Jump edges for all sixteen peers");}
+    check(pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& r){return r->impl_->frames.size()==Window;});}),"sixteen-peer maximum V3 burst fits unchanged packet/queue bounds");
+    for(uint64_t tick=111;tick<111+Window;++tick){RoomFrame expected;check(rooms[0]->TakeFrame(expected) && expected.tick==tick,"host drains full V3 window contiguously");
+        for(unsigned i=0;i<16;++i)check(expected.players[i].source==RoomMovementSource::NativeActionV3 &&
+            expected.players[i].button_actions.schema[0]==i+1 && expected.players[i].button_actions.source_tick==tick-id.input_delay &&
+            expected.players[i].button_actions.fired[31]==255 && expected.players[i].button_actions.fired[32]==0,"V3 schema, delayed source tick and full bitmap preserve each peer's identity");
+        for(unsigned i=1;i<16;++i){RoomFrame actual;check(rooms[i]->TakeFrame(actual) && actual==expected,"maximum native button/Jump payload remains bit-exact across all sixteen peers");}
         check(complete_fixture_tick(tick),"full receive window drains only through per-tick completion barriers");}
     Room late;const auto late_connect=late.Join(id,"127.0.0.1",rooms[0]->port(),"Late guest");
     if(late_connect)late.Poll(Clock::now()+Timeout+std::chrono::seconds(1));
@@ -1168,12 +1185,79 @@ bool TestOnlineRoom(){
     {
         auto command=native_jump(1,RoomJumpEdge::Pressed);command.jump_count=2;command.jump_events[1]={2,RoomJumpEdge::Released};
         Bytes encoded;WriteCommand(encoded,command);Reader decoded{encoded};
+        Bytes legacy(58,0);legacy[12]=0x3f;legacy[13]=0x80;legacy[23]=1;legacy[24]=2;legacy[37]=0x10;legacy[39]=2;
+        legacy[47]=1;legacy[48]=1;legacy[56]=2;legacy[57]=2;
+        check(encoded==legacy,"legacy V2 command retains exact pre-extension golden wire bytes");
         check(ReadCommand(decoded)==command && decoded.Done(),"V2 native edge payload round trips without native addresses");
         for(size_t length=0;length<encoded.size();++length){Reader truncated{std::span(encoded).first(length)};ReadCommand(truncated);
             check(!truncated.Done(),"every truncated native edge payload rejects");}
         RoomJumpStream state;check(AdvanceRoomJumpStream(state,command) && state.sequence==2 && !state.held,"ordered two-edge batch updates semantic history once");
         const auto before=state;auto bad=native_jump(3,RoomJumpEdge::Pressed);bad.jump_count=2;bad.jump_events[1]={4,RoomJumpEdge::Pressed};
         check(!AdvanceRoomJumpStream(state,bad) && state==before,"invalid later edge leaves entire stream unchanged");
+    }
+    auto native_buttons=[&](uint64_t source_tick=100){auto command=native_jump();command.source=RoomMovementSource::NativeActionV3;
+        command.button_actions.schema[0]=0x61;command.button_actions.source_tick=source_tick;command.button_actions.fired[63]=128;return command;};
+    {
+        auto command=native_buttons();Bytes encoded;WriteCommand(encoded,command);Reader decoded{encoded};
+        check(encoded.size()==144 && ReadCommand(decoded)==command && decoded.Done(),"V3 fixed bitmap adds exactly104 bytes without pointers or float output loss");
+        for(size_t length=0;length<encoded.size();++length){Reader truncated{std::span(encoded).first(length)};ReadCommand(truncated);
+            check(!truncated.Done(),"every truncated V3 schema/tick/bitmap payload rejects");}
+        RoomJumpStream state;check(AdvanceRoomJumpStream(state,command),"first V3 frame establishes schema and source timeline");
+        const auto stable=state;
+        for(unsigned invalid=0;invalid<7;++invalid){auto bad=native_buttons(101);
+            if(invalid==0)bad.button_actions.schema[0]^=1;
+            if(invalid==1)bad.button_actions.source_tick=100;
+            if(invalid==2)bad.button_actions.source_tick=102;
+            if(invalid==3){bad.source=RoomMovementSource::NativeActionV2;bad.button_actions={};}
+            if(invalid==4)bad.actor_epoch=2;
+            if(invalid==5){std::fill(bad.button_actions.fired.begin(),bad.button_actions.fired.end(),255);}
+            if(invalid==6){bad.jump_count=1;bad.jump_events[0]={2,RoomJumpEdge::Pressed};}
+            check(!AdvanceRoomJumpStream(state,bad) && state==stable,"schema/tick gaps, downgrade, actor reuse, excess bits and late Jump failure preserve whole V3 stream");
+        }
+        check(AdvanceRoomJumpStream(state,native_buttons(101)),"valid same-next-tick retry survives rejected V3 candidates");
+        RoomJumpStream end;check(AdvanceRoomJumpStream(end,native_buttons(UINT64_MAX)) && !AdvanceRoomJumpStream(end,native_buttons(0)),"V3 source counter exhaustion cannot wrap");
+    }
+    for(unsigned malformed=0;malformed<4;++malformed){
+        if(!check(running(),"remote V3 structural/timing fixture connects"))return false;
+        auto bad=native_buttons();if(malformed==0)bad.button_actions.schema={};
+        if(malformed==1)bad.button_actions.source_tick=101;
+        if(malformed==2)std::fill(bad.button_actions.fired.begin(),bad.button_actions.fired.end(),255);
+        if(malformed==3){bad.source=RoomMovementSource::NativeActionV2;}
+        if(malformed<3){auto packet=Packet(Wire::Input);U64(packet,102);WriteCommand(packet,bad);rooms[1]->impl_->connections.front()->Queue(packet);
+            check(pump([&]{return rooms[0]->state()==RoomState::Error;}),"authority rejects V3 empty schema, incorrect delayed tick and overfull bitmap on socket");}
+        else check(!rooms[1]->SubmitLocal(102,bad),"legacy provenance cannot hide a native button attachment locally");
+    }
+    auto button_room=[&]{
+        if(!running())return false;const auto command=native_buttons();
+        if(!rooms[0]->SubmitLocal(102,command) || !rooms[1]->SubmitLocal(102,command) ||
+           !pump([&]{return rooms[0]->impl_->frames.size()==3 && rooms[1]->impl_->frames.size()==3;}))return false;
+        for(unsigned i=0;i<3;++i){RoomFrame a,b;if(!rooms[0]->TakeFrame(a) || !rooms[1]->TakeFrame(b) || a!=b || !complete_fixture_tick(a.tick))return false;}
+        return true;
+    };
+    if(!check(button_room(),"V3 schema ownership establishes through actual TCP and completed fixture barriers"))return false;
+    {auto bad=native_buttons(101);bad.button_actions.schema[1]^=1;
+        const auto next=rooms[1]->next_submit_tick();
+        check(!rooms[1]->SubmitLocal(next,bad) && rooms[1]->next_submit_tick()==next &&
+            rooms[1]->SubmitLocal(next,native_buttons(101)) && rooms[0]->SubmitLocal(next,native_buttons(101)) && take_fixture_tick(next) && complete_fixture_tick(next),
+            "local schema replacement rejects transactionally and exact valid retry still crosses TCP");}
+    for(unsigned malformed=0;malformed<5;++malformed){
+        if(!check(button_room(),"malicious later V3 stream fixture connects"))return false;
+        auto bad=native_buttons(101);
+        if(malformed==0)bad.button_actions.schema[0]^=1;
+        if(malformed==1)bad.button_actions.source_tick=100;
+        if(malformed==2)bad.button_actions.source_tick=102;
+        if(malformed==3){bad.source=RoomMovementSource::NativeActionV2;bad.button_actions={};}
+        if(malformed==4){bad.jump_count=1;bad.jump_events[0]={2,RoomJumpEdge::Pressed};}
+        auto packet=Packet(Wire::Input);U64(packet,103);WriteCommand(packet,bad);rooms[1]->impl_->connections.front()->Queue(packet);
+        check(pump([&]{return rooms[0]->state()==RoomState::Error;}),"host rejects later schema changes, source replay/gap, downgrade and invalid later Jump on socket");
+    }
+    if(!check(button_room(),"host-forged V3 frame fixture connects"))return false;
+    {
+        const auto valid=native_buttons(101);auto forged=valid;forged.button_actions.schema[0]^=1;
+        if(!check(rooms[1]->SubmitLocal(103,valid),"client records its own unmodified V3 echo before hostile host frame"))return false;
+        auto packet=Packet(Wire::Frame);U64(packet,103);U8(packet,2);U64(packet,1);WriteCommand(packet,forged);U64(packet,2);WriteCommand(packet,valid);
+        rooms[0]->impl_->connections.front()->Queue(packet);
+        check(pump([&]{return rooms[1]->state()==RoomState::Error;}),"client rejects host schema substitution for another peer despite exact own-input echo");
     }
     for(unsigned malformed=0;malformed<7;++malformed){
         if(!check(running(),"remote native edge validation fixture connects"))return false;

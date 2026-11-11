@@ -124,6 +124,7 @@ bool DiscoverNativeTriggerBinding(const NativeLocalMovementBinding& parent,PPCCo
        PPC_LOAD_U32(0x821DE6E8+60)!=0x830A7FD0 || PPC_LOAD_U32(0x821DE6E8+64)!=0x830A8030 ||
        PPC_LOAD_U32(0x821DE6E8+68)!=0x830A8090)return false;
     NativeTriggerBinding b;b.parent=parent;b.scope=scope;b.threshold=PPC_LOAD_U32(0x833B65F8);b.button_count=PPC_LOAD_U32(parent.device+48);b.buttons=PPC_LOAD_U32(parent.device+52);
+    if(!Name(parent.active_event_uid,base,b.active_context_name))return false;
     if(!b.threshold || b.threshold>255 || b.button_count!=16 || !Readable(b.buttons,b.button_count*20,base))return false;
     std::array<uint32_t,2> contexts{parent.manager+24,parent.active_event};
     for(unsigned context=0;context<contexts.size();++context){const auto event=contexts[context];if(context && event==contexts[0])continue;
@@ -196,6 +197,33 @@ bool ArmNativeTriggers(NativeTriggerSource& source,const NativeTriggerBinding& b
 bool ResetNativeTriggers(NativeTriggerSource& source){Environment environment;auto& s=NativeTriggerAccess::Get(source);
     if(s.armed && s.thread!=GetCurrentThreadId())return false;if(!ResetNativeInputClock(s.clock))return false;
     NativeTriggerAccess::Clear(source);return true;
+}
+bool ValidateNativeButtonDefinitionSnapshot(const NativeTriggerBinding& b,uint8_t* base){
+    Environment environment;em2::GuestReadBatch reads;
+    if(!Readable(0x833DBAD8,4,base) || PPC_LOAD_U32(0x833DBAD8)!=b.parent.manager ||
+       !Readable(b.parent.manager,176,base) || PPC_LOAD_U32(b.parent.manager+16)!=b.parent.active_event_uid ||
+       !Readable(0x833B65F8,4,base) || PPC_LOAD_U32(0x833B65F8)!=b.threshold)return false;
+    std::string name;if(!Name(b.parent.active_event_uid,base,name) || name!=b.active_context_name)return false;
+    const std::array<uint32_t,2> events{b.parent.manager+24,b.parent.active_event};
+    if(b.contexts.size()!=(events[0]==events[1]?1u:2u))return false;
+    for(unsigned c=0;c<b.contexts.size();++c){const auto& snapshot=b.contexts[c];
+        if(snapshot.event!=events[c] || !Readable(snapshot.event,24,base) || snapshot.listeners.size()>128 || snapshot.action_order.size()>256)return false;
+        for(unsigned i=0;i<6;++i)if(PPC_LOAD_U32(snapshot.event+i*4)!=snapshot.header[i])return false;
+        if(snapshot.header[2]!=snapshot.listeners.size() || snapshot.header[5]!=snapshot.action_order.size() ||
+           (!snapshot.listeners.empty() && !Readable(snapshot.header[1],snapshot.listeners.size()*4,base)) ||
+           (!snapshot.action_order.empty() && !Readable(snapshot.header[4],snapshot.action_order.size()*4,base)))return false;
+        for(unsigned i=0;i<snapshot.listeners.size();++i)if(PPC_LOAD_U32(snapshot.header[1]+i*4)!=snapshot.listeners[i])return false;
+        for(unsigned i=0;i<snapshot.action_order.size();++i)if(PPC_LOAD_U32(snapshot.header[4]+i*4)!=snapshot.action_order[i])return false;
+        if(snapshot.retail_listener!=(std::count(snapshot.listeners.begin(),snapshot.listeners.end(),b.parent.listener)==1))return false;
+    }
+    for(const auto& a:b.actions){
+        if(a.context>=b.contexts.size() || a.event!=events[a.context] || a.ordinal>=b.contexts[a.context].action_order.size() ||
+           b.contexts[a.context].action_order[a.ordinal]!=a.action || !Readable(a.action,436,base))return false;
+        std::array<uint8_t,436> shape;std::memcpy(shape.data(),base+a.action,shape.size());
+        if(PPC_LOAD_U32(a.action+408)!=1 || PPC_LOAD_U32(a.action)!=a.uid || !Name(a.uid,base,name) || name!=a.name)return false;
+        Normalize(shape,1);if(shape!=a.shape)return false;
+    }
+    return true;
 }
 bool ProduceNativeTriggers(NativeTriggerSource& source,const NativeTriggerBinding& binding,const Pad& pad,unsigned user,uint64_t epoch,uint64_t tick,
     PPCContext& ctx,uint8_t* base,NativeTriggerBatch& output){

@@ -13,7 +13,15 @@ inline constexpr std::size_t kOnlineRoomCapacity=16;
 // movement values until the original native action interpreter has run.
 // NativeActionV1 identifies post-interpreter x/y, including explicit neutral;
 // neither transport nor the actor coordinator may infer it from Pad values.
-enum class RoomMovementSource : uint8_t { UnconvertedPad=0, NativeActionV1=1, NativeActionV2=2 };
+enum class RoomMovementSource : uint8_t { UnconvertedPad=0, NativeActionV1=1, NativeActionV2=2, NativeActionV3=3 };
+// Digital interpreter outputs are booleans, ordered default context then active
+// context and original ordinal. No guest address or guessed semantic ID travels.
+struct RoomButtonActions {
+    std::array<uint8_t,32> schema{};
+    uint64_t source_tick=0;
+    std::array<uint8_t,64> fired{}; // Two contexts, 256 original ordinals each.
+    bool operator==(const RoomButtonActions&)const=default;
+};
 enum class RoomJumpEdge : uint8_t { None=0, Pressed=1, Released=2 };
 inline constexpr std::size_t kMaxRoomJumpEvents=2;
 struct RoomJumpEvent {
@@ -38,6 +46,7 @@ struct RoomMovement {
     uint16_t jump_button_mask=0;
     uint8_t jump_count=0;
     std::array<RoomJumpEvent,kMaxRoomJumpEvents> jump_events{};
+    RoomButtonActions button_actions;
     bool operator==(const RoomMovement& other)const{
         // Native floating-point input must echo bit-for-bit, including signed
         // zero; atan2 and later native arithmetic can distinguish its sign.
@@ -46,16 +55,21 @@ struct RoomMovement {
             std::bit_cast<uint32_t>(forward_x)==std::bit_cast<uint32_t>(other.forward_x) &&
             std::bit_cast<uint32_t>(forward_z)==std::bit_cast<uint32_t>(other.forward_z) &&
             pad==other.pad && actor_epoch==other.actor_epoch && source==other.source &&
-            jump_button_mask==other.jump_button_mask && jump_count==other.jump_count && jump_events==other.jump_events;
+            jump_button_mask==other.jump_button_mask && jump_count==other.jump_count && jump_events==other.jump_events && button_actions==other.button_actions;
     }
 };
 
 // One admission rule shared by the network decoder and native coordinator.
 inline bool ValidRoomMovement(const RoomMovement& value){
-    if(value.source!=RoomMovementSource::NativeActionV1 && value.source!=RoomMovementSource::NativeActionV2)return false;
+    if(value.source!=RoomMovementSource::NativeActionV1 && value.source!=RoomMovementSource::NativeActionV2 && value.source!=RoomMovementSource::NativeActionV3)return false;
+    if(value.source==RoomMovementSource::NativeActionV3){
+        if(value.button_actions.schema==std::array<uint8_t,32>{})return false;
+        unsigned count=0;for(auto byte:value.button_actions.fired)count+=std::popcount(byte);
+        if(count>256)return false;
+    }else if(value.button_actions!=RoomButtonActions{})return false;
     if(value.jump_count>kMaxRoomJumpEvents)return false;
     if(value.source==RoomMovementSource::NativeActionV1 && (value.jump_count || value.jump_button_mask))return false;
-    if(value.source==RoomMovementSource::NativeActionV2 && !std::has_single_bit(value.jump_button_mask))return false;
+    if(value.source!=RoomMovementSource::NativeActionV1 && !std::has_single_bit(value.jump_button_mask))return false;
     for(unsigned i=0;i<kMaxRoomJumpEvents;++i){const auto& event=value.jump_events[i];
         if(i>=value.jump_count){if(event!=RoomJumpEvent{})return false;continue;}
         if(!event.sequence || (event.edge!=RoomJumpEdge::Pressed && event.edge!=RoomJumpEdge::Released))return false;
@@ -75,12 +89,24 @@ struct RoomJumpStream {
     uint64_t sequence=0;
     uint16_t button_mask=0;
     bool held=false,native=false;
+    bool buttons=false,buttons_exhausted=false;
+    uint64_t button_actor_epoch=0,next_button_tick=0;
+    std::array<uint8_t,32> button_schema{};
     bool operator==(const RoomJumpStream&)const=default;
 };
 inline bool AdvanceRoomJumpStream(RoomJumpStream& state,const RoomMovement& value){
     if(!ValidRoomMovement(value))return false;
     if(value.source==RoomMovementSource::NativeActionV1)return !state.native;
     auto next=state;
+    if(next.buttons && value.source!=RoomMovementSource::NativeActionV3)return false;
+    if(value.source==RoomMovementSource::NativeActionV3){
+        const auto& actions=value.button_actions;
+        if(next.buttons && (next.buttons_exhausted || next.button_actor_epoch!=value.actor_epoch ||
+            next.button_schema!=actions.schema || next.next_button_tick!=actions.source_tick))return false;
+        next.buttons=true;next.button_actor_epoch=value.actor_epoch;next.button_schema=actions.schema;
+        next.buttons_exhausted=actions.source_tick==UINT64_MAX;
+        if(!next.buttons_exhausted)next.next_button_tick=actions.source_tick+1;
+    }
     if(next.native && next.button_mask!=value.jump_button_mask)return false;
     next.native=true;next.button_mask=value.jump_button_mask;
     for(unsigned i=0;i<value.jump_count;++i){const auto& event=value.jump_events[i];

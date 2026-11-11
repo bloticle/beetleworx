@@ -4,6 +4,7 @@
 #include "simulation.h"
 #include "online_room_bootstrap.h"
 #include "online_retail_jump.h"
+#include "online_retail_buttons.h"
 #include "guest_read_batch.h"
 #include <windows.h>
 #include <immintrin.h>
@@ -127,6 +128,7 @@ bool Active(uint64_t tick,uint8_t* base){uint64_t agreed=0;return Owner(base) &&
 Result Validate(unsigned slot,const RoomMovement& command,PPCContext& ctx,uint8_t* base){
     if(!Owner(base))return Result::WrongThread;if(state.faulted || !Current(slot,ctx,base))return Result::Stale;
     if(!ValidRoomMovement(command) || command.actor_epoch!=state.actors[slot].actor_epoch)return Result::InvalidInput;
+    if(command.source==RoomMovementSource::NativeActionV3)return Result::UnsupportedAction;
     if(command.pad.left_trigger || command.pad.right_trigger || (!state.camera && (command.pad.right_x || command.pad.right_y)))return Result::UnsupportedAction;
     if(command.source==RoomMovementSource::NativeActionV2){if(!state.jump || !state.jump(slot,command,ctx,base))return Result::UnsupportedAction;}
     else if(command.pad.buttons || command.jump_count || command.jump_button_mask)return Result::UnsupportedAction;
@@ -376,6 +378,7 @@ bool TestNativeRetailInput(){
        !RebaseRetailInputFirstTick(12,ctx,base),"idempotent admission cannot rebase without actual completed bootstrap ownership"))return false;
     if(!check(!std::memcmp(caller.data(),&ctx,sizeof(ctx)) && !std::memcmp(stack.data(),base+ctx.r1.u32-8192,8192) &&
        fp==_mm_getcsr() && last==GetLastError(),"admission restores complete context, scratch, FP and LastError"))return false;
+    if(!check(TestRetailButtonReceivers(ctx,base),"receiver-owned native button definitions validate both actual retail incarnations"))return false;
     RoomFrame frame;frame.tick=10;frame.players_mask=3;
     for(unsigned i=0;i<2;++i){auto& c=frame.players[i];c.actor_epoch=101+i;c.source=RoomMovementSource::NativeActionV1;c.x=.5f;c.y=-.25f;
         c.forward_x=i?-1.f:1.f;c.forward_z=0;}
@@ -384,6 +387,8 @@ bool TestNativeRetailInput(){
     if(!check(ValidateRetailMovement(0,bad,ctx,base)==Result::InvalidInput,"foreign actor epoch rejected"))return false;
     bad=frame.players[0];bad.source=RoomMovementSource::NativeActionV2;bad.jump_button_mask=0x1000;
     if(!check(ValidateRetailMovement(0,bad,ctx,base)==Result::UnsupportedAction,"Jump never silently ignored without its armed adapter"))return false;
+    bad.source=RoomMovementSource::NativeActionV3;bad.button_actions.schema[0]=1;
+    if(!check(ValidateRetailMovement(0,bad,ctx,base)==Result::UnsupportedAction,"V3 button data cannot bypass unfinished retail action delivery"))return false;
     bad=frame.players[0];bad.pad.right_x=23000;bad.pad.right_y=-19000;
     if(!check(ValidateRetailMovement(0,bad,ctx,base)==Result::UnsupportedAction && SetRetailCameraInputAllowed(true) &&
        ValidateRetailMovement(0,bad,ctx,base)==Result::Applied,"native canonical camera path requires explicit owner capability"))return false;

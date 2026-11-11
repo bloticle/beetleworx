@@ -33,3 +33,5 @@ EMR movement animations: `@llenarox` on Discord.
 ## Build from source
 
 See [Building Beetleworx](docs/BUILDING.md) for prerequisites and commands. The [development notes](DEVELOPMENT.md) cover the renderer, input, and experimental online code.
+
+Development builds have an intermittent startup callback crash under investigation. The experimental online button transport and receiver checks do not yet deliver gameplay actions. Aiming, actor lifecycle handling, and wider multiplayer testing remain unfinished; online stays disabled in the public demo.
