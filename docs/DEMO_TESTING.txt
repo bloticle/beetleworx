@@ -1,0 +1,51 @@
+PUBLIC TESTING DEMO
+
+Included: Epic Mickey 2 gameplay, native PC settings and control rebinding,
+single-player character switching, and an Epic Mickey Wii courtyard exploration
+preview using your original RVZ image. Mouse controls are on by default.
+Sprint, dash and ground-pound are enabled for new profiles and configurable in
+the native movement menu. Saved ability choices remain in effect on later runs.
+
+Options > Settings & Mods > Camera includes mouse sensitivity, cursor centering,
+input handoff, cursor visibility and window confinement. Player 1's controls
+also apply when you switch to Oswald. All these options apply immediately.
+
+Rendering & Lighting includes original Gremlin dialogue names and Mickey's
+original ink drips. Ink requires your EM1 RVZ to be mounted in Game Library;
+the ink-assets row confirms whether the original emitters are loaded. The
+visibility option applies immediately to the current player.
+
+For level testing, press backtick (`), choose Levels, search either game's
+catalog, select a level and press Play. EM1 levels prepare from the mounted
+disc when selected; compatibility varies by area.
+
+EM1 is a compatibility preview, not a complete campaign. Its quests, audio and
+level-to-level progression are not complete. EM1 death/reload behavior is not
+validated yet; restart the preview from the opening chooser if it becomes stuck.
+Online multiplayer is hidden in this demo; its host, join and lobby callbacks
+are disabled. Experimental HDR/lighting is being held for a later build.
+
+The default 30 FPS mode is the baseline for testing. Higher presentation rates
+are available, but animation/camera smoothness still needs wider testing.
+
+Useful checks: move/aim with both characters; switch to Oswald and respawn;
+change display settings; rebind a keyboard key or controller button; explore
+the EM1 courtyard and return to the menu; sprint, dash, jump and ground-pound;
+check the movement animations and landing effects in the areas you play.
+
+When reporting a problem, include the game/area, reproduction steps, graphics
+settings, GPU, and release-manifest.json version/hash. Support & Updates can
+prepare a bounded diagnostic report containing logs and version details. Review
+and export it before opening a GitHub issue draft; nothing is uploaded for you.
+Official unmodified packages can download verified updates and install them on
+normal exit. Updates preserve user_data and original game files. A published
+GitHub release is required; the first demo may have no newer release available.
+No developer tools are required. Saves and settings are
+in user_data; the EM1 preview has its own em1-preview profile.
+
+Reopen beetleworx.exe after an update installs. If an interrupted update leaves
+the game unable to start, extract a fresh complete ZIP and keep your existing
+user_data backup. An imported EM2 game-data folder can be reused through the
+extracted-folder setup option.
+
+EMR movement animations: @llenarox on Discord.

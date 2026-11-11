@@ -1,0 +1,18 @@
+[package]
+name = "em1_lua_core"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+unluac = { version = "=1.4.3", default-features = false }
+mlua = { version = "=0.11.6", default-features = false, features = ["lua51", "vendored", "send"] }
+
+[profile.release]
+panic = "unwind"
+codegen-units = 8
+
+[workspace]

@@ -1,0 +1,2 @@
+#pragma once
+namespace em2 {inline constexpr char kHdrOutputShader[]=R"em2hdr(@EM2_HDR_SHADER_TEXT@)em2hdr";}

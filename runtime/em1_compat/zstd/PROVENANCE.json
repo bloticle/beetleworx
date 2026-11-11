@@ -1,0 +1,141 @@
+{
+  "upstream": "https://github.com/facebook/zstd",
+  "version": "1.5.8",
+  "license": "BSD; original LICENSE and per-file notices retained",
+  "local_reference": "D:\\Repos\\bluethinner\\target\\dolphin-live-source\\Externals\\zstd\\zstd",
+  "scope": "Decoder-only sources and supporting headers. No encoder, CLI, dictionary builder, legacy codec or Dolphin code.",
+  "files": [
+    {
+      "path": "LICENSE",
+      "sha256": "7055266497633c9025b777c78eb7235af13922117480ed5c674677adc381c9d8"
+    },
+    {
+      "path": "lib/zstd.h",
+      "sha256": "bdf0e8c8231f5b73df9af537d7bf6c5d715abb96ec030a14b4ac2f8a8a62e40a"
+    },
+    {
+      "path": "lib/zstd_errors.h",
+      "sha256": "66a8c3f71d12ea6e797e4f622f31f3f8f81c41b36f48cad4f5de7d8bfb6aac0a"
+    },
+    {
+      "path": "lib/common/allocations.h",
+      "sha256": "6a718e8edaca112abdc0bdfa7de67edefaa44c8d9e514b79672ab58ab3a9118a"
+    },
+    {
+      "path": "lib/common/bits.h",
+      "sha256": "a7c538410d152df8a7ec6ecca194804f6d9fb998a92765513b38aa6f00226448"
+    },
+    {
+      "path": "lib/common/bitstream.h",
+      "sha256": "a9461685c9add6f609078acc950a08db4c02e6e6a849d550f45182ba2ae38556"
+    },
+    {
+      "path": "lib/common/compiler.h",
+      "sha256": "f3a4e53ca8897a69bcecf34a4a4890e52d91b774b31d68689fbcae7d713ff00f"
+    },
+    {
+      "path": "lib/common/cpu.h",
+      "sha256": "23d520b536a6f23114e66549d03a967b1f24b15560c5b1ebd47ee392ccee4a1c"
+    },
+    {
+      "path": "lib/common/debug.h",
+      "sha256": "8260cd5087b8309679c61b772b535688993c61a675a30481b8ae55b45740ba15"
+    },
+    {
+      "path": "lib/common/error_private.h",
+      "sha256": "ae077bb433eb150ee247410a0357f910b9c07be839c6a9abe0b2e6b18ceb716d"
+    },
+    {
+      "path": "lib/common/fse.h",
+      "sha256": "5235ce1e512bf80204d013b1f4cecd776fdaa9effddb48308bce08f6d0b84499"
+    },
+    {
+      "path": "lib/common/huf.h",
+      "sha256": "9a83d899c8c9bf03389d482562090ec2443bc0f87f27864a2b891b180333f2d4"
+    },
+    {
+      "path": "lib/common/mem.h",
+      "sha256": "4dd5fe76fa30a020cd4b3af3134ae143920300a1fe54baac1a5da73297e66783"
+    },
+    {
+      "path": "lib/common/pool.h",
+      "sha256": "bca19a2408e85f31bad3a13f205de92ac26ecda0c5af96fdd7f213ce03d9fc78"
+    },
+    {
+      "path": "lib/common/portability_macros.h",
+      "sha256": "fb69eb648f4c0e66a2cbf552a8f0e031b795a9c68dd5a1fc6fb35b9747eedcfb"
+    },
+    {
+      "path": "lib/common/threading.h",
+      "sha256": "9ca63027ea64046acacccbe056a414d37ea7ea428ce299fe08abe53c204c5c65"
+    },
+    {
+      "path": "lib/common/xxhash.h",
+      "sha256": "8cb837b21a8fe9a6b9dbcd0961ab16e733bfcbfa9e003f3a496ce07ae80aa8ee"
+    },
+    {
+      "path": "lib/common/zstd_deps.h",
+      "sha256": "9c77ea7d0afa8d5c868a7839e178a446a82d88eb75fd56f2fd7d9d96c5ab7c11"
+    },
+    {
+      "path": "lib/common/zstd_internal.h",
+      "sha256": "ddf2dfe9067ebf16e155a976afdb41d7ed2c2c6e2f2d52993792db9e71bd8f06"
+    },
+    {
+      "path": "lib/common/zstd_trace.h",
+      "sha256": "17f6daa4c7e97055cd1ed7bcf4d9241a4e79b465f083c5d732fda1df2f0be11e"
+    },
+    {
+      "path": "lib/decompress/zstd_ddict.h",
+      "sha256": "a97a250fd2f956e3ae419ddde68ae1f9fe4025bc0373254058d31bbd352fa71c"
+    },
+    {
+      "path": "lib/decompress/zstd_decompress_block.h",
+      "sha256": "62ee0c6ae3f7353020538397f436b59743da8acb922068841b346f480f7078ac"
+    },
+    {
+      "path": "lib/decompress/zstd_decompress_internal.h",
+      "sha256": "73217b49a644c0fcf567b70677cae31449ba9f50a235ef3b681001c3f36dc56d"
+    },
+    {
+      "path": "lib/common/debug.c",
+      "sha256": "7ab1ea104acf3243fc1cd4e6d2514046f1dfc1101c7c676145c8da080e8c24ca"
+    },
+    {
+      "path": "lib/common/entropy_common.c",
+      "sha256": "7dfce29c6bc807645b1f0c373dad94bbb49603b175a84e72d1739bf9df65feb8"
+    },
+    {
+      "path": "lib/common/error_private.c",
+      "sha256": "3f5873b2626ca1cdf554b7ec7b04ea0ef296fd0f6882d7fad42448b7e2dbb41c"
+    },
+    {
+      "path": "lib/common/fse_decompress.c",
+      "sha256": "84eba7030a036b36363a5108e760428ce549f1a833bec6464dc755f6ed51a6fb"
+    },
+    {
+      "path": "lib/common/xxhash.c",
+      "sha256": "8444d064922f434b67b708a987981aa21dfeece735b48c82d31f7027d0ccef03"
+    },
+    {
+      "path": "lib/common/zstd_common.c",
+      "sha256": "e85829d25434d841c96491bc9d8bb2d73c0ee80319e3d59e9ca6e2951d9592cf"
+    },
+    {
+      "path": "lib/decompress/huf_decompress.c",
+      "sha256": "4296cc5afe5926f1a1d7a894719d6b60e54e6247f0657fd19d078e1134fee477"
+    },
+    {
+      "path": "lib/decompress/zstd_ddict.c",
+      "sha256": "38bf812283d61f4cd1f6aea30f84b43317418257c4e6fc198b09b436bd484397"
+    },
+    {
+      "path": "lib/decompress/zstd_decompress.c",
+      "sha256": "029580818b7e9cd38d9d07c63516b00ceaa943ffcfbd099fc5ccbe3628fa362f"
+    },
+    {
+      "path": "lib/decompress/zstd_decompress_block.c",
+      "sha256": "374dc4cb331cb3d84317eca72b87a9edfe62eb0b14a8ddc7b0982507cd7526bb"
+    }
+  ]
+}

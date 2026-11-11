@@ -1,0 +1,50 @@
+#include "hdr_guest_view.h"
+#include "native_pixel_fixture.h"
+#include <rex/graphics/d3d12/command_processor.h>
+#include <rex/graphics/d3d12/deferred_command_list.h>
+#include <rex/ui/d3d12/d3d12_provider.h>
+#include <rex/logging.h>
+#include <d3d12sdklayers.h>
+#include <cmath>
+#include <cstring>
+#include <fstream>
+namespace {
+using namespace em2::pixel_test;using CP=rex::graphics::d3d12::D3D12CommandProcessor;using List=rex::graphics::d3d12::DeferredCommandList;
+template<class Tag,auto Member>struct Access{friend auto MemberOf(Tag){return Member;}};
+#define FIELD(tag,field) struct tag{friend auto MemberOf(tag);};template struct Access<tag,&CP::field>
+FIELD(Begin,BeginSubmission);FIELD(External,current_external_pipeline_);FIELD(Mode,bindless_resources_used_);FIELD(ViewHeap,view_bindful_heap_current_);FIELD(BindlessHeap,view_bindless_heap_);
+#undef FIELD
+struct Stream{friend auto MemberOf(Stream);};template struct Access<Stream,&List::command_stream_>;
+constexpr unsigned width=32,height=8,stride=2048;constexpr auto read=D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE|D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+struct GuestFixture:Fixture{ComPtr<ID3D12DescriptorHeap> rtv;em2::HdrGuestViewPass pass;std::shared_ptr<em2::HdrGuestViewBindings> views,packed;};
+double Half(uint16_t b){unsigned e=(b>>10)&31,m=b&1023;double v=e?std::ldexp(1.+m/1024.,int(e)-15):std::ldexp(double(m),-24);return b&32768?-v:v;}
+float Encode(float value,unsigned mode){const float a=std::max(0.f,value);float result;
+    if(mode==2)result=a<=.0031308f?12.92f*a:1.055f*std::pow(a,1.f/2.4f)-.055f;
+    else if(a<=1)result=rex::graphics::xenos::LinearToPWLGamma(a);
+    else result=std::trunc(a*(1023.f/8))*(1.f/255)+128.f/255;
+    return result;
+}
+}
+namespace em2 {
+bool TestHdrGuestViewMath(CP& cp,const std::filesystem::path& directory){
+    if(!(cp.*MemberOf(Begin{}))(false))return false;
+    auto f=std::make_unique<GuestFixture>();auto* device=cp.GetD3D12Provider().GetDevice();ComPtr<ID3D12InfoQueue> validation;device->QueryInterface(IID_PPV_ARGS(&validation));const auto first=validation?validation->GetNumStoredMessagesAllowedByRetrievalFilter():0;
+    if(!f->event || !f->pass.Initialize(device) || !f->pass.Initialize(device) || f->pass.Initialize(nullptr) || HdrGuestViewBindings::Create(nullptr) || FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&f->allocator))) || FAILED(device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,f->allocator.Get(),nullptr,IID_PPV_ARGS(&f->list))) || FAILED(device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&f->fence))) || !Buffer(device,7*stride,D3D12_HEAP_TYPE_READBACK,&f->readback))return false;
+    D3D12_RESOURCE_DESC d{};d.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;d.Width=width;d.Height=height;d.DepthOrArraySize=d.MipLevels=d.SampleDesc.Count=1;d.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;d.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;heap.CreationNodeMask=heap.VisibleNodeMask=1;
+    if(FAILED(device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&d,D3D12_RESOURCE_STATE_RENDER_TARGET,nullptr,IID_PPV_ARGS(&f->target))))return false;const D3D12_DESCRIPTOR_HEAP_DESC hd{D3D12_DESCRIPTOR_HEAP_TYPE_RTV,1,D3D12_DESCRIPTOR_HEAP_FLAG_NONE,0};if(FAILED(device->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&f->rtv))))return false;device->CreateRenderTargetView(f->target.Get(),nullptr,f->rtv->GetCPUDescriptorHandleForHeapStart());
+    const float special[]={0,1,-1,4,-4,.0031308f,64.f/1023,128.f/1023,512.f/1023,.0625f,.125f,.5f,16,-16,64,-64};
+    for(unsigned y=0;y<height;++y)for(unsigned x=0;x<width;++x){const auto n=y*width+x;const float v=n<192?float(n)/191:special[(n-192)%16];const float colour[]={v,v*.5f,std::abs(v)+.125f,n<192?float(n%8)/8:special[(n-192)%16]};const D3D12_RECT rect{LONG(x),LONG(y),LONG(x+1),LONG(y+1)};f->list->ClearRenderTargetView(f->rtv->GetCPUDescriptorHandleForHeapStart(),colour,1,&rect);}Barrier(f->list.Get(),f->target.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,read);
+    auto copy=[&](ID3D12Resource* source,unsigned image){Barrier(f->list.Get(),source,read,D3D12_RESOURCE_STATE_COPY_SOURCE);D3D12_TEXTURE_COPY_LOCATION from{},to{};from.pResource=source;from.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;to.pResource=f->readback.Get();to.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;to.PlacedFootprint.Offset=image*stride;to.PlacedFootprint.Footprint={source->GetDesc().Format,width,height,1,256};f->list->CopyTextureRegion(&to,0,0,0,&from,nullptr);Barrier(f->list.Get(),source,D3D12_RESOURCE_STATE_COPY_SOURCE,read);};copy(f->target.Get(),0);
+    f->views=HdrGuestViewBindings::Create(f->target.Get());if(!f->views)return false;auto& stream=cp.GetDeferredCommandList().*MemberOf(Stream{});auto saved=std::move(stream);stream.clear();struct Restore{decltype(stream) stream;decltype(saved)& saved;CP& cp;~Restore(){cp.SetExternalPipeline(nullptr);stream=std::move(saved);}}restore{stream,saved,cp};
+    if(f->pass.Record(cp,*f->views,HdrGuestTransfer::kRaw) || f->pass.Record(cp,*f->views,static_cast<HdrGuestTransfer>(99)) || f->pass.Record(cp,*f->views,HdrGuestTransfer::kSrgb,32) || !stream.empty())return false;
+    const unsigned modes[]={1,2,1,2};const int biases[]={0,0,2,-2};for(unsigned i=0;i<4;++i){auto* resource=f->views->result();if(!f->pass.Record(cp,*f->views,HdrGuestTransfer(modes[i]),biases[i]) || f->views->result()!=resource)return false;ID3D12DescriptorHeap* views[]={(cp.*MemberOf(Mode{}))?(cp.*MemberOf(BindlessHeap{})):(cp.*MemberOf(ViewHeap{}))};if(!views[0])return false;f->list->SetDescriptorHeaps(1,views);cp.GetDeferredCommandList().Execute(f->list.Get(),nullptr);stream.clear();cp.*MemberOf(External{})=nullptr;copy(resource,i+1);}
+    f->packed=HdrGuestViewBindings::Create(f->target.Get(),DXGI_FORMAT_R8G8B8A8_UNORM);if(!f->packed || HdrGuestViewBindings::Create(f->target.Get(),DXGI_FORMAT_R32_FLOAT) || f->pass.Record(cp,*f->packed,HdrGuestTransfer::kSrgb) || f->pass.Record(cp,*f->packed,HdrGuestTransfer::kRaw,1) || !stream.empty() || !f->pass.Record(cp,*f->packed,HdrGuestTransfer::kRaw))return false;
+    ID3D12DescriptorHeap* packed_heaps[]={(cp.*MemberOf(Mode{}))?(cp.*MemberOf(BindlessHeap{})):(cp.*MemberOf(ViewHeap{}))};f->list->SetDescriptorHeaps(1,packed_heaps);cp.GetDeferredCommandList().Execute(f->list.Get(),nullptr);stream.clear();cp.*MemberOf(External{})=nullptr;copy(f->packed->result(),6);copy(f->target.Get(),5);
+    if(FAILED(f->list->Close()))return false;ID3D12CommandList* lists[]={f->list.Get()};cp.GetD3D12Provider().GetDirectQueue()->ExecuteCommandLists(1,lists);if(FAILED(cp.GetD3D12Provider().GetDirectQueue()->Signal(f->fence.Get(),1)) || FAILED(f->fence->SetEventOnCompletion(1,f->event)) || WaitForSingleObject(f->event,15000)!=WAIT_OBJECT_0){f.release();return false;}
+    const uint8_t* bytes=nullptr;D3D12_RANGE range{0,7*stride};if(FAILED(f->readback->Map(0,&range,reinterpret_cast<void**>(const_cast<uint8_t**>(&bytes)))))return false;auto bits=[&](unsigned image,unsigned x,unsigned y,unsigned c){uint16_t b;std::memcpy(&b,bytes+image*stride+y*256+x*8+c*2,2);return b;};unsigned bad=0,alpha=0,highlights=0,negative=0,source_changes=0;double maximum=0;
+    for(unsigned y=0;y<height;++y)for(unsigned x=0;x<width;++x)for(unsigned c=0;c<4;++c){const auto original=bits(0,x,y,c);source_changes+=original!=bits(5,x,y,c);for(unsigned i=0;i<4;++i){const auto actual=Half(bits(i+1,x,y,c));const float scale=std::exp2(float(biases[i]));const float input=float(Half(original));const double expected=c==3?std::clamp(input,0.f,1.f):Encode(input/scale,modes[i])*scale;const auto error=std::abs(actual-expected);maximum=std::max(maximum,error);bad+=!std::isfinite(actual) || error>std::max(6e-8,std::abs(expected)/1024);if(c==3)alpha+=actual!=expected;else{highlights+=input>1 && actual>1;negative+=input<0 && actual==0;}}}
+    unsigned packed_bad=0;for(unsigned y=0;y<height;++y)for(unsigned x=0;x<width;++x)for(unsigned c=0;c<4;++c){const auto expected=unsigned(std::floor(std::clamp(Half(bits(0,x,y,c)),0.,1.)*255+.5));packed_bad+=bytes[6*stride+y*256+x*4+c]!=expected;}
+    unsigned errors=0;if(validation)for(uint64_t i=first;i<validation->GetNumStoredMessagesAllowedByRetrievalFilter();++i){SIZE_T size=0;validation->GetMessage(i,nullptr,&size);std::vector<uint8_t> data(size);auto* message=reinterpret_cast<D3D12_MESSAGE*>(data.data());if(SUCCEEDED(validation->GetMessage(i,message,&size)) && message->Severity<=D3D12_MESSAGE_SEVERITY_ERROR){++errors;REXLOG_ERROR("HDR guest-view validation: {}",message->pDescription);}}
+    std::filesystem::create_directories(directory);std::ofstream pixels(directory/"guest-view-readback.bin",std::ios::binary);pixels.write(reinterpret_cast<const char*>(bytes),7*stride);D3D12_RANGE none{};f->readback->Unmap(0,&none);std::ofstream report(directory/"guest-view-results.json");report<<"{\"packed_components\":1024,\"packed_invalid\":"<<packed_bad<<",\"components\":4096,\"invalid\":"<<bad<<",\"max_error\":"<<maximum<<",\"alpha_differences\":"<<alpha<<",\"source_changes\":"<<source_changes<<",\"hdr_highlights\":"<<highlights<<",\"negative_inputs_clamped\":"<<negative<<",\"device_errors\":"<<errors<<",\"scope\":\"GPU Xbox PWL and sRGB guest encodings with four dispatches, output reuse, resolve exponent bias and FP16 readback. LDR PWL reference calls pinned SDK CPU helper; out-of-range uses explicit positive HDR extension and unsigned negative clamp. sRGB uses CPU pow. Canonical source is unchanged; guest alpha uses unsigned clamp. Additional RGBA8 raw dispatch checks 1024 channels against CPU nearest UNORM conversion, clipping/alpha and format/bias guards. Controlled inputs, not original game postprocess or native texture binding.\"}\n";REXLOG_INFO("HDR guest views:4096 components invalid{}, error{}, source changes{}, alpha{}, device errors{}",bad,maximum,source_changes,alpha,errors);return !packed_bad && !bad && !alpha && !source_changes && highlights && negative && !errors && report.good() && pixels.good();
+}
+}

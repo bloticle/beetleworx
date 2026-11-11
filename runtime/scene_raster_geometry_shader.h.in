@@ -1,0 +1,2 @@
+#pragma once
+inline constexpr char kSceneRasterGeometryShader[]=R"EM2_SHADER(@EM2_SCENE_RASTER_GEOMETRY_TEXT@)EM2_SHADER";

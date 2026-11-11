@@ -1,0 +1,2 @@
+#pragma once
+inline constexpr char kSceneOcclusionShader[]=R"EM2_SHADER(@EM2_SCENE_OCCLUSION_TEXT@)EM2_SHADER";

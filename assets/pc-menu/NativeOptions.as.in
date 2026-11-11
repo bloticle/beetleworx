@@ -1,0 +1,180 @@
+class em2.options.CLASS_NAME extends MovieClip
+{
+   var _list; var _rows; var _definitions; var _actions;
+   var _enabled = false; var _capturing = false; var _view = INITIAL_VIEW; var _refreshTick = 0;
+   var _category = INITIAL_CATEGORY; var _page = 0; var _profile = 0; var _selected = 0;
+   var slider_brightness; var b_threeDSettings; var t_bc_body; var t_bc_title;
+   var t_sr_body; var t_sr_title; var t_c1; var t_title;
+   function CLASS_NAME() { super(); }
+   function init()
+   {
+      this.slider_brightness._visible = false; this.b_threeDSettings._visible = false;
+      this.t_bc_body._visible = false; this.t_bc_title._visible = false;
+      this.t_sr_body._visible = false; this.t_sr_title._visible = false;
+      this.t_c1._visible = false; this.t_title._visible = false;
+      this._definitions = MENU_DEFINITIONS;
+      this._actions = ACTION_DEFINITIONS;
+      this._rows = []; this._list = new em2.shared.ItemList();
+      this._list.orientation = em2.Constants.VERTICAL;
+      var screenWidth=Number(_global.initVars.screenWidth); if(!(screenWidth>=640)) screenWidth=1280;
+      var screenHeight=Number(_global.initVars.screenHeight); if(!(screenHeight>=480)) screenHeight=720;
+      var offset=Number(_global.offsetX); if(isNaN(offset)) offset=0;
+      var labelWidth=screenWidth*0.84;
+      var i = 0;
+      while(i < 8)
+      {
+         var row = this.attachMovie("GenericButton","pc_native_row_" + i,200+i);
+         row._xscale=100; row._yscale=100; row.labelAlign="center";
+         var nativeCenter=row.labelclip._x+row.t_label._x+row.t_label._width/2;
+         row._x=offset+screenWidth/2-nativeCenter; row._y=screenHeight*(0.235+i*0.065);
+         row.hitarea._x=nativeCenter-labelWidth/2; row.hitarea._width=labelWidth;
+         row.hitarea._height=36; row.pcLabelWidth=labelWidth;
+         row.pcRow = i;
+         row.addEventListener(em2.Events.PRESS,mx.utils.Delegate.create(this,this._mouseSelect));
+         this._rows.push(row); i++;
+      }
+      this._list.items = this._rows;
+      this.createTextField("pc_help",400,offset+screenWidth*0.08,screenHeight*0.765,labelWidth,screenHeight*0.08);
+      var format=this._rows[0].t_label.getTextFormat(); format.size=18; format.align="center";
+      this.pc_help.embedFonts=true; this.pc_help.setNewTextFormat(format);
+      this.pc_help.textColor = 16777215; this.pc_help.multiline = true;
+      this.pc_help.wordWrap = true; this.pc_help.selectable = false;
+      this._refresh();
+   }
+   function _label(row, label, item)
+   {
+      row._visible = label != undefined; if(label == undefined) row.disable(); else row.enable();
+      row.pcWanted = label != undefined;
+      row.pcItem = item; if(label != undefined) { row.label=label; row.t_label._xscale=100; }
+   }
+   function _keyName(code)
+   {
+      var pads = ["A","B","X","Y","LB","RB","LT","RT","LS click","RS click","Start","Back","D-pad up","D-pad down","D-pad left","D-pad right","LS left","LS right","LS up","LS down","RS left","RS right","RS up","RS down","LB + RB"];
+      if(code == 0) return "Unbound";
+      if(code >= 256 && code < 281) return pads[code-256];
+      if(code >= 65 && code <= 90 || code >= 48 && code <= 57) return String.fromCharCode(code);
+      var keys = {k1:"Mouse left",k2:"Mouse right",k4:"Mouse middle",k5:"Mouse 4",k6:"Mouse 5",k8:"Backspace",k9:"Tab",k13:"Enter",k16:"Shift",k17:"Ctrl",k18:"Alt",k27:"Esc",k32:"Space",k37:"Left",k38:"Up",k39:"Right",k40:"Down",k46:"Delete",k112:"F1",k117:"F6",k512:"Wheel up",k513:"Wheel down",k514:"Wheel left",k515:"Wheel right"};
+      return keys["k"+code] == undefined ? "Key " + code : keys["k"+code];
+   }
+   function _options()
+   {
+      var demo = _level0.SetOption(7203,-1) == 1;
+      if(this._category != 5) {
+         var source = this._definitions[this._category].options;
+         if(!demo) return source;
+         var visible = []; var n=0;
+         while(n<source.length) { var option=source[n++]; if(option.id!=1015 && option.id!=1021 && option.id!=1025) visible.push(option); }
+         return visible;
+      }
+      var result = []; var i = 0;
+      while(i < this._actions.length)
+      {
+         result.push({title:this._actions[i],id:2000+this._profile*32+i,binding:true}); i++;
+      }
+      var names = ["Camera X sensitivity","Camera Y sensitivity","Invert camera X","Invert camera Y","Camera X deadzone","Camera Y deadzone","Camera X curve","Camera Y curve"];
+      var strengths = ["0.5x","0.6x","0.75x","0.85x","1x","1.25x","1.5x","2x"];
+      var zones = ["Original","0%","5%","10%","15%","20%","25%","30%"];
+      i = 0;
+      while(i < 8) { result.push({title:names[i],id:2300+this._profile*8+i,choices:i<2?strengths:(i<4?["Off","On"]:(i<6?zones:["Original","Precise","Fast"]))}); i++; }
+      return result;
+   }
+   function _refresh()
+   {
+      var i = 0; while(i < 8) { this._rows[i].pcWanted=false; i++; }
+      if(this._view == 0)
+      {
+         var row=0; var demo=_level0.SetOption(7203,-1)==1;
+         i = 0; while(i < this._definitions.length) { if(!demo || i!=2) { this._label(this._rows[row++],this._definitions[i].title,{category:i}); } i++; }
+         this.pc_help.text = "Select a category. All changes apply immediately. Back returns to game options.";
+         this._finishRows();
+         return;
+      }
+      var options = this._options(); var pages = Math.ceil(options.length / 5);
+      this._page = (this._page + pages) % pages;
+      if(this._category == 5)
+      {
+         var profiles = ["Player 1 / Keyboard + Mouse","Player 1 / Controller","Player 2 / Keyboard + Mouse","Player 2 / Controller"];
+         this._label(this._rows[0],profiles[this._profile],{profile:true});
+         this._label(this._rows[1],"Apply modern control preset",{preset:true});
+      }
+      else
+      {
+         this._label(this._rows[0],this._definitions[this._category].title + " / Categories",{home:true});
+         if(this._category == 6) this._label(this._rows[1],"Original files are kept unchanged",{readOnly:true});
+         else if(this._category == 7) this._label(this._rows[1],"Reports stay local until you submit them",{readOnly:true});
+         else this._label(this._rows[1],"Restore this category",{reset:true});
+      }
+      i = 0;
+      while(i < 5)
+      {
+         var option = options[this._page*5+i];
+         if(option != undefined)
+         {
+            var value = _level0.SetOption(option.id,-1);
+            this._label(this._rows[i+2],option.title + ": " + (option.binding?this._keyName(value):option.choices[value]),option);
+         }
+         i++;
+      }
+      this._label(this._rows[7],"Page " + (this._page+1) + " / " + pages + "  -  Next",{page:true});
+      this.pc_help.text = this._category == 5 ? "Select to bind. Left / Delete clears. Esc or hold Start cancels capture. Presets keep menu navigation standard." : "A / Enter: change. Left / Right: adjust. Page row: previous / next. Back: categories.";
+      if(this._category == 6) this.pc_help.text = "Select Epic Mickey to locate your RVZ. Its location is remembered. EM1 level compatibility is experimental.";
+      if(this._category == 3) this.pc_help.text = "Mouse options apply live to Player 1, including when playing as Oswald. Center options reset the aiming cursor. Mouse sensitivity multiplies your keyboard/mouse camera profile.";
+      if(this._category == 7) this.pc_help.text = "Review and save a report before opening an issue. Verified updates install after normal exit. Downloads require a published Beetleworx release.";
+      this._finishRows();
+   }
+   function _finishRows() { var i=0; while(i<8) { if(!this._rows[i].pcWanted) this._label(this._rows[i],undefined,undefined); i++; } }
+   function _mouseSelect(event) { this._list.activeItem = event.button; this.selectActive(); }
+   function _adjust(direction)
+   {
+      if(this._capturing) return;
+      var row = this._list.activeItem; if(row == undefined) return;
+      this._selected = row.pcRow; var item = row.pcItem;
+      if(item.category != undefined) { this._category=item.category; this._view=1; this._page=0; }
+      else if(item.home) { this._view=0; this._page=0; }
+      else if(item.profile) { this._profile=(this._profile+direction+4)%4; this._page=0; }
+      else if(item.preset) { _level0.SetOption(2210,this._profile); if((this._profile&1)==0) _level0.SetOption(1020,1); }
+      else if(item.page) this._page += direction;
+      else if(item.readOnly) return;
+      else if(item.action) _level0.SetOption(item.id,1);
+      else if(item.reset) { var options=this._options(); var j=0; while(j<options.length) { if(!options[j].readOnly && !options[j].action) _level0.SetOption(options[j].id,-2); j++; } }
+      else if(item.binding)
+      {
+         if(direction<0) { _level0.SetOption(item.id,-3); this._refresh(); this._list.activate(this._selected); return; }
+         _level0.SetOption(item.id,-2); this._capturing=true; this._list.deactivate(); row.label="Press an input..."; return;
+      }
+      else if(item.id != undefined) { var value=_level0.SetOption(item.id,-1); _level0.SetOption(item.id,(value+direction+item.choices.length)%item.choices.length); }
+      this._refresh(); this._list.activate(this._selected); em2.SFX.play(em2.SFX.MM_SELECT);
+   }
+   function selectActive() { this._adjust(1); return true; }
+   function _clear()
+   {
+      var item=this._list.activeItem.pcItem;
+      this._selected=this._list.activeItem.pcRow;
+      if(!this._capturing && item.binding) { _level0.SetOption(item.id,-3); this._refresh(); this._list.activate(this._selected); }
+   }
+   function onKeyDown()
+   {
+      if(!this._enabled || this._capturing) return;
+      var key=Key.getCode();
+      if(key==37) this._adjust(-1); else if(key==39) this._adjust(1); else if(key==46) this._clear();
+   }
+   function onEnterFrame()
+   {
+      if(this._enabled && this._capturing && _level0.SetOption(2200,-1)==0)
+      { this._capturing=false; this._refresh(); this._list.activate(this._selected); }
+      if(this._enabled && !this._capturing && ++this._refreshTick>=15) { this._refreshTick=0; this._refresh(); }
+   }
+   function back()
+   {
+      if(this._capturing) { _level0.SetOption(2000+this._profile*32,-5); this._capturing=false; this._refresh(); this._list.activate(this._selected); return true; }
+      if(this._view!=0 && INITIAL_VIEW==0) { this._view=0; this._page=0; this._refresh(); this._list.activate(0); return true; }
+      return false;
+   }
+   function enable() { this._enabled=true; _level0.SetOption(2201,1); this._refresh(); this._list.activate(0); Key.addListener(this); }
+   function disable() { this._enabled=false; this._capturing=false; _level0.SetOption(2201,0); this._list.deactivate(); Key.removeListener(this); }
+   function activate() { this.enable(); _level0.APressed=mx.utils.Delegate.create(this,this.selectActive); }
+   function deactivate() { this.disable(); delete _level0.APressed; }
+   function dispose() { this.disable(); this._list.dispose(); }
+   function get threeDEnabled() { return false; }
+   function set threeDEnabled(value) { this.b_threeDSettings._visible=false; }
+}

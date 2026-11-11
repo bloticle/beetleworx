@@ -1,0 +1,16 @@
+/build/
+/generated/
+/private/
+/analysis/
+/tools/downloads/
+/tools/llvm/
+/tools/llvm23/
+/tools/rexglue-reference/
+/tools/procdump/
+/tools/xenon-jumptables/
+/tools/github-cli/
+/runtime/em1_lua_core/target/
+/em1_native_model_pak_probe.lib
+/user_data/
+*.log
+__pycache__/

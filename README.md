@@ -29,3 +29,7 @@ If an update is interrupted and the game no longer opens, extract a fresh releas
 ## Credits
 
 EMR movement animations: `@llenarox` on Discord.
+
+## Build from source
+
+See [Building Beetleworx](docs/BUILDING.md) for prerequisites and commands. The [development notes](DEVELOPMENT.md) cover the renderer, input, and experimental online code.

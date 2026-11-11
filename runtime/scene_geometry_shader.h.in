@@ -1,0 +1,2 @@
+#pragma once
+namespace em2 {inline constexpr char kSceneGeometryShader[]=R"em2geometry(@EM2_SCENE_GEOMETRY_TEXT@)em2geometry";}

@@ -1,0 +1,2 @@
+#pragma once
+namespace em2 {inline constexpr char kHdrGuestViewShader[]=R"em2guest(@EM2_HDR_GUEST_SHADER_TEXT@)em2guest";}

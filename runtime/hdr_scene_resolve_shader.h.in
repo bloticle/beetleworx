@@ -1,0 +1,2 @@
+#pragma once
+namespace em2 {inline constexpr char kHdrSceneResolveShader[]=R"em2resolve(@EM2_HDR_RESOLVE_SHADER_TEXT@)em2resolve";}

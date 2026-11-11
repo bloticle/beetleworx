@@ -1,0 +1,2 @@
+#pragma once
+namespace em2 {inline constexpr char kSceneUnprojectShader[]=R"em2scene(@EM2_SCENE_UNPROJECT_TEXT@)em2scene";}

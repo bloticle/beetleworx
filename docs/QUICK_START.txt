@@ -1,0 +1,56 @@
+BEETLEWORX - PUBLIC TESTING DEMO
+
+1. Extract the complete release folder somewhere writable.
+2. Open beetleworx.exe and choose the game you want to play.
+3. Select your Epic Mickey 2 Xbox 360 ISO or extracted game folder when asked.
+   For the Epic Mickey compatibility preview, also select your Wii RVZ image.
+
+Everything runs from this executable. No developer tools or command lines are
+needed. The first import may take a while and displays progress. Canceling is
+safe; selecting the same image resumes import. Your original files stay intact.
+
+EM2 supports uncompressed XDVDFS/XISO, XGD2 and XGD3 disc images. An extracted
+folder must contain default.xex, ConfigFiles.ini and packfiles. Compressed Xbox
+containers are not supported. Keep an extracted source folder in place; ISO
+imports are extracted once into game-data beside the executable.
+
+Both modes need EM2's Xbox files. EM1 additionally reads your original Wii RVZ
+on demand. Its included courtyard is an exploration compatibility preview,
+not a complete EM1 campaign. Its profile is separate from your EM2 campaign.
+
+Use the native in-game Options menu to change graphics and rebind controls.
+Keyboard/mouse defaults: WASD move, mouse look/aim, Space jump, E interact,
+Q spin, left click paint, right click thinner, middle click recenter camera,
+Tab switch character, Esc pause. Mouse camera is enabled by default.
+Controller controls and keyboard/mouse bindings can both be customized.
+Movement upgrades: hold Shift to sprint, Ctrl to dash, and R while airborne
+to ground-pound. Controller defaults: click the left stick to toggle sprint,
+B to dash, and Y while airborne to ground-pound. These actions can be rebound;
+their tuning is available in the native movement settings.
+Online multiplayer is hidden in this demo while its gameplay integration is
+being completed. Hosting, joining and lobby setup are unavailable here.
+
+Start with the default 30 FPS mode. Higher presentation rates are available
+for testing. Distance shadow resolution is in Rendering & Lighting: Fixed
+keeps selected map sizes; Quality, Balanced and Performance progressively
+reduce distant local-light maps while preserving nearby detail.
+
+Keep pc-assets and the other supplied files beside beetleworx.exe. Setup builds
+modified menus/shaders from your own game and verifies them automatically.
+Saves and preferences live in user_data. Back it up before updating, and do
+not replace it with another person's saves or settings. The EM1 preview uses
+user_data/em1-preview. The opening chooser lets you change games next launch.
+
+See TESTING & KNOWN ISSUES.txt for demo scope and useful test cases. If startup
+fails, retain beetleworx.log and crash.log when present. Extract the complete
+package again if a supplied DLL, menu or shader is missing.
+
+Support & Updates in the native options menu lets you preview a diagnostic
+report, add a description, save it locally and open an editable GitHub issue
+draft. Reports are not uploaded automatically. Review the report before sharing.
+
+Official demo packages can check and download updates in the background.
+Verified updates install when you exit normally; saves and settings stay in
+place. You can disable automatic updates or cancel an installation in the menu.
+The update/report destination is Bloticle/beetleworx on GitHub. Until that
+repository and its first release are published, no update will be available.

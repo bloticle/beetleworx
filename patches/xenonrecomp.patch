@@ -1,0 +1,613 @@
+diff --git a/XenonAnalyse/function.cpp b/XenonAnalyse/function.cpp
+index 34add40..5a3e29b 100644
+--- a/XenonAnalyse/function.cpp
++++ b/XenonAnalyse/function.cpp
+@@ -1,246 +1,74 @@
++// Bounded control-flow discovery for XenonRecomp, including recovered switches.
+ #include "function.h"
+ #include <disasm.h>
+-#include <vector>
+-#include <bit>
+-#include <algorithm>
+-#include <cassert>
+ #include <byteswap.h>
++#include <algorithm>
++#include <set>
++#include <cstring>
+ 
+ size_t Function::SearchBlock(size_t address) const
+ {
+-    if (address < base)
+-    {
+-        return -1;
+-    }
+-
+-    for (size_t i = 0; i < blocks.size(); i++)
+-    {
+-        const auto& block = blocks[i];
+-        const auto begin = base + block.base;
+-        const auto end = begin + block.size;
+-
+-        if (begin != end)
+-        {
+-            if (address >= begin && address < end)
+-            {
+-                return i;
+-            }
+-        }
+-        else // fresh block
+-        {
+-            if (address == begin)
+-            {
+-                return i;
+-            }
+-        }
+-    }
+-
+-    return -1;
++    for (size_t i = 0; i < blocks.size(); ++i)
++        if (address >= base + blocks[i].base && address < base + blocks[i].base + blocks[i].size)
++            return i;
++    return size_t(-1);
+ }
+ 
+-Function Function::Analyze(const void* code, size_t size, size_t base)
++Function Function::Analyze(const void* code, size_t size, size_t base,
++    const std::unordered_map<size_t, std::vector<size_t>>* switches)
+ {
+-    Function fn{ base, 0 };
+-
+-    if (*((uint32_t*)code + 1) == 0x04000048) // shifted ptr tail call
+-    {
+-        fn.size = 0x8;
+-        return fn;
+-    }
+-
+-    auto& blocks = fn.blocks;
+-    blocks.reserve(8);
+-    blocks.emplace_back();
+-
+-    const auto* data = (uint32_t*)code;
+-    const auto* dataStart = data;
+-    const auto* dataEnd = (uint32_t*)((uint8_t*)code + size);
+-    std::vector<size_t> blockStack{};
+-    blockStack.reserve(32);
+-    blockStack.emplace_back();
+-
+-    #define RESTORE_DATA() if (!blockStack.empty()) data = (dataStart + ((blocks[blockStack.back()].base + blocks[blockStack.back()].size) / sizeof(*data))) - 1; // continue adds one
+-
+-    // TODO: Branch fallthrough
+-    for (; data <= dataEnd ; ++data)
++    Function result{base, 0};
++    const auto* bytes = static_cast<const uint8_t*>(code);
++    std::set<size_t> visited;
++    std::vector<size_t> pending{base};
++    auto enqueue = [&](size_t pc) {
++        if (pc >= base && pc - base < size && (pc & 3) == 0 && !visited.count(pc))
++            pending.push_back(pc);
++    };
++    while (!pending.empty())
+     {
+-        const size_t addr = base + ((data - dataStart) * sizeof(*data));
+-        if (blockStack.empty())
++        size_t pc = pending.back();
++        pending.pop_back();
++        while (pc >= base && pc - base + 4 <= size && visited.insert(pc).second)
+         {
+-            break; // it's hideover
+-        }
+-
+-        auto& curBlock = blocks[blockStack.back()];
+-        DEBUG(const auto blockBase = curBlock.base);
+-        const uint32_t instruction = ByteSwap(*data);
+-
+-        const uint32_t op = PPC_OP(instruction);
+-        const uint32_t xop = PPC_XOP(instruction);
+-        const uint32_t isLink = PPC_BL(instruction); // call
+-
+-        ppc_insn insn;
+-        ppc::Disassemble(data, addr, insn);
+-
+-        // Sanity check
+-        assert(addr == base + curBlock.base  + curBlock.size);
+-        if (curBlock.projectedSize != -1 && curBlock.size >= curBlock.projectedSize) // fallthrough
+-        {
+-            blockStack.pop_back();
+-            RESTORE_DATA();
+-            continue;
+-        }
+-
+-        curBlock.size += 4;
+-        if (op == PPC_OP_BC) // conditional branches all originate from one opcode, thanks RISC
+-        {
+-            if (isLink) // just a conditional call, nothing to see here
++            uint32_t raw;
++            memcpy(&raw, bytes + pc - base, sizeof(raw));
++            const uint32_t instruction = ByteSwap(raw);
++            const auto op = PPC_OP(instruction);
++            const auto xop = PPC_XOP(instruction);
++            result.size = (std::max)(result.size, pc - base + 4);
++            ppc_insn decoded{};
++            ppc::Disassemble(&raw, pc, decoded);
++            if (!instruction || !decoded.opcode) break;
++            if (op == PPC_OP_B && !PPC_BL(instruction))
+             {
+-                continue;
++                enqueue(PPC_BA(instruction) ? size_t(PPC_BI(instruction)) : pc + PPC_BI(instruction));
++                break;
+             }
+-
+-            // TODO: carry projections over to false
+-            curBlock.projectedSize = -1;
+-            blockStack.pop_back();
+-
+-            // TODO: Handle absolute branches?
+-            assert(!PPC_BA(instruction));
+-            const size_t branchDest = addr + PPC_BD(instruction);
+-
+-            // true/false paths
+-            // left block: false case
+-            // right block: true case
+-            const size_t lBase = (addr - base) + 4;
+-            const size_t rBase = (addr + PPC_BD(instruction)) - base;
+-
+-            // these will be -1 if it's our first time seeing these blocks
+-            auto lBlock = fn.SearchBlock(base + lBase);
+-
+-            if (lBlock == -1)
++            if (op == PPC_OP_BC && !PPC_BL(instruction))
++                enqueue(PPC_BA(instruction) ? size_t(PPC_BD(instruction)) : pc + PPC_BD(instruction));
++            if (op == PPC_OP_CTR && !PPC_BL(instruction) && (xop == 16 || xop == 528))
+             {
+-                blocks.emplace_back(lBase, 0).projectedSize = rBase - lBase;
+-                lBlock = blocks.size() - 1;
+-
+-                // push this first, this gets overriden by the true case as it'd be further away
+-                DEBUG(blocks[lBlock].parent = blockBase);
+-                blockStack.emplace_back(lBlock);
+-            }
+-
+-            size_t rBlock = fn.SearchBlock(base + rBase);
+-            if (rBlock == -1)
+-            {
+-                blocks.emplace_back(branchDest - base, 0);
+-                rBlock = blocks.size() - 1;
+-
+-                DEBUG(blocks[rBlock].parent = blockBase);
+-                blockStack.emplace_back(rBlock);
+-            }
+-
+-            RESTORE_DATA();
+-        }
+-        else if (op == PPC_OP_B || instruction == 0 || (op == PPC_OP_CTR && (xop == 16 || xop == 528))) // b, blr, end padding
+-        {
+-            if (!isLink)
+-            {
+-                blockStack.pop_back();
+-
+-                if (op == PPC_OP_B)
++                if (xop == 528 && switches)
+                 {
+-                    assert(!PPC_BA(instruction));
+-                    const size_t branchDest = addr + PPC_BI(instruction);
+-
+-                    const size_t branchBase = branchDest - base;
+-                    const size_t branchBlock = fn.SearchBlock(branchDest);
+-
+-                    if (branchDest < base)
+-                    {
+-                        // Branches before base are just tail calls, no need to chase after those
+-                        RESTORE_DATA();
+-                        continue;
+-                    }
+-
+-                    // carry over our projection if blocks are next to each other
+-                    const bool isContinuous = branchBase == curBlock.base + curBlock.size;
+-                    size_t sizeProjection = (size_t)-1;
+-
+-                    if (curBlock.projectedSize != -1 && isContinuous)
+-                    {
+-                        sizeProjection = curBlock.projectedSize - curBlock.size;
+-                    }
+-
+-                    if (branchBlock == -1)
+-                    {
+-                        blocks.emplace_back(branchBase, 0, sizeProjection);
+-
+-                        blockStack.emplace_back(blocks.size() - 1);
+-                        
+-                        DEBUG(blocks.back().parent = blockBase);
+-                        RESTORE_DATA();
+-                        continue;
+-                    }
++                    auto table = switches->find(pc);
++                    if (table != switches->end())
++                        for (auto target : table->second) enqueue(target);
+                 }
+-                else if (op == PPC_OP_CTR)
+-                {
+-                    // 5th bit of BO tells cpu to ignore the counter, which is a blr/bctr otherwise it's conditional
+-                    const bool conditional = !(PPC_BO(instruction) & 0x10);
+-                    if (conditional)
+-                    {
+-                        // right block's just going to return
+-                        const size_t lBase = (addr - base) + 4;
+-                        size_t lBlock = fn.SearchBlock(lBase);
+-                        if (lBlock == -1)
+-                        {
+-                            blocks.emplace_back(lBase, 0);
+-                            lBlock = blocks.size() - 1;
+-
+-                            DEBUG(blocks[lBlock].parent = blockBase);
+-                            blockStack.emplace_back(lBlock);
+-                            RESTORE_DATA();
+-                            continue;
+-                        }
+-                    }
+-                }
+-
+-                RESTORE_DATA();
+-            }
+-        }
+-        else if (insn.opcode == nullptr)
+-        {
+-            blockStack.pop_back();
+-            RESTORE_DATA();
+-        }
+-    }
+-
+-    // Sort and invalidate discontinuous blocks
+-    if (blocks.size() > 1)
+-    {
+-        std::sort(blocks.begin(), blocks.end(), [](const Block& a, const Block& b)
+-        {
+-            return a.base < b.base;
+-        });
+-
+-        size_t discontinuity = -1;
+-        for (size_t i = 0; i < blocks.size() - 1; i++)
+-        {
+-            if (blocks[i].base + blocks[i].size >= blocks[i + 1].base)
+-            {
+-                continue;
++                // A return is unconditional only if both the CR test and the
++                // CTR test are disabled. bdzlr/bdnzlr ignore CR but still fall
++                // through when the counter condition is false.
++                if ((PPC_BO(instruction) & 0x14) == 0x14) break;
+             }
+-
+-            discontinuity = i + 1;
+-            break;
+-        }
+-
+-        if (discontinuity != -1)
+-        {
+-            blocks.erase(blocks.begin() + discontinuity, blocks.end());
++            pc += 4;
+         }
+     }
+-
+-    fn.size = 0;
+-    for (const auto& block : blocks)
++    for (auto pc : visited)
+     {
+-        // pick the block furthest away
+-        fn.size = std::max(fn.size, block.base + block.size);
++        if (!result.blocks.empty() && result.blocks.back().base + result.blocks.back().size == pc - base)
++            result.blocks.back().size += 4;
++        else
++            result.blocks.emplace_back(pc - base, 4);
+     }
+-    return fn;
++    return result;
+ }
+diff --git a/XenonAnalyse/function.h b/XenonAnalyse/function.h
+index 7df1c6a..67ac743 100644
+--- a/XenonAnalyse/function.h
++++ b/XenonAnalyse/function.h
+@@ -2,6 +2,7 @@
+ 
+ #include <cstddef>
+ #include <vector>
++#include <unordered_map>
+ 
+ #ifdef _DEBUG
+ #define DEBUG(X) X
+@@ -47,5 +48,6 @@ struct Function
+     }
+     
+     size_t SearchBlock(size_t address) const;
+-    static Function Analyze(const void* code, size_t size, size_t base);
++    static Function Analyze(const void* code, size_t size, size_t base,
++        const std::unordered_map<size_t, std::vector<size_t>>* switches = nullptr);
+ };
+diff --git a/XenonRecomp/main.cpp b/XenonRecomp/main.cpp
+index 12c6d8c..b362375 100644
+--- a/XenonRecomp/main.cpp
++++ b/XenonRecomp/main.cpp
+@@ -3,6 +3,7 @@
+ 
+ int main(int argc, char* argv[])
+ {
++    setvbuf(stdout, nullptr, _IONBF, 0);
+ #ifndef XENON_RECOMP_CONFIG_FILE_PATH
+     if (argc < 3)
+     {
+diff --git a/XenonRecomp/recompiler.cpp b/XenonRecomp/recompiler.cpp
+index fa91527..aae0787 100644
+--- a/XenonRecomp/recompiler.cpp
++++ b/XenonRecomp/recompiler.cpp
+@@ -95,6 +95,18 @@ bool Recompiler::LoadConfig(const std::string_view& configFilePath)
+ 
+ void Recompiler::Analyse()
+ {
++    std::unordered_map<size_t, std::vector<size_t>> switchTargets;
++    for (const auto& [address, table] : config.switchTables)
++    {
++        for (size_t offset = 0; offset < 64 && address + offset + 4 <= image.base + image.size; offset += 4)
++        {
++            if (ByteSwap(*(const uint32_t*)image.Find(address + offset)) == 0x4E800420)
++            {
++                switchTargets[address + offset] = std::vector<size_t>(table.labels.begin(), table.labels.end());
++                break;
++            }
++        }
++    }
+     for (size_t i = 14; i < 128; i++)
+     {
+         if (i < 32)
+@@ -213,7 +225,10 @@ void Recompiler::Analyse()
+                 if (address >= section.base && address < section.base + section.size && image.symbols.find(address) == image.symbols.end())
+                 {
+                     auto data = section.data + address - section.base;
+-                    auto& fn = functions.emplace_back(Function::Analyze(data, section.base + section.size - address, address));
++                    auto limit = section.base + section.size;
++                    auto next = image.symbols.upper_bound(address);
++                    if (next != image.symbols.end()) limit = (std::min)(limit, next->address);
++                    auto& fn = functions.emplace_back(Function::Analyze(data, limit - address, address, &switchTargets));
+                     image.symbols.emplace(fmt::format("sub_{:X}", fn.base), fn.base, fn.size, Symbol_Function);
+                 }
+             }
+@@ -242,7 +257,10 @@ void Recompiler::Analyse()
+             }
+             else
+             {
+-                auto& fn = functions.emplace_back(Function::Analyze(data, dataEnd - data, base));
++                auto limit = section.base + section.size;
++                auto next = image.symbols.upper_bound(base);
++                if (next != image.symbols.end()) limit = (std::min)(limit, next->address);
++                auto& fn = functions.emplace_back(Function::Analyze(data, limit - base, base, &switchTargets));
+                 image.symbols.emplace(fmt::format("sub_{:X}", fn.base), fn.base, fn.size, Symbol_Function);
+ 
+                 base += fn.size;
+@@ -373,12 +391,12 @@ bool Recompiler::Recompile(
+         {
+             if (address == config.longJmpAddress)
+             {
+-                println("\tlongjmp(*reinterpret_cast<jmp_buf*>(base + {}.u32), {}.s32);", r(3), r(4));
++                println("\tppc_longjmp({}.u32, {}.s32);", r(3), r(4));
+             }
+             else if (address == config.setJmpAddress)
+             {
+                 println("\t{} = ctx;", env());
+-                println("\t{}.s64 = setjmp(*reinterpret_cast<jmp_buf*>(base + {}.u32));", temp(), r(3));
++                println("\t{}.s64 = ppc_setjmp({}.u32);", temp(), r(3));
+                 println("\tif ({}.s64 != 0) ctx = {};", temp(), env());
+                 println("\t{} = {};", r(3), temp());
+             }
+@@ -609,12 +627,14 @@ bool Recompiler::Recompile(
+     case PPC_INST_BCTR:
+         if (switchTable != config.switchTables.end())
+         {
+-            println("\tswitch ({}.u64) {{", r(switchTable->second.r));
++            println("\tswitch ({}.u32) {{", ctr());
+ 
++            std::unordered_set<uint32_t> emittedCases;
+             for (size_t i = 0; i < switchTable->second.labels.size(); i++)
+             {
+-                println("\tcase {}:", i);
+                 auto label = switchTable->second.labels[i];
++                if (!emittedCases.insert(label).second) continue;
++                println("\tcase 0x{:X}:", label);
+                 if (label < fn.base || label >= fn.base + fn.size)
+                 {
+                     println("\t\t// ERROR: 0x{:X}", label);
+@@ -628,7 +648,8 @@ bool Recompiler::Recompile(
+             }
+ 
+             println("\tdefault:");
+-            println("\t\t__builtin_unreachable();");
++            println("\t\tPPC_CALL_INDIRECT_FUNC({}.u32);", ctr());
++            println("\t\treturn;");
+             println("\t}}");
+ 
+             switchTable = config.switchTables.end();
+@@ -712,7 +733,9 @@ bool Recompiler::Recompile(
+         break;
+ 
+     case PPC_INST_BLRL:
+-        println("__builtin_debugtrap();");
++        println("\t{}.u64 = ctx.lr;", temp());
++        println("\tctx.lr = 0x{:X};", base + 4);
++        println("\tPPC_CALL_INDIRECT_FUNC({}.u32);", temp());
+         break;
+ 
+     case PPC_INST_BLT:
+@@ -813,14 +836,14 @@ bool Recompiler::Recompile(
+         break;
+ 
+     case PPC_INST_DCBZ:
+-        print("\tmemset(base + ((");
++        print("\tmemset(PPC_RAW_ADDR((");
+         if (insn.operands[0] != 0)
+             print("{}.u32 + ", r(insn.operands[0]));
+         println("{}.u32) & ~31), 0, 32);", r(insn.operands[1]));
+         break;
+ 
+     case PPC_INST_DCBZL:
+-        print("\tmemset(base + ((");
++        print("\tmemset(PPC_RAW_ADDR((");
+         if (insn.operands[0] != 0)
+             print("{}.u32 + ", r(insn.operands[0]));
+         println("{}.u32) & ~127), 0, 128);", r(insn.operands[1]));
+@@ -1043,7 +1066,7 @@ bool Recompiler::Recompile(
+         break;
+ 
+     case PPC_INST_LDARX:
+-        print("\t{}.u64 = *(uint64_t*)(base + ", reserved());
++        print("\t{}.u64 = *(uint64_t*)PPC_RAW_ADDR(", reserved());
+         if (insn.operands[1] != 0)
+             print("{}.u32 + ", r(insn.operands[1]));
+         println("{}.u32);", r(insn.operands[2]));
+@@ -1139,10 +1162,10 @@ bool Recompiler::Recompile(
+     case PPC_INST_LVX128:
+         // NOTE: for endian swapping, we reverse the whole vector instead of individual elements.
+         // this is accounted for in every instruction (eg. dp3 sums yzw instead of xyz)
+-        print("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_shuffle_epi8(simde_mm_load_si128((simde__m128i*)(base + ((", v(insn.operands[0]));
++        print("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_shuffle_epi8(simde_mm_load_si128((simde__m128i*)PPC_RAW_ADDR((", v(insn.operands[0]));
+         if (insn.operands[1] != 0)
+             print("{}.u32 + ", r(insn.operands[1]));
+-        println("{}.u32) & ~0xF))), simde_mm_load_si128((simde__m128i*)VectorMaskL)));", r(insn.operands[2]));
++        println("{}.u32) & ~0xF)), simde_mm_load_si128((simde__m128i*)VectorMaskL)));", r(insn.operands[2]));
+         break;
+ 
+     case PPC_INST_LVLX:
+@@ -1151,7 +1174,7 @@ bool Recompiler::Recompile(
+         if (insn.operands[1] != 0)
+             print("{}.u32 + ", r(insn.operands[1]));
+         println("{}.u32;", r(insn.operands[2]));
+-        println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_shuffle_epi8(simde_mm_load_si128((simde__m128i*)(base + ({}.u32 & ~0xF))), simde_mm_load_si128((simde__m128i*)&VectorMaskL[({}.u32 & 0xF) * 16])));", v(insn.operands[0]), temp(), temp());
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_shuffle_epi8(simde_mm_load_si128((simde__m128i*)PPC_RAW_ADDR({}.u32 & ~0xF)), simde_mm_load_si128((simde__m128i*)&VectorMaskL[({}.u32 & 0xF) * 16])));", v(insn.operands[0]), temp(), temp());
+         break;
+ 
+     case PPC_INST_LVRX:
+@@ -1160,7 +1183,7 @@ bool Recompiler::Recompile(
+         if (insn.operands[1] != 0)
+             print("{}.u32 + ", r(insn.operands[1]));
+         println("{}.u32;", r(insn.operands[2]));
+-        println("\tsimde_mm_store_si128((simde__m128i*){}.u8, {}.u32 & 0xF ? simde_mm_shuffle_epi8(simde_mm_load_si128((simde__m128i*)(base + ({}.u32 & ~0xF))), simde_mm_load_si128((simde__m128i*)&VectorMaskR[({}.u32 & 0xF) * 16])) : simde_mm_setzero_si128());", v(insn.operands[0]), temp(), temp(), temp());
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u8, {}.u32 & 0xF ? simde_mm_shuffle_epi8(simde_mm_load_si128((simde__m128i*)PPC_RAW_ADDR({}.u32 & ~0xF)), simde_mm_load_si128((simde__m128i*)&VectorMaskR[({}.u32 & 0xF) * 16])) : simde_mm_setzero_si128());", v(insn.operands[0]), temp(), temp(), temp());
+         break;
+ 
+     case PPC_INST_LVSL:
+@@ -1187,7 +1210,7 @@ bool Recompiler::Recompile(
+         break;
+ 
+     case PPC_INST_LWARX:
+-        print("\t{}.u32 = *(uint32_t*)(base + ", reserved());
++        print("\t{}.u32 = *(uint32_t*)PPC_RAW_ADDR(", reserved());
+         if (insn.operands[1] != 0)
+             print("{}.u32 + ", r(insn.operands[1]));
+         println("{}.u32);", r(insn.operands[2]));
+@@ -1260,7 +1283,7 @@ bool Recompiler::Recompile(
+         break;
+ 
+     case PPC_INST_MFTB:
+-        println("\t{}.u64 = __rdtsc();", r(insn.operands[0]));
++        println("\t{}.u64 = PPC_QUERY_TIMEBASE();", r(insn.operands[0]));
+         break;
+ 
+     case PPC_INST_MR:
+@@ -1503,10 +1526,10 @@ bool Recompiler::Recompile(
+     case PPC_INST_STDCX:
+         println("\t{}.lt = 0;", cr(0));
+         println("\t{}.gt = 0;", cr(0));
+-        print("\t{}.eq = __sync_bool_compare_and_swap(reinterpret_cast<uint64_t*>(base + ", cr(0));
++        print("\t{}.eq = __sync_bool_compare_and_swap(reinterpret_cast<uint64_t*>(PPC_RAW_ADDR(", cr(0));
+         if (insn.operands[1] != 0)
+             print("{}.u32 + ", r(insn.operands[1]));
+-        println("{}.u32), {}.s64, __builtin_bswap64({}.s64));", r(insn.operands[2]), reserved(), r(insn.operands[0]));
++        println("{}.u32)), {}.s64, __builtin_bswap64({}.s64));", r(insn.operands[2]), reserved(), r(insn.operands[0]));
+         println("\t{}.so = {}.so;", cr(0), xer());
+         break;
+ 
+@@ -1635,10 +1658,10 @@ bool Recompiler::Recompile(
+ 
+     case PPC_INST_STVX:
+     case PPC_INST_STVX128:
+-        print("\tsimde_mm_store_si128((simde__m128i*)(base + ((");
++        print("\tsimde_mm_store_si128((simde__m128i*)PPC_RAW_ADDR((");
+         if (insn.operands[1] != 0)
+             print("{}.u32 + ", r(insn.operands[1]));
+-        println("{}.u32) & ~0xF)), simde_mm_shuffle_epi8(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*)VectorMaskL)));", r(insn.operands[2]), v(insn.operands[0]));
++        println("{}.u32) & ~0xF), simde_mm_shuffle_epi8(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*)VectorMaskL)));", r(insn.operands[2]), v(insn.operands[0]));
+         break;
+ 
+     case PPC_INST_STW:
+@@ -1658,10 +1681,10 @@ bool Recompiler::Recompile(
+     case PPC_INST_STWCX:
+         println("\t{}.lt = 0;", cr(0));
+         println("\t{}.gt = 0;", cr(0));
+-        print("\t{}.eq = __sync_bool_compare_and_swap(reinterpret_cast<uint32_t*>(base + ", cr(0));
++        print("\t{}.eq = __sync_bool_compare_and_swap(reinterpret_cast<uint32_t*>(PPC_RAW_ADDR(", cr(0));
+         if (insn.operands[1] != 0)
+             print("{}.u32 + ", r(insn.operands[1]));
+-        println("{}.u32), {}.s32, __builtin_bswap32({}.s32));", r(insn.operands[2]), reserved(), r(insn.operands[0]));
++        println("{}.u32)), {}.s32, __builtin_bswap32({}.s32));", r(insn.operands[2]), reserved(), r(insn.operands[0]));
+         println("\t{}.so = {}.so;", cr(0), xer());
+         break;
+ 
+@@ -1769,6 +1792,7 @@ bool Recompiler::Recompile(
+         println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_and_si128(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8)));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
+         break;
+ 
++    case PPC_INST_VANDC:
+     case PPC_INST_VANDC128:
+         println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_andnot_si128(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8)));", v(insn.operands[0]), v(insn.operands[2]), v(insn.operands[1]));
+         break;
+@@ -2014,6 +2038,19 @@ bool Recompiler::Recompile(
+             println("\t{}.u32[{}] = {}.u32;", v(insn.operands[0]), insn.operands[4], temp());
+             break;
+ 
++        case 3: // FLOAT16_2: Xbox truncation and saturation semantics.
++            for (size_t i = 0; i < 2; ++i)
++            {
++                const size_t source = 3 - i;
++                println("\t{}.u32 = {}.u32[{}] & 0x7FFFFFFF;", temp(), v(insn.operands[1]), source);
++                println("\t{}.u32[1] = ({}.f32 != {}.f32 || {}.f32 > 65504.0f) ? 0xFF : ({}.u32[{}] >> 23) & 0xFF;", vTemp(), temp(), temp(), temp(), v(insn.operands[1]), source);
++                println("\t{}.u16 = ({}.u32[{}] & 0x7FE000) >> 13;", temp(), v(insn.operands[1]), source);
++                println("\t{0}.u16[{1}] = {0}.u32[1] == 0xFF ? 0x7FFF : {0}.u32[1] > 0x70 ? (({0}.u32[1] - 0x70) << 10) + {2}.u16 : 0x71 - {0}.u32[1] > 31 ? 0 : (0x400 + {2}.u16) >> (0x71 - {0}.u32[1]);", vTemp(), 1-i, temp());
++                println("\t{}.u16[{}] |= ({}.u32[{}] & 0x80000000) >> 16;", vTemp(), 1-i, v(insn.operands[1]), source);
++            }
++            println("\t{}.u32[{}] = {}.u32[0];", v(insn.operands[0]), insn.operands[4], vTemp());
++            break;
++
+         case 5: // float16_4
+             if (insn.operands[3] != 2 || insn.operands[4] > 2)
+                 fmt::println("Unexpected float16_4 pack instruction at {:X}", base);
+@@ -2087,6 +2124,7 @@ bool Recompiler::Recompile(
+         println("\tsimde_mm_store_ps({}.f32, simde_mm_div_ps(simde_mm_set1_ps(1), simde_mm_sqrt_ps(simde_mm_load_ps({}.f32))));", v(insn.operands[0]), v(insn.operands[1]));
+         break;
+ 
++    case PPC_INST_VSEL128:
+     case PPC_INST_VSEL:
+         println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_or_si128(simde_mm_andnot_si128(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8)), simde_mm_and_si128(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8))));", v(insn.operands[0]), v(insn.operands[3]), v(insn.operands[1]), v(insn.operands[3]), v(insn.operands[2]));
+         break;
+@@ -2212,6 +2250,19 @@ bool Recompiler::Recompile(
+             println("\t{} = {};", v(insn.operands[0]), vTemp());
+             break;
+ 
++        case 3: // FLOAT16_2
++        case 5: // FLOAT16_4
++        {
++            const bool four = (insn.operands[2] >> 2) == 5;
++            for (size_t i = 0; i < (four ? 4u : 2u); ++i)
++                println("\t{}.f32[{}] = simde_float16_to_float32(simde_uint16_as_float16({}.u16[{}]));", vTemp(), four ? i : 3-i, v(insn.operands[1]), four ? i : 1-i);
++            if (!four) {
++                println("\t{}.f32[1] = 0.0f;", vTemp());
++                println("\t{}.f32[0] = 1.0f;", vTemp());
++            }
++            println("\t{} = {};", v(insn.operands[0]), vTemp());
++            break;
++        }
+         default:
+             println("\t__builtin_debugtrap();");
+             break;
+@@ -2263,6 +2314,7 @@ bool Recompiler::Recompile(
+         println("\t{}.u64 = {}.u64 ^ {};", r(insn.operands[0]), r(insn.operands[1]), insn.operands[2] << 16);
+         break;
+ 
++    #include "../../../patches/recompiler_extra.inl"
+     default:
+         return false;
+     }

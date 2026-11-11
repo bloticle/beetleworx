@@ -1,0 +1,2 @@
+#pragma once
+inline constexpr char kSceneAmbientShader[]=R"EM2_SHADER(@EM2_SCENE_AMBIENT_TEXT@)EM2_SHADER";
