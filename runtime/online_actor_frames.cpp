@@ -121,7 +121,7 @@ bool TestOwnedMovementFrames(PPCContext& ctx,uint8_t* base,uint64_t first_peer,u
         const auto tick=identity.first_tick+n;
         RoomFrame authoritative,received;bool taken=false,got=false;
         if(!check(host.SubmitLocal(tick,first) && !host.TakeFrame(authoritative) && client.SubmitLocal(tick,second) &&
-            pump([&]{if(!taken)taken=host.TakeFrame(authoritative);if(!got)got=client.TakeFrame(received);return taken && got;}) &&
+            pump([&]{if(!taken)taken=host.TakeFrame(authoritative);if(!got)got=client.PeekFrame(received);return taken && got;}) &&
             authoritative==received && authoritative.players_mask==3,"both peers agree on exact semantic commands and per-peer view bases"))return false;
         const auto incoming=ctx;std::array<std::array<uint8_t,800>,2> before;
         std::memcpy(before[0].data(),base+a.controller,800);std::memcpy(before[1].data(),base+b.controller,800);
@@ -135,7 +135,20 @@ bool TestOwnedMovementFrames(PPCContext& ctx,uint8_t* base,uint64_t first_peer,u
         if(!check(coordinator.Preflight(bad,ctx,base)==OwnedFrameResult::UnsupportedIntent &&
             !std::memcmp(before[0].data(),base+a.controller,800) && !std::memcmp(before[1].data(),base+b.controller,800) &&
             !std::memcmp(&incoming,&ctx,sizeof(ctx)),"all-peer preflight rejects unsupported intent before native effects"))return false;
-        if(!check(coordinator.Deliver(received,ctx,base)==OwnedFrameResult::Ready &&
+        // A real native load/pause gate can close after receiving a frame.
+        // Admission must leave that same command available instead of turning
+        // a temporary native wait into dropped input or implicit neutral.
+        const auto manager=PPC_LOAD_U32(0x833DAB60);const auto ready=PPC_LOAD_U8(manager+357);
+        PPC_STORE_U8(manager+357,0);
+        const auto waiting=coordinator.Preflight(received,ctx,base);
+        PPC_STORE_U8(manager+357,ready);
+        RoomFrame retained;
+        if(!check(waiting==OwnedFrameResult::NativeNotReady && client.PeekFrame(retained) && retained==received &&
+            client.next_tick()==tick && coordinator.next_tick()==tick,"native admission wait retains the exact transport frame and both timelines"))return false;
+        RoomFrame committed;
+        if(!check(coordinator.Preflight(retained,ctx,base)==OwnedFrameResult::Ready && client.TakeFrame(committed) && committed==retained &&
+            client.next_tick()==tick+1,"transport consumption follows successful all-actor preflight"))return false;
+        if(!check(coordinator.Deliver(committed,ctx,base)==OwnedFrameResult::Ready &&
             coordinator.Deliver(received,ctx,base)==OwnedFrameResult::IncompleteTick,"one authoritative frame delivers once before world update"))return false;
         for(const auto actor:{a,b}){auto call=ctx;call.r3.u64=actor.controller+24;update(call,base);}
         auto sample=[&](uint32_t address){return std::bit_cast<float>(PPC_LOAD_U32(address));};

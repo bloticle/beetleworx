@@ -1,4 +1,5 @@
 #include "online_actor_input.h"
+#include "online_local_movement.h"
 #include "em1_preview_runtime.h"
 #include "em1_level_entry.h"
 #include "em1_level_collision.h"
@@ -480,6 +481,7 @@ PPC_FUNC_IMPL(sub_82A3C930) {
     if(em2::net::SuppressOwnedActorInput(ctx,base))return;
     if(oswald_selected.load(std::memory_order_relaxed) && swap_session.mickey_input &&
        ctx.r3.u32==swap_session.mickey_input) {ctx.r3.u64=0;return;}
+    em2::net::ObserveNativeLocalMovementBinding(ctx,base);
     __imp__sub_82A3C930(ctx,base);
 }
 

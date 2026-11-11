@@ -38,6 +38,9 @@ public:
     // The first input_delay ticks contain a common neutral command. Success
     // queues intent; only a validated TakeFrame authorizes a simulation tick.
     bool SubmitLocal(uint64_t tick,const RoomCommand&);
+    // Inspect without advancing the transport timeline. Native admission may
+    // need to wait; only TakeFrame commits consumption of this same tick.
+    bool PeekFrame(RoomFrame&)const;
     bool TakeFrame(RoomFrame&);
     void Disconnect();
     RoomState state()const;

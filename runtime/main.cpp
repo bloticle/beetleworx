@@ -81,6 +81,8 @@
 #include "demo_setup.h"
 #include "online.h"
 #include "online_actor_input.h"
+#include "online_local_movement.h"
+
 #include "online_name_input.h"
 #include "online_native_menu.h"
 #include "online_room.h"
@@ -152,6 +154,7 @@ REXCVAR_DECLARE(bool,d3d12_allow_variable_refresh_rate_and_tearing);
 REXCVAR_DECLARE(std::string,em2_online_qa_role);
 REXCVAR_DEFINE_BOOL(em2_online_menu,false,"Online","Show experimental direct-connect co-op Host/Join before starting the game");
 REXCVAR_DEFINE_BOOL(em2_test_pc_settings,false,"Debug","Run PC menu settings tests without opening the game");
+REXCVAR_DEFINE_BOOL(em2_test_online_input,false,"Debug","Run online room/native input regressions headlessly in the canonical executable");
 REXCVAR_DEFINE_BOOL(em2_test_demo_support,false,"Debug","Run isolated report and update transaction regressions without starting the game");
 REXCVAR_DEFINE_STRING(em2_test_live_update_path,"","Debug","Explicit headless diagnostic: verify a live published demo update inside this new isolated directory");
 REXCVAR_DEFINE_BOOL(em2_test_update_swap,false,"Debug","Verify and restore the running canonical executable rename primitive without starting the game");
@@ -301,7 +304,7 @@ public:
             const std::filesystem::path report=REXCVAR_GET(em2_allocation_crash_output);
             if(!report.is_absolute() || std::filesystem::exists(report) || !std::filesystem::is_directory(report.parent_path()))ExitProcess(2);
             InstallCrashHandler(report);
-        } else if(REXCVAR_GET(em2_test_content_setup) || REXCVAR_GET(em2_test_mickey_ears) || REXCVAR_GET(em2_test_pc_settings) || REXCVAR_GET(em2_test_demo_support) || REXCVAR_GET(em2_test_update_swap) || REXCVAR_GET(em2_test_video_blocks) || REXCVAR_GET(em2_test_shader_storage) || REXCVAR_GET(em2_test_screen_upscale) || !REXCVAR_GET(em2_analyze_shadow_shader_path).empty() || !REXCVAR_GET(em2_analyze_bloom_shader_path).empty()) {
+        } else if(REXCVAR_GET(em2_test_online_input) || REXCVAR_GET(em2_test_content_setup) || REXCVAR_GET(em2_test_mickey_ears) || REXCVAR_GET(em2_test_pc_settings) || REXCVAR_GET(em2_test_demo_support) || REXCVAR_GET(em2_test_update_swap) || REXCVAR_GET(em2_test_video_blocks) || REXCVAR_GET(em2_test_shader_storage) || REXCVAR_GET(em2_test_screen_upscale) || !REXCVAR_GET(em2_analyze_shadow_shader_path).empty() || !REXCVAR_GET(em2_analyze_bloom_shader_path).empty()) {
             const auto reports=exe_dir/"diagnostic-crashes"/(std::to_string(GetCurrentProcessId())+"-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
             if(!std::filesystem::create_directories(reports))ExitProcess(2);
             InstallCrashHandler(reports/"crash.log");
@@ -446,6 +449,10 @@ public:
             spdlog::shutdown();
             ExitProcess(success?0:1);
         }
+        if (REXCVAR_GET(em2_test_online_input)) {
+            const bool success=em2::net::TestOnlineRoom() && em2::net::TestNativeLocalMovement() && em2::net::TestOwnedActorInput();
+            spdlog::shutdown();ExitProcess(success?0:1);
+        }
         if (REXCVAR_GET(em2_test_video_blocks)) {
             const bool success=em2::TestNativeVideoBlocks();
             spdlog::shutdown();ExitProcess(success?0:1);
@@ -486,7 +493,7 @@ public:
             std::string em1_collision_error;
             const auto em1_collision_ok=em2::em1::TestLevelPartitionClassification(em1_collision_error) && em2::em1::TestKeyframeColorEvaluator(em1_collision_error) && em2::em1::TestNifContainerCompatibility(em1_collision_error) && em2::em1::TestEm1HavokCollision(em1_collision_error) && em2::em1::TestNifFixedPointUvPromotion(em1_collision_error) && em2::em1::TestPortableBcPixels(em1_collision_error) && em2::em1::TestPreviewDiffusePeState(em1_collision_error) && em2::em1::TestLevelOriginalScriptLibrary() && em2::em1::TestLevelOriginalAudioOwnership();
             if(!em1_collision_ok)REXLOG_ERROR("EM1 compatibility regression: {}",em1_collision_error);
-            const auto success=em1_collision_ok && em2::net::TestLobbyNameInput() && em2::net::TestOnlineSession() && em2::net::TestOnlineRoom() && em2::net::TestOwnedActorInput() && em2::net::TestOnlineGameplay() && em2::TestNativePlayerActions() && em2::TestCanonicalNativeJoin() && em2::TestNativePlayerSpawn() && em2::TestRenderOptions() && em2::TestRenderLogFilter() && em2::TestNativeRenderSampler(test_dir/"native-samples.tsv") && em2::TestNativePropertyLookup() && em2::TestNativeBindingCache() && em2::TestNativeVisibilityScan() && em2::TestNativeRegisterBank() && em2::TestNativeShaderUpload() && em2::TestNativeMemoryCopy() && em2::TestNativeVideoBlocks() && em2::TestNativeSkinning() && em2::TestNativeCameraTiming() && em2::TestNativeCameraProjection() && em2::TestSceneDrawInputs() && em2::TestSimulation() && em2::TestGpuCommandProfiling() && em2::TestTransferScissors() && em2::TestStencilZeroProof() && em2::TestFencedScratchCache() && settings_ok && controls_ok && lowering_ok;
+            const auto success=em1_collision_ok && em2::net::TestLobbyNameInput() && em2::net::TestOnlineSession() && em2::net::TestOnlineRoom() && em2::net::TestNativeLocalMovement() && em2::net::TestOwnedActorInput() && em2::net::TestOnlineGameplay() && em2::TestNativePlayerActions() && em2::TestCanonicalNativeJoin() && em2::TestNativePlayerSpawn() && em2::TestRenderOptions() && em2::TestRenderLogFilter() && em2::TestNativeRenderSampler(test_dir/"native-samples.tsv") && em2::TestNativePropertyLookup() && em2::TestNativeBindingCache() && em2::TestNativeVisibilityScan() && em2::TestNativeRegisterBank() && em2::TestNativeShaderUpload() && em2::TestNativeMemoryCopy() && em2::TestNativeVideoBlocks() && em2::TestNativeSkinning() && em2::TestNativeCameraTiming() && em2::TestNativeCameraProjection() && em2::TestSceneDrawInputs() && em2::TestSimulation() && em2::TestGpuCommandProfiling() && em2::TestTransferScissors() && em2::TestStencilZeroProof() && em2::TestFencedScratchCache() && settings_ok && controls_ok && lowering_ok;
             spdlog::shutdown();
             ExitProcess(success?0:1);
         }

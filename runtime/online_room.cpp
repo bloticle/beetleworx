@@ -383,6 +383,11 @@ bool Room::SubmitLocal(uint64_t tick,const RoomCommand& command){
     else {auto packet=Packet(Wire::Input);U64(packet,tick);WriteCommand(packet,command);if(!p.Queue(*p.connections.front(),packet))return false;p.echoes[tick]=command;}
     if(p.submit_next==UINT64_MAX)p.submit_exhausted=true;else ++p.submit_next;return true;
 }
+bool Room::PeekFrame(RoomFrame& frame)const{
+    const auto& p=*impl_;
+    if(p.state!=RoomState::Running || p.consume_exhausted || p.frames.empty() || p.frames.front().tick!=p.consume_next)return false;
+    frame=p.frames.front();return true;
+}
 bool Room::TakeFrame(RoomFrame& frame){
     auto& p=*impl_;if(p.state!=RoomState::Running || p.consume_exhausted || p.frames.empty())return false;
     if(p.frames.front().tick!=p.consume_next){p.Fail("Room frame consumption lost contiguous ordering");return false;}
@@ -420,7 +425,7 @@ bool TestOnlineRoom(){
     for(auto& r:rooms)check(r->SetReady(true),"each participant explicitly readies");
     check(pump([&]{return std::all_of(rooms[0]->lobby().players.begin(),rooms[0]->lobby().players.end(),[](const auto& p){return p.ready;}) && std::none_of(rooms.begin(),rooms.end(),[](const auto& r){return r->profile_pending();});}),"readiness acknowledged by all clients");
     check(rooms[0]->Start() && pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& r){return r->state()==RoomState::Loading;});}),"host freezes complete ready roster and enters native Loading, never automatic Running");
-    for(auto& r:rooms){RoomFrame frame;check(!r->SubmitLocal(102,Neutral()) && !r->TakeFrame(frame) && r->impl_->frames.empty() && r->impl_->inputs.empty(),"no commands, neutral seeds or frames admitted before world barrier");}
+    for(auto& r:rooms){RoomFrame frame;check(!r->SubmitLocal(102,Neutral()) && !r->PeekFrame(frame) && !r->TakeFrame(frame) && r->impl_->frames.empty() && r->impl_->inputs.empty(),"no commands, neutral seeds or frames admitted before world barrier");}
     for(unsigned i=0;i<15;++i)check(rooms[i]->WorldReady(world),"caller explicitly asserts loaded native world for each ready participant");
     check(pump([&]{return std::count_if(rooms[0]->impl_->worlds.begin(),rooms[0]->impl_->worlds.end(),[](const auto& token){return bool(token);})==15;}),"fifteen native-world assertions reach authority, final guest still loading");
     const auto slow=Clock::now()+std::chrono::seconds(20);for(unsigned i=0;i<15;++i)rooms[i]->Poll(slow);
@@ -431,7 +436,9 @@ bool TestOnlineRoom(){
     check(rooms[0]->WorldReady(world) && rooms[15]->WorldReady(world),"same readiness remains idempotent after activation");
     check(!rooms[1]->SetReady(false) && !rooms[0]->Rename("Changed"),"locked roster cannot mutate after start");
     for(uint64_t t=100;t<102;++t){check(pump([&]{return std::all_of(rooms.begin(),rooms.end(),[&](const auto& r){return !r->impl_->frames.empty();});}),"neutral delayed frame delivered to every peer");
-        for(auto& r:rooms){RoomFrame f;check(r->TakeFrame(f) && f.tick==t && f.players_mask==0xFFFF && std::all_of(f.players.begin(),f.players.end(),[](const auto& p){return p==Neutral();}),"identical full-roster neutral delay frame");}}
+        for(auto& r:rooms){RoomFrame f,again;
+            check(r->PeekFrame(f) && r->PeekFrame(again) && f==again && r->next_tick()==t,"repeated preflight inspection never consumes the agreed frame");
+            check(r->TakeFrame(f) && f.tick==t && f.players_mask==0xFFFF && std::all_of(f.players.begin(),f.players.end(),[](const auto& p){return p==Neutral();}),"identical full-roster neutral delay frame");}}
     std::array<RoomCommand,16> commands;commands.fill(Neutral());for(unsigned i=0;i<16;++i){
         commands[i].x=float(i)/16;commands[i].y=-float(i)/16;
         commands[i].forward_x=std::sin(float(i)*.25f);commands[i].forward_z=std::cos(float(i)*.25f);

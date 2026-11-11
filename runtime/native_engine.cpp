@@ -1,5 +1,6 @@
 #include "online_actor_input.h"
 #include "online_actor_reference.h"
+#include "online_local_movement.h"
 #include "guest_read_batch.h"
 #include "native_engine.h"
 #include "native_player_spawn.h"
@@ -33,6 +34,7 @@ REXCVAR_DECLARE(std::string,em2_user_data_directory);
 REXCVAR_DEFINE_INT32(em2_probe_extra_native_players,0,"Debug","Private one-shot: construct, admit and destroy 1..14 additional native characters without assigning controls or replacing retail slots");
 REXCVAR_DEFINE_BOOL(em2_probe_owned_native_player_reject,false,"Debug","Private owned-player probe: force pre-admission rejection to verify native rollback");
 REXCVAR_DEFINE_BOOL(em2_probe_owned_native_player,false,"Debug","Private single-Mickey probe: quarantine broadcast input and attach a native owned movement reference; no movement injection");
+REXCVAR_DEFINE_BOOL(em2_probe_online_local_movement,false,"Debug","Private read-only Movement binding/math probe; never dispatches controls or advances actors");
 REXCVAR_DEFINE_INT32(em2_probe_extra_native_players_hold_seconds,0,"Debug","Private extra-character demo lifetime, 0..900 seconds; zero runs the immediate cleanup test");
 
 PPC_EXTERN_FUNC(__imp__sub_825430D8);
@@ -227,6 +229,54 @@ void UpdateConsoleWorld(em2::NativeConsoleWorldStatus& world,const std::array<em
 std::optional<float> Number(const std::string& text){float value=0;const auto [end,error]=std::from_chars(text.data(),text.data()+text.size(),value);if(error!=std::errc{} || end!=text.data()+text.size() || !std::isfinite(value))return {};return value;}
 std::optional<int> Actor(const std::string& name){if(name=="mickey" || name=="0")return 0;if(name=="oswald" || name=="1")return 1;return {};}
 
+void ProbeOnlineLocalMovement(PPCContext& ctx,uint8_t* base,const std::array<em2::NativeActor,2>& snapshot){
+    if(!REXCVAR_GET(em2_probe_online_local_movement) || !REXCVAR_GET(em2_private_profile) ||
+       REXCVAR_GET(em2_user_data_directory).empty() || em2::net::SynchronizedSessionActive())return;
+    struct Preserve {PPCContext& ctx;PPCContext saved;unsigned csr=_mm_getcsr();DWORD error=GetLastError();
+        ~Preserve(){ctx=saved;_mm_setcsr(csr);SetLastError(error);}} preserve{ctx,ctx};
+    static thread_local struct Probe {uint32_t entity=0;uint64_t identity=0;bool armed=false,done=false;
+        std::chrono::steady_clock::time_point stable{},deadline{};} probe;
+    if(probe.done)return;
+    const auto now=std::chrono::steady_clock::now();
+    if(!snapshot[0].ready || !snapshot[0].entity)return;
+    if(probe.entity!=snapshot[0].entity || probe.identity!=snapshot[0].identity){
+        if(probe.armed)em2::net::DisarmNativeLocalMovement();
+        probe={snapshot[0].entity,snapshot[0].identity,false,false,now,{}};return;
+    }
+    if(!probe.armed){
+        if(now-probe.stable<std::chrono::seconds(3))return;
+        if(!em2::net::ArmNativeLocalMovement(1,PPC_LOAD_U32(0x833DA7E4),base,0))return;
+        probe.armed=true;probe.deadline=now+std::chrono::seconds(15);return;
+    }
+    em2::net::NativeLocalMovementBinding binding;
+    if(!em2::net::NativeLocalMovementBindingFor(ctx,base,binding)){
+        if(now<probe.deadline)return;
+        const auto diagnostic=em2::net::LocalMovementDiagnostics();
+        em2::net::DisarmNativeLocalMovement();probe.done=true;
+        REXLOG_ERROR("Private online Movement probe: no naturally dispatched selected binding before deadline; observations {}, captured {}, stage {}, best stage {}, LR {:08X}, listener {:08X}, event {:08X}, action {:08X}",
+            diagnostic.observations,diagnostic.captured,diagnostic.stage,diagnostic.best_stage,diagnostic.lr,diagnostic.listener,diagnostic.event,diagnostic.action);return;
+    }
+    probe.done=true;
+    struct Disarm {~Disarm(){em2::net::DisarmNativeLocalMovement();}} disarm;
+    if(binding.entity!=snapshot[0].entity || !Readable(binding.controller,800,base)){
+        REXLOG_ERROR("Private online Movement probe: selected actor changed before evaluation");return;
+    }
+    std::array<uint8_t,800> before;std::memcpy(before.data(),base+binding.controller,before.size());
+    const auto incoming=ctx;
+    const std::array<em2::net::Pad,5> samples={em2::net::Pad{},em2::net::Pad{0,0,0,32767,0},
+        em2::net::Pad{0,0,0,0,32767},em2::net::Pad{0,0,0,-32768,-32768},em2::net::Pad{0,0,0,8689,-8689}};
+    bool success=true;
+    for(const auto& sample:samples){
+        em2::net::NativeActorAction result;
+        const bool produced=em2::net::ProduceNativeLocalMovement(binding,sample,ctx,base,result,0);
+        success &= produced && !std::memcmp(&ctx,&incoming,sizeof(ctx)) &&
+            !std::memcmp(before.data(),base+binding.controller,before.size());
+        if(!sample.left_x && !sample.left_y)success &= result.x==0 && result.y==0;
+        REXLOG_INFO("Private online Movement math: raw {},{} -> native {},{}; produced {}",sample.left_x,sample.left_y,result.x,result.y,produced);
+    }
+    REXLOG_INFO("Private online Movement probe completed: success {}, registry {:08X}, actor {:08X}, listener {:08X}, event {:08X}, action {:08X}; original native math only, no action dispatch, actor/control writes or network submission",
+        success,binding.registry,binding.entity,binding.listener,binding.event,binding.action);
+}
 // Factory/lifetime prerequisite for extra online actors. Never run this in a
 // normal profile or synchronized session. Native admission is required before
 // native destruction; neither proves input ownership or multiplayer capacity.
@@ -667,6 +717,7 @@ void em2::RunNativeEngineCommands(PPCContext& ctx,uint8_t* base){
     std::deque<Command> pending;std::array<NativeActor,2> snapshot;
     {std::lock_guard lock(mutex);pending.swap(commands);snapshot=actors;}
     ProbeExtraNativePlayers(ctx,base,snapshot);
+    ProbeOnlineLocalMovement(ctx,base,snapshot);
     if(!completion_metadata_published && std::any_of(snapshot.begin(),snapshot.end(),[](const auto& actor){return actor.ready;})){
         AnimationIdentifier("",false,base);AnimationIdentifier("",true,base);
         if(event_registry_loaded && variable_registry_loaded){PublishCompletionMetadata();completion_metadata_published=true;}

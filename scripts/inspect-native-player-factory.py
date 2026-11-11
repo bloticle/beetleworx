@@ -13,7 +13,7 @@ from pathlib import Path
 from live_guest_base import resolve_guest_base
 
 
-def inspect(capture, include_components=False):
+def inspect(capture, include_components=False, include_input=False):
     meta = json.loads((capture / 'process.json').read_text(encoding='utf-8-sig'))
     kernel = c.WinDLL('kernel32', use_last_error=True)
     kernel.OpenProcess.argtypes = [c.c_uint32, c.c_bool, c.c_uint32]
@@ -120,7 +120,7 @@ def inspect(capture, include_components=False):
                         face = word(components + component_slot * 4)
                         obj = face - adjustment
                         vt = word(obj)
-                        view.update(face=f'{face:08X}', object=f'{obj:08X}', vtable=f'{vt:08X}',
+                        view.update(face=f'{face:08X}', face_vtable=f'{word(face):08X}', object=f'{obj:08X}', vtable=f'{vt:08X}',
                                     setter_108=f'{word(vt + 108):08X}')
                         view['retained_reference' if label == 'basic' else 'listener_vtable'] = f'{word(obj + 80):08X}'
                     actor['controller_views'][label] = view
@@ -161,6 +161,62 @@ def inspect(capture, include_components=False):
                         actor['physics_enabled'] = read(physics_component + 145, 1)[0]
                         actor['physics_interface_at_176'] = f'{word(physics_component + 176):08X}'
             actors.append(actor)
+        input_bindings = None
+        if include_input:
+            action_manager = word(0x833DBAD8)
+            event_list, event_count = word(action_manager + 4), word(action_manager + 8)
+            if event_count > 128:
+                raise RuntimeError('Unbounded native input event list')
+            event_bytes = read(event_list, event_count * 4) if event_count else b''
+            events = list(struct.unpack('>' + str(event_count) + 'I', event_bytes))
+            events.append(action_manager + 24)  # Original827C3D78 default event.
+            movement_uid = word(0x833DAEB8)
+            captured = []
+            snapshots = []
+            for event in dict.fromkeys(events):
+                header = read(event, 24)
+                _, listeners, listener_count, _, actions, action_count = struct.unpack('>6I', header)
+                if listener_count > 128 or action_count > 256:
+                    raise RuntimeError('Unbounded native input event contents')
+                listener_bytes = read(listeners, listener_count * 4) if listener_count else b''
+                action_bytes = read(actions, action_count * 4) if action_count else b''
+                snapshots.append((event, header, listeners, listener_bytes, actions, action_bytes))
+                for action in struct.unpack('>' + str(action_count) + 'I', action_bytes):
+                    if word(action) != movement_uid:
+                        continue
+                    shape = read(action, 436)
+                    native_user = word(action + 88)
+                    if native_user > 1:
+                        raise RuntimeError('Movement binding has an unsupported native device index')
+                    input_system = word(action_manager + 72)
+                    device = word(input_system + 72 + native_user * 4)
+                    history = word(device + 60)
+                    captured.append(dict(event=f'{event:08X}', action=f'{action:08X}',
+                        event_uid=f'{word(event):08X}',
+                        uid=f'{movement_uid:08X}',
+                        listener_count=listener_count, action_count=action_count,
+                        listeners=[f'{value:08X}' for value in struct.unpack('>' + str(listener_count) + 'I', listener_bytes)],
+                        kind=int.from_bytes(shape[80:84], 'big'),
+                        binding_count=int.from_bytes(shape[408:412], 'big'),
+                        modifier_count=int.from_bytes(shape[412:416], 'big'),
+                        axis_records=[dict(user=word(action + offset), key=f'{word(action + offset + 4):08X}',
+                            destination=word(action + offset + 8), inverted=read(action + offset + 16, 1)[0])
+                            for offset in (88, 120)],
+                        response=list(struct.unpack('>4f', shape[416:432])),
+                        curve=int.from_bytes(shape[432:436], 'big'),
+                        device=dict(input_system=f'{input_system:08X}', object=f'{device:08X}',
+                            vtable=f'{word(device):08X}', axis_count=word(device + 56), history=f'{history:08X}',
+                            ranges=[list(struct.unpack('>4i', read(history + i * 32 + 16, 16))) for i in range(2)])))
+            if (word(0x833DBAD8) != action_manager or word(action_manager + 4) != event_list
+                    or word(action_manager + 8) != event_count
+                    or (event_count and read(event_list, event_count * 4) != event_bytes)
+                    or any(read(event, 24) != header or (lb and read(lp, len(lb)) != lb)
+                           or (ab and read(ap, len(ab)) != ab)
+                           for event, header, lp, lb, ap, ab in snapshots)):
+                raise RuntimeError('Input event ownership changed during snapshot')
+            input_bindings = dict(manager=f'{action_manager:08X}', event_count=event_count,
+                current_event_uid=f'{word(action_manager + 16):08X}',
+                default_event_uid=f'{word(action_manager + 24):08X}', movement=captured)
         # Exact string addresses selected by retail 8276A828 (r4 slot, r5
         # human/3D-AI/2D-AI mode), recovered from its lis/addi instructions.
         string_base = ((-32248 << 16) - 30820) & 0xFFFFFFFF
@@ -178,7 +234,7 @@ def inspect(capture, include_components=False):
                     mode='ReadProcessMemory only; no execution, writes, suspension or input',
                     manager=f'{manager:08X}', manager_vtable=f'{table:08X}', factory_method=f'{factory:08X}',
                     factory_contract='8276A828 selects character 0=Mickey/1=Oswald and human/AI mode; it clones a fresh entity without replacing a PlayerManager slot',
-                    prefab_names=prefabs, actors=actors, stable=stable,
+                    prefab_names=prefabs, actors=actors, input_bindings=input_bindings, stable=stable,
                     limitation='Two existing actors inspected. No additional actor creation, control, replication or 16-player support proven.')
     finally:
         kernel.CloseHandle(handle)
@@ -189,8 +245,9 @@ if __name__ == '__main__':
     parser.add_argument('capture', type=Path)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--include-components', action='store_true')
+    parser.add_argument('--include-input', action='store_true')
     args = parser.parse_args()
-    result = inspect(args.capture, args.include_components)
+    result = inspect(args.capture, args.include_components, args.include_input)
     with args.output.open('x', encoding='utf-8') as output:
         output.write(json.dumps(result, indent=2, allow_nan=False) + '\n')
     print(json.dumps(dict(output=str(args.output), stable=result['stable'], prefabs=result['prefab_names'], actors=result['actors'])))
