@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 Push-Location $root
 try {
-    if (!(Test-Path build/tools/em2-inspect.exe)) { & "$PSScriptRoot/build-tools.ps1" }
+    & "$PSScriptRoot/build-tools.ps1"
     New-Item -ItemType Directory -Force private,analysis,generated/ppc,config | Out-Null
     # Keep unchanged generated files eligible for incremental native compilation.
     $previousSources = @{}
@@ -11,12 +11,13 @@ try {
         $previousSources[$_.Name] = @((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash, $_.LastWriteTimeUtc)
     }
     Copy-Item -LiteralPath (Join-Path $GameDirectory 'default.xex') -Destination private/candidate.xex
-    & build/tools/em2-inspect.exe private/candidate.xex private/candidate-image.bin > analysis/candidate-image.json
+    & build/tools/em2-inspect.exe private/candidate.xex private/candidate-image.bin private/candidate-raw-image.bin > analysis/candidate-image.json
     if ($LASTEXITCODE) { throw 'XEX inspection failed.' }
     python scripts/check-game-image.py private/candidate.xex private/candidate-image.bin analysis/candidate-image.json
     if ($LASTEXITCODE) { throw 'The selected executable layout has no verified native hook profile.' }
     Move-Item -LiteralPath private/candidate.xex -Destination private/default.xex -Force
     Move-Item -LiteralPath private/candidate-image.bin -Destination private/image.bin -Force
+    Move-Item -LiteralPath private/candidate-raw-image.bin -Destination private/raw-image.bin -Force
     Move-Item -LiteralPath analysis/candidate-image.json -Destination analysis/image.json -Force
     $stamp = 'generated/ppc/em2_game_build.h'
     if(Test-Path -LiteralPath $stamp){Remove-Item -LiteralPath $stamp}
@@ -45,7 +46,7 @@ try {
     }
     python scripts/audit-translation.py
     if ($LASTEXITCODE) { throw 'Translation audit failed; see analysis/translation-summary.json.' }
-    python scripts/check-game-image.py private/default.xex private/image.bin analysis/image.json --stamp $stamp
+    python scripts/check-game-image.py private/default.xex private/image.bin analysis/image.json --raw-image private/raw-image.bin --stamp $stamp
     if ($LASTEXITCODE) { throw 'Could not bind the translation to its verified executable.' }
     Get-Content analysis/recompile.log -Tail 20
 } finally { Pop-Location }

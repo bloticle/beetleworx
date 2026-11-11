@@ -1,12 +1,13 @@
 #include <file.h>
 #include <image.h>
+#include <xex.h>
 #include <fmt/format.h>
 #include <fstream>
 #include <stdexcept>
 
 int main(int argc, char** argv) {
-    if (argc != 3) {
-        fmt::print(stderr, "Usage: em2-inspect input.xex output-image.bin\n");
+    if (argc != 3 && argc != 4) {
+        fmt::print(stderr, "Usage: em2-inspect input.xex output-image.bin [output-raw-image.bin]\n");
         return 2;
     }
     try {
@@ -19,6 +20,14 @@ int main(int argc, char** argv) {
         std::ofstream dump(argv[2], std::ios::binary);
         dump.write(reinterpret_cast<const char*>(image.data.get()), image.size);
         if (!dump) throw std::runtime_error("Could not write loaded image");
+        if (argc == 4) {
+            const auto raw = Xex2LoadImage(bytes.data(), bytes.size(), false);
+            if (!raw.data || raw.size != image.size || raw.base != image.base)
+                throw std::runtime_error("Untouched image could not be loaded");
+            std::ofstream original(argv[3], std::ios::binary);
+            original.write(reinterpret_cast<const char*>(raw.data.get()), raw.size);
+            if (!original) throw std::runtime_error("Could not write untouched image");
+        }
         fmt::print("{{\n  \"base\": {},\n  \"size\": {},\n  \"entry_point\": {},\n  \"sections\": [\n", image.base, image.size, image.entry_point);
         bool first = true;
         for (const auto& section : image.sections) {

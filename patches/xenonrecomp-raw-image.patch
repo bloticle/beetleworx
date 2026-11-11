@@ -1,0 +1,32 @@
+diff --git a/XenonUtils/xex.cpp b/XenonUtils/xex.cpp
+index 4e79042..7498447 100644
+--- a/XenonUtils/xex.cpp
++++ b/XenonUtils/xex.cpp
+@@ -124,7 +124,7 @@ std::unordered_map<size_t, const char*> XboxKernelExports =
+     #include "xbox/xboxkrnl_table.inc"
+ };
+ 
+-Image Xex2LoadImage(const uint8_t* data, size_t dataSize)
++Image Xex2LoadImage(const uint8_t* data, size_t dataSize, bool normalizeImports)
+ {
+     auto* header = reinterpret_cast<const Xex2Header*>(data);
+     auto* security = reinterpret_cast<const Xex2SecurityInfo*>(data + header->securityOffset);
+@@ -294,7 +294,7 @@ Image Xex2LoadImage(const uint8_t* data, size_t dataSize)
+     }
+ 
+     auto* imports = reinterpret_cast<const Xex2ImportHeader*>(getOptHeaderPtr(data, XEX_HEADER_IMPORT_LIBRARIES));
+-    if (imports != nullptr)
++    if (imports != nullptr && normalizeImports)
+     {
+         std::vector<std::string_view> stringTable;
+         auto* pStrTable = reinterpret_cast<const char*>(imports + 1);
+diff --git a/XenonUtils/xex.h b/XenonUtils/xex.h
+index 363efff..9fe3885 100644
+--- a/XenonUtils/xex.h
++++ b/XenonUtils/xex.h
+@@ -264,4 +264,4 @@ inline const void* getOptHeaderPtr(const uint8_t* moduleBytes, uint32_t headerKe
+ }
+ 
+ struct Image;
+-Image Xex2LoadImage(const uint8_t* data, size_t dataSize);
++Image Xex2LoadImage(const uint8_t* data, size_t dataSize, bool normalizeImports = true);

@@ -7,6 +7,7 @@
 
 #include "ppc_config.h"
 #include "em2_game_build.h"
+#include "game_build.h"
 #include <rex/sha256.h>
 #include "ppc_recomp_shared.h"
 #include "crash_handler.h"
@@ -177,6 +178,7 @@ REXCVAR_DEFINE_BOOL(em2_benchmark_indirect,false,"Debug","With em2_test_shader_s
 REXCVAR_DEFINE_STRING(em2_analyze_shadow_shader_path,"","Debug","Export translated native shadow programs without a window or guest execution; absolute output directory required");
 REXCVAR_DEFINE_STRING(em2_analyze_bloom_shader_path,"","Debug","Export translated native bloom programs without a window or guest execution; absolute output directory required");
 REXCVAR_DEFINE_STRING(em2_test_shader_storage_path,"","Debug","Optional shared directory for isolated cross-process renderer-cache diagnostics");
+REXCVAR_DEFINE_STRING(em2_test_game_build_directory,"","Debug","With shader storage diagnostics, verify locally generated XEX encoding and rejection fixtures without guest execution");
 REXCVAR_DEFINE_STRING(em2_verify_draw_extent_default,"","Debug","Exit after checking title draw-extent default and expected parsed true/false value; no guest execution");
 REXCVAR_DEFINE_BOOL(em2_test_lowering,false,"Debug","Run generated instruction tests in this executable without opening the game");
 REXCVAR_DEFINE_BOOL(em2_test_allocation_crash,false,"Debug","Diagnostic: deliberately fault inside tracked allocation without starting the guest");
@@ -523,13 +525,7 @@ public:
             REXLOG_ERROR("PC content view does not match this game directory; rebuild with scripts/build.ps1 -GameDirectory <path>");
             return false;
         }
-        if(rex::util::sha256_file(pc_assets/"default.xex")!=kTranslatedGameXex){
-            const std::string message="The selected default.xex does not match this Beetleworx build. "
-                "Build Beetleworx from your copy of the game or select a matching Xbox 360 disc.";
-            REXLOG_ERROR("{}",message);
-            if(interactive_setup)em2::ShowContentSetupError(message);
-            return false;
-        }
+        const bool exact_game_xex=rex::util::sha256_file(pc_assets/"default.xex")==kTranslatedGameXex;
         if(!shader_storage_test)em2::WriteGameConfigOverlay(game_dir / "ConfigFiles.ini", pc_assets / "ConfigFiles.ini");
 
         if(!shader_storage_test && !em2::PublicDemoBuild() && REXCVAR_GET(em2_online_menu)) {
@@ -594,6 +590,22 @@ public:
         if (XFAILED(status)) {
             REXLOG_ERROR("Runtime setup failed: {:08X}", status);
             return false;
+        }
+
+        if(shader_storage_test && !REXCVAR_GET(em2_test_game_build_directory).empty()){
+            std::string error;
+            const bool success=em2::TestCompatibleGameXex(*runtime_,REXCVAR_GET(em2_test_game_build_directory),error);
+            runtime_.reset();REXLOG_INFO("XEX compatibility diagnostic {}: {} (no guest execution)",success?"passed":"failed",error);
+            spdlog::shutdown();ExitProcess(success?0:1);
+        }
+        if(!exact_game_xex){
+            std::string error;
+            if(!em2::VerifyCompatibleGameXex(*runtime_,pc_assets/"default.xex",error)){
+                const std::string message="This Xbox 360 executable needs a build-specific port: "+error+". Select a supported disc or report the build to the project.";
+                REXLOG_ERROR("{}",message);
+                if(interactive_setup)em2::ShowContentSetupError(message);
+                return false;
+            }
         }
 
         if(!shader_storage_test) {

@@ -12,4 +12,5 @@ try {
     & "$PSScriptRoot/build.ps1" -GameDirectory $GameDirectory -RexSdk $RexSdk -Jobs $Jobs -SkipShaderPreparation:$SkipShaderPreparation
     ctest --test-dir build/runtime23 --output-on-failure
     if ($LASTEXITCODE) { throw 'Runtime regression tests failed.' }
+    & "$PSScriptRoot/test-game-build.ps1"
 } finally { Pop-Location }
