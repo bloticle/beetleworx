@@ -7,7 +7,7 @@
 #include <rex/graphics/util/draw_extent_estimator.h>
 #include <rex/graphics/pipeline/shader/dxbc.h>
 #include <rex/string.h>
-#include "../private/draw_extent_clear_test_data.h"
+#include "../private/clear_extent_fixture.h"
 #include <rex/graphics/d3d12/command_processor.h>
 #include <rex/graphics/d3d12/deferred_command_list.h>
 #include <rex/graphics/d3d12/render_target_cache.h>
@@ -56,8 +56,8 @@ struct Owned:Fixture{
  ComPtr<ID3D12Resource> values;
 };
 // Exercise the installed ownership-height estimator with the actual tiny D3D
-// clear shader and inputs. This is CPU-only and never changes guest registers,
-// render targets or command lists. Private shader/input bytes stay in private/.
+// clear shader and authored inputs. This is CPU-only and never changes guest
+// registers, render targets or command lists. Original shader bytes stay private.
 bool TestClearDrawExtent(CP& cp,const std::filesystem::path& output){
  using namespace rex::graphics;
  std::filesystem::create_directories(output);
@@ -121,14 +121,14 @@ bool TestClearDrawExtent(CP& cp,const std::filesystem::path& output){
   REXLOG_ERROR("Clear extent private allocation virtual/physical aliases differ");return false;
  }
  REXCVAR_SET(execute_unclipped_draw_vs_on_cpu_with_scissor,false);
- checkpoint("captured snapshots");
+ checkpoint("authored rectangles");
  for(const auto& clear:em2::draw_extent_test_data::clears){
   prepare(clear);REXCVAR_SET(execute_unclipped_draw_vs_on_cpu,false);
-  check(estimator.EstimateMaxY(true,shader),8192,"captured off");
+  check(estimator.EstimateMaxY(true,shader),8192,"authored off");
   REXCVAR_SET(execute_unclipped_draw_vs_on_cpu,true);
-  check(estimator.EstimateMaxY(false,shader),8192,"captured no-try");
-  check(estimator.EstimateVertexMaxY(shader),clear.max_y,"captured vertices");
-  check(estimator.EstimateMaxY(true,shader),clear.max_y,"captured on");
+  check(estimator.EstimateMaxY(false,shader),8192,"authored no-try");
+  check(estimator.EstimateVertexMaxY(shader),clear.max_y,"authored vertices");
+  check(estimator.EstimateMaxY(true,shader),clear.max_y,"authored on");
  }
  // Half-integer D3D rectangle corners have an independently known exclusive
  // integer bottom, for every Xenos sample count and many screen-space heights.
@@ -175,8 +175,8 @@ bool TestClearDrawExtent(CP& cp,const std::filesystem::path& output){
  regs->values[XE_GPU_REG_PA_CL_VTE_CNTL]=vte.value;
  for(bool enabled:{false,true}){REXCVAR_SET(execute_unclipped_draw_vs_on_cpu,enabled);check(estimator.EstimateMaxY(true,shader),256,"clipped viewport");}
  std::filesystem::create_directories(output);
- std::ofstream(output/"clear-draw-extent.json")<<"{\"captured_inputs\":32,\"cases\":"<<cases<<",\"invalid\":"<<invalid<<",\"gpu_work\":false,\"full_coverage_or_copy_discard_claim\":false}";
- REXLOG_INFO("Installed clear draw estimator: {} cases, {} invalid; 32 actual clear inputs plus sample/height and conservative fallback coverage",cases,invalid);
+ std::ofstream(output/"clear-draw-extent.json")<<"{\"authored_inputs\":"<<std::size(em2::draw_extent_test_data::clears)<<",\"cases\":"<<cases<<",\"invalid\":"<<invalid<<",\"gpu_work\":false,\"full_coverage_or_copy_discard_claim\":false}";
+ REXLOG_INFO("Installed clear draw estimator: {} cases, {} invalid; authored clear rectangles plus sample/height and conservative fallback coverage",cases,invalid);
  checkpoint("completed");
  return invalid==0;
 }

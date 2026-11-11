@@ -22,6 +22,8 @@ try {
     if ($LASTEXITCODE) { throw 'Native online lobby menu build failed.' }
     python "$PSScriptRoot/build-bloom-shaders.py" --game-dir $GameDirectory
     if ($LASTEXITCODE) { throw 'Bloom shader build failed.' }
+    python "$PSScriptRoot/build-clear-extent-fixture.py"
+    if ($LASTEXITCODE) { throw 'Clear shader fixture generation failed.' }
     python "$PSScriptRoot/inspect-scene-shaders.py" --game-dir $GameDirectory
     if ($LASTEXITCODE) { throw 'Scene shader input audit failed.' }
     python "$PSScriptRoot/inspect-material-shaders.py" --game-dir $GameDirectory
