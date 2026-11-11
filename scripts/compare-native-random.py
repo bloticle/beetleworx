@@ -13,6 +13,7 @@ script_stack=re.compile(r'Native online Lua stack: tick (\d+), index (\d+), retu
 script_wait=re.compile(
     r'Native online Lua wait: agreed (true|false), tick (\d+), slot (\d+)/(\d+), target ([0-9A-F]{8}), '
     r'remaining ([0-9A-F]{8}), flags ([0-9A-F]{8}), scaled ([0-9A-F]{8}), unscaled ([0-9A-F]{8})'
+    r'(?:, after count (\d+), target ([0-9A-F]{8}), remaining ([0-9A-F]{8}), flags ([0-9A-F]{8}))?'
 )
 peers={};summaries={}
 
@@ -34,7 +35,8 @@ for role in ('host','client'):
         details[int(m[1])].setdefault(int(m[2]),{})['lua_parents']=m[3].split()
     waits=[
         {'agreed':m[1]=='true','tick':int(m[2]),'slot':int(m[3]),'count':int(m[4]),
-         'target':m[5],'remaining':m[6],'flags':m[7],'scaled_delta':m[8],'unscaled_delta':m[9]}
+         'target':m[5],'remaining':m[6],'flags':m[7],'scaled_delta':m[8],'unscaled_delta':m[9],
+         **({'after':{'count':int(m[10]),'target':m[11],'remaining':m[12],'flags':m[13]}} if m[10] else {})}
         for m in script_wait.finditer(text)
     ]
     peers[role]={'ticks':dict(ticks),'owners':dict(details),'expected_counts':counts,'truncated':'Native online CRT trace reached its' in text}
@@ -47,6 +49,25 @@ for tick in sorted(set(peers['host']['ticks'])|set(peers['client']['ticks'])):
     for tag,i,j,k,l in difflib.SequenceMatcher(a=list(map(key,a)),b=list(map(key,b)),autojunk=False).get_opcodes():
         if tag!='equal':changes.append({'operation':tag,'host_range':[i,j],'client_range':[k,l],'host':a[i:j],'client':b[k:l]})
     summaries[tick]={'complete':complete,'host_count':len(a),'client_count':len(b),'identical':complete and a==b,'changes':changes}
-result={'schema':1,'root':str(args.pair_root.resolve()),'scope':'Main native tick CRT events captured by the existing verifier; no worker or full-world determinism claim. Indices are checked for capture completeness.','peers':peers,'comparison':summaries}
+wait_ticks={}
+for role in ('host','client'):
+    grouped=collections.defaultdict(list)
+    for wait in peers[role].get('lua_waits',[]):
+        if not wait['agreed']:continue
+        # This scheduler reads bytes 100/101, not the lower half of the
+        # captured word. Keep the complete word in the per-peer trace above.
+        row={key:wait[key] for key in ('slot','count','target','remaining','scaled_delta','unscaled_delta')}
+        row['flags']=f"{int(wait['flags'],16)>>16:04X}"
+        if 'after' in wait:
+            row['after']={**wait['after'],'flags':f"{int(wait['after']['flags'],16)>>16:04X}"}
+        grouped[wait['tick']].append(row)
+    wait_ticks[role]=grouped
+wait_comparison={}
+for tick in sorted(set(wait_ticks['host'])|set(wait_ticks['client'])):
+    a=wait_ticks['host'].get(tick,[]);b=wait_ticks['client'].get(tick,[])
+    wait_comparison[tick]={'host_count':len(a),'client_count':len(b),'identical':a==b}
+    if a!=b:wait_comparison[tick].update(host=a,client=b)
+result={'schema':2,'root':str(args.pair_root.resolve()),'scope':'Main native tick CRT events captured by the existing verifier; no worker or full-world determinism claim. Indices are checked for capture completeness. Lua wait comparisons cover only the bounded captured scheduler rows; absent rows do not prove an empty scheduler.','peers':peers,'comparison':summaries,'lua_wait_comparison':wait_comparison}
 output=args.pair_root/'native-random-traces.json';output.write_text(json.dumps(result,indent=2)+'\n')
-print(json.dumps({'report':str(output),'ticks':{t:{k:v for k,v in s.items() if k!='changes'} for t,s in summaries.items()}},indent=2))
+print(json.dumps({'report':str(output),'ticks':{t:{k:v for k,v in s.items() if k!='changes'} for t,s in summaries.items()},
+    'lua_waits':{t:{k:v for k,v in s.items() if k not in ('host','client')} for t,s in wait_comparison.items()}},indent=2))

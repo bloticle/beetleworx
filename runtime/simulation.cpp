@@ -594,14 +594,16 @@ struct ScriptWaitTrace {
     bool agreed;
     uint64_t tick;
     uint32_t slot,count,target,remaining,flags,scaled,unscaled;
+    uint32_t after_count=0,after_target=0,after_remaining=0,after_flags=0;
 };
 thread_local std::array<ScriptWaitTrace,384> script_wait_trace{};
 thread_local size_t script_wait_trace_size=0;
 void LogScriptWaitTrace(){
     for(size_t i=0;i<script_wait_trace_size;++i){
         const auto& wait=script_wait_trace[i];
-        REXLOG_INFO("Native online Lua wait: agreed {}, tick {}, slot {}/{}, target {:08X}, remaining {:08X}, flags {:08X}, scaled {:08X}, unscaled {:08X}",
-            wait.agreed,wait.tick,wait.slot,wait.count,wait.target,wait.remaining,wait.flags,wait.scaled,wait.unscaled);
+        REXLOG_INFO("Native online Lua wait: agreed {}, tick {}, slot {}/{}, target {:08X}, remaining {:08X}, flags {:08X}, scaled {:08X}, unscaled {:08X}, after count {}, target {:08X}, remaining {:08X}, flags {:08X}",
+            wait.agreed,wait.tick,wait.slot,wait.count,wait.target,wait.remaining,wait.flags,wait.scaled,wait.unscaled,
+            wait.after_count,wait.after_target,wait.after_remaining,wait.after_flags);
     }
     script_wait_trace_size=0;
 }
@@ -1611,10 +1613,13 @@ PPC_FUNC_IMPL(sub_8273D880) {
     // The coroutine scheduler subtracts one of the native clock deltas from
     // each pending wait before it resumes Lua. Capture the inputs before the
     // original scheduler mutates or removes entries.
+    const auto trace_begin=script_wait_trace_size;
+    uint32_t trace_manager=0;
     if(REXCVAR_GET(em2_trace_online_random_owners) && em2::net::SynchronizedSessionActive() &&
        (!em2::InAgreedSimulationTick() || clock_input_tick<12)){
         struct HostState {DWORD error=GetLastError();unsigned csr=_mm_getcsr();~HostState(){SetLastError(error);_mm_setcsr(csr);}} host_state;
         const auto manager=ctx.r3.u32;
+        trace_manager=manager;
         const auto list=RandomTraceWord(base,manager+72),count=RandomTraceWord(base,manager+76);
         const auto state=RandomTraceWord(base,manager+92);
         if(count && list && uint64_t(list)+uint64_t(count)*132<=0x100000000ull){
@@ -1631,7 +1636,24 @@ PPC_FUNC_IMPL(sub_8273D880) {
             }
         }
     }
+    const auto trace_end=script_wait_trace_size;
     __imp__sub_8273D880(ctx,base);
+    if(trace_manager && trace_end>trace_begin){
+        // A target's pause flags can suppress the subtraction even with equal
+        // clock inputs. Observe the original scheduler's output without
+        // resolving targets or invoking another guest callback. Slots may be
+        // removed or reused, so retain their post-call target and count too.
+        struct HostState {DWORD error=GetLastError();unsigned csr=_mm_getcsr();~HostState(){SetLastError(error);_mm_setcsr(csr);}} host_state;
+        const auto list=RandomTraceWord(base,trace_manager+72),count=RandomTraceWord(base,trace_manager+76);
+        for(auto i=trace_begin;i<trace_end;++i){
+            auto& wait=script_wait_trace[i];wait.after_count=count;
+            if(!list || wait.slot>=count || uint64_t(list)+uint64_t(wait.slot+1)*132>0x100000000ull)continue;
+            const auto entry=list+wait.slot*132;
+            wait.after_target=RandomTraceWord(base,entry+112);
+            wait.after_remaining=RandomTraceWord(base,entry+96);
+            wait.after_flags=RandomTraceWord(base,entry+100);
+        }
+    }
 }
 void em2::ResetOnlineRandomTraceHistory(){random_failure_history.reset();trace_target_cache={};script_wait_trace_size=0;}
 void em2::DumpOnlineRandomTraceHistory(){
