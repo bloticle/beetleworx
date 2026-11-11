@@ -200,6 +200,10 @@ bool TestOnlineRoomBoot(const fs::path& root){
         check(room_pump([&]{RoomFrame frame;return std::all_of(results.begin(),results.end(),[&](const auto& r){return r.room->PeekFrame(frame);});}),"handed-off sockets deliver common authoritative frame");
         RoomFrame authoritative;check(results[0].room->TakeFrame(authoritative) && authoritative.players_mask==7 && authoritative.tick==0,"three-peer frozen mask survives ownership transfer");
         for(unsigned i=1;i<3;++i){RoomFrame frame;check(results[i].room->TakeFrame(frame) && frame==authoritative,"handed-off clients receive byte-identical native command frames");}
+        std::array<uint8_t,32> fixture_digest{};fixture_digest[0]=0xB0;
+        for(auto& result:results)check(result.room->CompleteGameplay(authoritative.tick,fixture_digest),"handed-off fixture command processing explicitly reports completion");
+        check(room_pump([&]{return std::all_of(results.begin(),results.end(),[&](const auto& result){return !result.room->gameplay_completion_pending() &&
+            result.room->verified_gameplay_tick()==authoritative.tick;});}),"three handed-off owners acknowledge same fixture frame before release");
         results.clear();
         boots.push_back(std::make_unique<OnlineRoomBoot>());
         auto native_paths=[&](std::string_view name){auto value=paths(name);value.startup_policy=StartupPolicy::NativeMenu;return value;};

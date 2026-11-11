@@ -118,6 +118,15 @@ bool TestRoomBootstrapGate(){
         gate.Prepare(frame)==BootstrapAdmission::Gameplay && gate.Prepare(frame)==BootstrapAdmission::Gameplay &&
         !em2::BeginSynchronizedGameplaySampling(generation,last) && unchanged(generation,retail) && gate.active() && RoomBootstrapActive() &&
         !em2::BeginSynchronizedControls(last+1),"Gameplay cutover rebases unused sampling exactly once, retains delay and preserves generation/publication/ownership"))return false;
+    if(!check(pump([&]{RoomFrame queued;return std::all_of(rooms.begin(),rooms.end(),[&](const auto& r){return r->PeekFrame(queued);});}),
+        "all peers receive the initial delayed neutral gameplay frame"))return false;
+    for(auto& room:rooms){RoomFrame consumed;
+        if(!check(room->TakeFrame(consumed) && consumed.tick==last+1 && room->CompleteGameplay(consumed.tick,observation),
+            "each fixture consumer explicitly completes its first gameplay frame"))return false;
+    }
+    if(!check(pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& r){return !r->gameplay_completion_pending();});}) &&
+        rooms[0]->next_tick()==last+2 && gate.Prepare(frame)==BootstrapAdmission::Gameplay && unchanged(generation,retail),
+        "retained raw owner continues handing off after gameplay advances without rebasing or reacquiring controls"))return false;
     gate.Detach();
     if(!check(!RoomBootstrapActive() && !gate.active() && !em2::ReadPublishedSynchronizedControls(generation,retail) &&
         em2::BeginSynchronizedControls(500),"only explicit Detach releases publication and controls/RNG ownership"))return false;

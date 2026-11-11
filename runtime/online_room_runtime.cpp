@@ -1,4 +1,7 @@
 #include "online_room_runtime.h"
+#include "online_room_gameplay.h"
+#include <rex/kernel/kernel_state.h>
+#include <rex/input/input_system.h>
 #include "online_world_random.h"
 #include "allocation_trace.h"
 #include "controls.h"
@@ -26,6 +29,7 @@ struct Environment {unsigned csr=_mm_getcsr();DWORD error=GetLastError();~Enviro
 struct Owner {
     std::unique_ptr<Room> room;
     RoomBootstrapGate gate;
+    NativeRoomGameplay gameplay;
     NativeInitializationContext initialization;
     std::jthread prelaunch;
     std::atomic<uint64_t> prelaunch_polls{0};
@@ -120,7 +124,7 @@ bool NativeRoomActive()noexcept{return retained_room_active.load(std::memory_ord
 NativeSessionStatus NativeRoomStatus(){return Runtime().Status();}
 NativeSessionTiming NativeRoomTiming(){
     if(!NativeRoomActive())return {};
-    auto& owner=Runtime();return {true,owner.Status().state==NativeSessionState::Failed || owner.loaded_waiting.load(std::memory_order_acquire) || RoomBootstrapHalted()};
+    auto& owner=Runtime();return {true,owner.Status().state==NativeSessionState::Failed || owner.loaded_waiting.load(std::memory_order_acquire) || RoomBootstrapHalted() || NativeRoomGameplayHalted()};
 }
 bool BindNativeRoomThread(){auto& owner=Runtime();return owner.room && ClaimThread(owner);}
 bool StartNativeRoomPrelaunchPolling(){
@@ -172,7 +176,7 @@ bool UpdateNativeRoomSession(uint8_t* base,bool advance){
 }
 void ReleaseNativeRoomSession(){
     Environment environment;auto& owner=Runtime();if(!owner.room && !NativeRoomActive())return;
-    owner.StopPrelaunch();const bool gate_owned=owner.gate.active();owner.gate.Detach();if(!gate_owned)em2::EndNativeOnlineRandom();em2::SetOnlineJoinControls(false);
+    owner.StopPrelaunch();owner.gameplay.Detach();const bool gate_owned=owner.gate.active();owner.gate.Detach();if(!gate_owned)em2::EndNativeOnlineRandom();em2::SetOnlineJoinControls(false);
     if(owner.room)owner.room->Disconnect();owner.room.reset();owner.initialization.Release();
     owner.thread.store(0,std::memory_order_release);owner.loaded_waiting.store(false,std::memory_order_release);owner.loading_poll.reset();
     owner.profile_claimed=owner.continue_claimed=owner.world_reported=false;owner.loaded_world.reset();owner.readiness=nullptr;owner.Publish(NativeSessionState::None);retained_room_active.store(false,std::memory_order_release);
@@ -214,6 +218,14 @@ bool RoomClaimSaveNotice(){
 bool SetNativeRoomReadinessProbe(RoomBootstrapGate::ReadinessProbe probe){
     auto& owner=Runtime();if(!NativeRoomActive() || !Bound(owner) || owner.Status().state==NativeSessionState::Failed)return false;
     if(owner.gate.active() && !owner.gate.SetReadinessProbe(probe))return false;owner.readiness=probe;return true;
+}
+bool EnableNativeRoomGameplay(unsigned physical){
+    Environment environment;auto& owner=Runtime();
+    if(!NativeRoomActive() || !Bound(owner) || owner.gate.active() || !owner.room || owner.gameplay.active())return false;
+    auto* kernel=rex::kernel::kernel_state();auto* input=kernel?kernel->input_system():nullptr;
+    if(!input || !owner.gameplay.Configure(*owner.room,owner.gate,*input,physical))return false;
+    owner.readiness=NativeRoomGameplayReadiness;
+    return true;
 }
 bool TestNativeRoomSession(){
     bool ok=true;unsigned checks=0;auto check=[&](bool value,const char* why){++checks;if(!value){REXLOG_ERROR("Native Room owner: {}",why);ok=false;}return value;};

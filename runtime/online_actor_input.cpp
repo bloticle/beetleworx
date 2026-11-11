@@ -1,4 +1,5 @@
 #include "online_actor_input.h"
+#include "online_retail_input.h"
 #include "online_actor_reference.h"
 #include "online_actor_frames.h"
 #include "online_actor_death.h"
@@ -336,8 +337,9 @@ PPC_FUNC_IMPL(sub_8276B968){
     }
     __imp__sub_8276B968(ctx,base);
 }
-PPC_FUNC_IMPL(sub_827835A8){UpdateBasisController(ctx,base,__imp__sub_827835A8);}
-PPC_FUNC_IMPL(sub_827874B0){ApplyBasisMotion(ctx,base,__imp__sub_827874B0);}
+namespace {void ContinueOwnedBasisController(PPCContext& ctx,uint8_t* base){UpdateBasisController(ctx,base,__imp__sub_827835A8);}}
+PPC_FUNC_IMPL(sub_827835A8){em2::net::UpdateRetailBasisController(ctx,base,ContinueOwnedBasisController);}
+PPC_FUNC_IMPL(sub_827874B0){if(!em2::net::ApplyRetailBasisMotion(ctx,base,__imp__sub_827874B0))ApplyBasisMotion(ctx,base,__imp__sub_827874B0);}
 
 namespace {
 void FixtureBase(PPCContext& ctx,uint8_t* base){if(!em2::net::SuppressOwnedActorInput(ctx,base))__imp__sub_82783CE8(ctx,base);}

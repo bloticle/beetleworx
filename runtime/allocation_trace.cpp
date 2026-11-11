@@ -6,12 +6,14 @@
 #include <cstring>
 #include <immintrin.h>
 #include <stdexcept>
+#include <thread>
 #include <windows.h>
 
 PPC_EXTERN_FUNC(__imp__sub_8272F5C8);
 namespace {
 thread_local em2::AllocationTrace current;
 thread_local std::array<char,64> load_level{};
+thread_local uint64_t load_generation=0;
 template<class Allocate> void Track(PPCContext& ctx,uint8_t* base,Allocate allocate) {
     const auto previous=current;
     current={};current.active=true;current.guest_base=reinterpret_cast<uintptr_t>(base);
@@ -30,17 +32,33 @@ template<class Allocate> void Track(PPCContext& ctx,uint8_t* base,Allocate alloc
 }
 em2::AllocationTrace em2::CurrentNativeAllocation(){return current;}
 void em2::RecordNativeLoadLevel(std::string_view level) {
+    if(load_generation!=UINT64_MAX)++load_generation;
     load_level.fill(0);const auto count=level.size()<load_level.size()-1?level.size():load_level.size()-1;
     if(count)std::memcpy(load_level.data(),level.data(),count);
 }
 std::array<char,64> em2::CurrentNativeLoadLevel(){return load_level;}
+uint64_t em2::CurrentNativeLoadGeneration(){return load_generation;}
 PPC_FUNC_IMPL(sub_8272F5C8){Track(ctx,base,__imp__sub_8272F5C8);}
 bool em2::TestAllocationTrace() {
     const auto entry_csr=_mm_getcsr();struct RestoreFP {unsigned csr;~RestoreFP(){_mm_setcsr(csr);}} restore_fp{entry_csr};
     auto check=[](bool ok,const char* text){if(!ok)REXLOG_ERROR("Allocation trace test: {}",text);return ok;};
-    const auto old_level=load_level;struct RestoreLevel {std::array<char,64> level;~RestoreLevel(){load_level=level;}} restore_level{old_level};
+    const auto old_level=load_level;
+    struct RestoreLevel {std::array<char,64> level;uint64_t generation;~RestoreLevel(){load_level=level;load_generation=generation;}} restore_level{old_level,load_generation};
+    load_generation=0;
     RecordNativeLoadLevel("meanstreet_north.visit_1");
     if(!check(std::strcmp(CurrentNativeLoadLevel().data(),"meanstreet_north.visit_1")==0,"thread-local loading level is captured without guest access"))return false;
+    const auto first_load=CurrentNativeLoadGeneration();
+    RecordNativeLoadLevel("meanstreet_north.visit_1");
+    if(!check(first_load==1 && CurrentNativeLoadGeneration()==2,
+        "same-destination reload receives a fresh native owner-thread incarnation"))return false;
+    uint64_t foreign_generation=UINT64_MAX;
+    std::thread foreign([&]{foreign_generation=CurrentNativeLoadGeneration();RecordNativeLoadLevel("foreign-world");});foreign.join();
+    if(!check(foreign_generation==0 && CurrentNativeLoadGeneration()==2 &&
+        std::strcmp(CurrentNativeLoadLevel().data(),"meanstreet_north.visit_1")==0,
+        "foreign native thread cannot replace the retained world incarnation"))return false;
+    load_generation=UINT64_MAX;RecordNativeLoadLevel("exhausted-world");
+    if(!check(CurrentNativeLoadGeneration()==UINT64_MAX,"load incarnation exhaustion never wraps into an old lease"))return false;
+    load_generation=2;
     RecordNativeLoadLevel(std::string_view("abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrst",72));
     if(!check(CurrentNativeLoadLevel().back()==0 && std::strlen(CurrentNativeLoadLevel().data())==63,"long level context is safely bounded"))return false;
     alignas(16) std::array<uint8_t,4096> memory{};auto* base=memory.data();

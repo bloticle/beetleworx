@@ -137,6 +137,18 @@ bool TestNativeLocalSource(PPCContext& ctx,uint8_t* base,const NativeLocalMoveme
     RoomMovement movement;NativeLocalJumpEvents events;
     check(ProduceNativeLocalRoomMovement(*client,binding,sample,1,ctx,base,movement) && movement.pad==sample.pad() && ValidRoomMovement(movement) &&
         ProduceNativeLocalJump(*client,jump,sample,1,ctx,base,events),"typed Movement and Jump consume identical physical0 proof through nativeuser1 common math");
+    auto produced=movement;produced.source=RoomMovementSource::NativeActionV2;produced.jump_button_mask=events.button_mask;produced.jump_count=events.count;produced.jump_events=events.events;
+    RoomMovement neutral;neutral.source=RoomMovementSource::NativeActionV1;neutral.actor_epoch=1;
+    check(host->SubmitLocal(1000,neutral) && client->SubmitLocal(1000,produced),"sealed source0/native1 output enters actual authoritative Room frame without relabelling raw input");
+    RoomFrame authoritative,received;
+    if(!check(pump([&]{return host->PeekFrame(authoritative) && client->PeekFrame(received);}) && host->TakeFrame(authoritative) &&
+        client->TakeFrame(received) && authoritative==received && received.players_mask==3 && received.players[1]==produced,
+        "real TCP receiver preserves produced native Movement and ordered Jump provenance"))return false;
+    std::array<uint8_t,32> fixture_digest{};fixture_digest[0]=0xC0;
+    check(host->CompleteGameplay(1000,fixture_digest) && client->CompleteGameplay(1000,fixture_digest) &&
+        pump([&]{return !host->gameplay_completion_pending() && !client->gameplay_completion_pending() &&
+            host->verified_gameplay_tick()==1000 && client->verified_gameplay_tick()==1000;}),
+        "source/math/network fixture processing explicitly acknowledges consumed frame; not a full native-world observation claim");
     check(!ProduceNativeLocalRoomMovement(binding,sample.pad(),1,ctx,base,movement,sample.physical_user()) &&
         !ProduceNativeLocalJump(jump,sample.pad(),1,1000,ctx,base,events,sample.physical_user()),"strict original producer APIs still reject physical0 pretending to be canonicalnative1");
     auto wrong=binding;++wrong.user;

@@ -192,6 +192,11 @@ bool TestOwnedMovementFrames(PPCContext& ctx,uint8_t* base,uint64_t first_peer,u
             "real native motion uses the view received for each network peer, not the shared reference camera"))return false;
         if(!check(coordinator.Finish(tick,base)==OwnedFrameResult::Ready && coordinator.next_tick()==tick+1 &&
             coordinator.Finish(tick,base)==OwnedFrameResult::IncompleteTick,"native tick completion advances exactly once"))return false;
+        std::array<uint8_t,32> fixture_digest{};fixture_digest[0]=0xA1;fixture_digest[1]=uint8_t(n+1);
+        if(!check(host.CompleteGameplay(tick,fixture_digest) && client.CompleteGameplay(tick,fixture_digest) &&
+            pump([&]{return !host.gameplay_completion_pending() && !client.gameplay_completion_pending() &&
+                host.verified_gameplay_tick()==tick && client.verified_gameplay_tick()==tick;}),
+            "fixture native callback processing is explicitly acknowledged before another transport frame"))return false;
     }
     REXLOG_INFO("Owned network frame passed {} checks: actual TCP room/authoritative frames into original native action/controller callbacks, distinct peers/views, preflight failure isolation, explicit neutral, epochs and tick ownership; fixture motion sink excludes contacts/full multiplayer",checks);
     return true;
@@ -251,6 +256,11 @@ bool TestOwnedJumpMovementFrames(PPCContext& ctx,uint8_t* base,uint64_t first_pe
         if(!check(coordinator.Preflight(received,ctx,base)==OwnedFrameResult::Ready && client.TakeFrame(committed) && committed==received &&
             coordinator.Deliver(committed,ctx,base)==OwnedFrameResult::Ready && coordinator.Deliver(committed,ctx,base)==OwnedFrameResult::IncompleteTick &&
             coordinator.Finish(tick,base)==OwnedFrameResult::Ready,"one agreed frame delivers Movement for all actors before ordered original Jump callbacks"))return false;
+        std::array<uint8_t,32> fixture_digest{};fixture_digest[0]=0xA2;fixture_digest[1]=uint8_t(n+1);
+        if(!check(host.CompleteGameplay(tick,fixture_digest) && client.CompleteGameplay(tick,fixture_digest) &&
+            pump([&]{return !host.gameplay_completion_pending() && !client.gameplay_completion_pending() &&
+                host.verified_gameplay_tick()==tick && client.verified_gameplay_tick()==tick;}),
+            "fixture original Jump-task processing carries explicit completion proof before next frame"))return false;
     }
     REXLOG_INFO("Owned Jump network frame passed {} actual TCP/native delivery checks; native fixture observes Jump stimuli separately, no contact trajectory claim",checks);
     return true;

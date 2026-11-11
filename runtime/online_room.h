@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -79,8 +80,15 @@ public:
     bool SubmitLocal(uint64_t tick,const RoomCommand&);
     // Inspect without advancing the transport timeline. Native admission may
     // need to wait; only TakeFrame commits consumption of this same tick.
+    // A previous consumed tick awaiting all-peer completion blocks both calls.
     bool PeekFrame(RoomFrame&)const;
     bool TakeFrame(RoomFrame&);
+    // One consumed native tick may be outstanding. All frozen peers must
+    // acknowledge the same nonzero completed-world digest before another tick
+    // can be inspected/consumed. Queued input is not a world completion.
+    bool CompleteGameplay(uint64_t consumed_tick,const std::array<uint8_t,32>& observation_digest);
+    bool gameplay_completion_pending()const;
+    std::optional<uint64_t> verified_gameplay_tick()const;
     void Disconnect();
     RoomState state()const;
     uint16_t port()const;

@@ -15,6 +15,9 @@ struct AllocationTrace {
 AllocationTrace CurrentNativeAllocation();
 void RecordNativeLoadLevel(std::string_view);
 std::array<char,64> CurrentNativeLoadLevel();
+// Native owner-thread load incarnation, including repeated loads of the same
+// destination. Saturates rather than reusing an old incarnation.
+uint64_t CurrentNativeLoadGeneration();
 bool TestAllocationTrace();
 // Diagnostic mode only: deliberately faults inside a tracked allocation to
 // verify the real exception filter. Never called by ordinary gameplay.

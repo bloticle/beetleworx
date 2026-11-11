@@ -1,4 +1,5 @@
 #include "online_actor_jump.h"
+#include "online_retail_jump.h"
 #include "online_actor_frames.h"
 #include "guest_read_batch.h"
 #include "ppc_context.h"
@@ -183,6 +184,7 @@ bool em2::net::ForgetOwnedActorJump(uint64_t peer,uint64_t generation,PPCContext
     std::lock_guard lock(state_mutex);for(auto& state:states)if(state.targets.actor.peer==peer && state.targets.actor.generation==generation){state={};return true;}return false;
 }
 PPC_FUNC_IMPL(sub_82884018){
+    if(em2::net::RetailJumpFixtureStimulus(ctx,base))return;
     if(stimulus && (ctx.lr==0x8287E7C0 || ctx.lr==0x8287E814)){
         if(ctx.r3.u32==stimulus->first)++stimulus->first_count;else if(ctx.r3.u32==stimulus->second)++stimulus->second_count;
         else throw std::logic_error("native owned jump targeted a foreign physics component");

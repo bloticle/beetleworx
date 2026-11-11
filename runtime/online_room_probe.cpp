@@ -31,6 +31,7 @@ REXCVAR_DECLARE(bool,em2_probe_owned_native_player);
 REXCVAR_DEFINE_STRING(em2_room_probe_role,"","Debug","Private native Room loopback probe: host or guest; never a gameplay adapter");
 REXCVAR_DEFINE_STRING(em2_room_probe_invitation_file,"","Debug","Private native Room probe NEW absolute invitation path");
 REXCVAR_DEFINE_INT32(em2_room_probe_expected_players,2,"Debug","Private native Room probe transport participant count 2..16; not playable actor capacity");
+REXCVAR_DEFINE_BOOL(em2_room_probe_gameplay,false,"Debug","Explicit private two-retail-player native gameplay experiment; no public-menu enablement");
 namespace em2::net {
 namespace {
 namespace fs=std::filesystem;
@@ -144,6 +145,7 @@ bool PreparePrivateRoomProbe(const fs::path& executable,const fs::path& content,
         Require(!prepared.load() && (role=="host" || role=="guest"),"Private Room probe role must be host or guest and prepared once");
         const auto count=REXCVAR_GET(em2_room_probe_expected_players);
         Require(count>=2 && count<=16,"Private Room probe expects 2..16 transport participants");
+        Require(!REXCVAR_GET(em2_room_probe_gameplay) || count==2,"Private retail gameplay currently requires exactly two participants");
         Require(REXCVAR_GET(em2_private_profile) && !REXCVAR_GET(em2_user_data_directory).empty(),"Private Room probe requires private_profile and explicit isolated user root");
         Require(REXCVAR_GET(em2_online_auto_continue),"Private Room probe requires native online automatic Continue enabled");
         Require(!REXCVAR_GET(em2_online_menu) && !REXCVAR_GET(em2_online_qa_prelaunch) && REXCVAR_GET(em2_online_qa_role).empty() &&
@@ -235,6 +237,13 @@ bool PreparePrivateRoomProbe(const fs::path& executable,const fs::path& content,
 }
 bool InstallPrivateRoomProbe(){
     Environment environment;if(REXCVAR_GET(em2_room_probe_role).empty())return true;
+    if(REXCVAR_GET(em2_room_probe_gameplay)){
+        if(!prepared.load(std::memory_order_acquire) || !EnableNativeRoomGameplay(0)){
+            REXLOG_ERROR("Private native gameplay adapter configuration failed");return false;
+        }
+        REXLOG_INFO("Private native gameplay adapter configured: actual retail sources/receivers and completed-world proofs required before activation");
+        return true;
+    }
     if(!prepared.load(std::memory_order_acquire) || !NativeRoomActive() || !SetNativeRoomReadinessProbe(ObserveReadiness)){
         REXLOG_ERROR("Private Room probe could not install completed-tick observer on its bound native owner");return false;}
     REXLOG_INFO("Private Room probe installed: completed-tick observation only; gameplay readiness is NEVER asserted");return true;

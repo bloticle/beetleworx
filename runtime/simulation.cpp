@@ -22,6 +22,7 @@
 #include "online_runtime.h"
 #include "online_room_bootstrap.h"
 #include "online_room_runtime.h"
+#include "online_room_gameplay.h"
 #include "world_observation.h"
 #include "native_entity_probe.h"
 #include <rex/cvar.h>
@@ -753,7 +754,7 @@ thread_local em2::SimulationScheduler scheduler;
 thread_local em2::SimulationDebt network_debt;
 double RenderAlpha() {
     const auto& gate=em2::net::GameplayInputGate();
-    return frame_halted || (gate.active() && gate.waiting()) || (!gate.active() && !em2::EffectiveSimulationSpeedPercent())?1.0:scheduler.Alpha();
+    return frame_halted || em2::net::NativeRoomGameplayWaiting() || (gate.active() && gate.waiting()) || (!gate.active() && !em2::EffectiveSimulationSpeedPercent())?1.0:scheduler.Alpha();
 }
 thread_local std::vector<uint32_t> ui_containers;
 
@@ -1256,12 +1257,15 @@ struct CameraMotion {
 void CompleteNetworkObservation(PPCContext& ctx,uint8_t* base) {
     auto& gate=em2::net::GameplayInputGate();
     auto* room=em2::net::CurrentRoomBootstrapGate();
+    auto* gameplay=em2::net::CurrentNativeRoomGameplay();
+    const bool gameplay_report=gameplay && gameplay->active() && gameplay->completion_pending();
     const bool room_report=room && room->active() && room->completion_pending();
+    if(gameplay_report && room_report){gameplay->ObservationFailed();room->ObservationFailed();return;}
     if(room && room->active() && gate.active()){
         room->ObservationFailed();gate.ObservationFailed();return;
     }
     const bool legacy_report=gate.active() && gate.completion_pending();
-    const bool report=room_report || legacy_report;
+    const bool report=room_report || gameplay_report || legacy_report;
     const bool trace=REXCVAR_GET(em2_trace_online_observations) && tick_number%30==0;
     if(!report && !trace) return;
     const auto saved=ctx;const auto mxcsr=_mm_getcsr();
@@ -1278,7 +1282,7 @@ void CompleteNetworkObservation(PPCContext& ctx,uint8_t* base) {
     ctx=saved;_mm_setcsr(mxcsr);
     const bool valid=em2::ReadNativeGameplayObservation(ctx,base,state);
     state.random=random_observation;
-    const auto observed_tick=room_report?room->committed_tick():(legacy_report?gate.committed_tick():tick_number);
+    const auto observed_tick=gameplay_report?gameplay->committed_tick():(room_report?room->committed_tick():(legacy_report?gate.committed_tick():tick_number));
     if(report && valid && state.players[0].mode==0 && state.players[1].mode==0)em2::TraceNativeEntitySnapshot(base,observed_tick);
     const auto digest=valid?em2::net::HashGameplayObservation(observed_tick,state):std::nullopt;
     ctx=saved;_mm_setcsr(mxcsr);
@@ -1311,7 +1315,9 @@ void CompleteNetworkObservation(PPCContext& ctx,uint8_t* base) {
     }
     if(report) {
         if(observed_tick==12 && script_wait_trace_size)LogScriptWaitTrace();
-        if(room_report){
+        if(gameplay_report){
+            if(!digest || !gameplay->Complete(*digest,ctx,base))gameplay->ObservationFailed();
+        }else if(room_report){
             if(!digest)room->ObservationFailed();
             else if(room->Complete(room_ready,*digest) && !room->SetJoining(!em2::NativeCoopReady(base)))room->ObservationFailed();
         }else if(digest) gate.Complete(*digest);else gate.ObservationFailed();
@@ -1413,6 +1419,27 @@ void StartTick(uint8_t* base,bool agreed=false,uint64_t input_tick=0) {
     recording_epoch.store(tick_number,std::memory_order_release);
     in_tick=true;
 }
+
+// A failed native input transaction must not leave a phantom agreed update
+// visible to later render/UI calls. This NEVER runs post-update or completion.
+struct NativeTickAdmissionScope {
+    em2::net::NativeRoomGameplay* gameplay=nullptr;
+    em2::net::RoomBootstrapGate* bootstrap=nullptr;
+    bool legacy=false,completed=false;
+    ~NativeTickAdmissionScope()noexcept{
+        if(completed)return;
+        const auto error=GetLastError();const auto csr=_mm_getcsr();
+        recording_epoch.store(0,std::memory_order_release);
+        in_tick=false;agreed_clock_tick=false;record_random=false;
+        capture_online_random=capture_online_random_owners=capture_script_random_owners=false;
+        try{
+            if(gameplay)gameplay->ObservationFailed();
+            if(bootstrap)bootstrap->ObservationFailed();
+            if(legacy)em2::net::GameplayInputGate().ObservationFailed();
+        }catch(...){/* Keep the original native failure authoritative. */}
+        _mm_setcsr(csr);SetLastError(error);
+    }
+};
 
 void ResetSimulationHistory(PPCContext& ctx,uint8_t* base) {
     em2::ResetCameraPresentation();
@@ -1848,12 +1875,14 @@ PPC_FUNC_IMPL(sub_829ED310) {
     application_delta=PPC_LOAD_U32(arguments.r3.u32+76);
     em2::net::Frame network_frame{};
     em2::net::RoomBootstrapFrame room_frame{};
+    em2::net::RoomFrame gameplay_frame{};
     auto* room=em2::net::CurrentRoomBootstrapGate();
+    auto* gameplay=em2::net::CurrentNativeRoomGameplay();
     const bool room_budget=em2::net::RoomBootstrapActive();
     const bool network_budget=em2::net::GameplayInputGate().active() || room_budget;
-    bool network_tick=false,room_tick=false;
+    bool network_tick=false,room_tick=false,gameplay_tick=false;
     const auto batch=em2::RunSimulationBatch(frame_steps,[&] {
-        network_tick=room_tick=false;
+        network_tick=room_tick=gameplay_tick=false;
         if(em2::net::RoomBootstrapActive()){
             // A worker/current-owner mismatch, terminal state or gameplay
             // cutover cannot accidentally fall through to an offline update.
@@ -1861,8 +1890,11 @@ PPC_FUNC_IMPL(sub_829ED310) {
             if(em2::net::GameplayInputGate().active()){
                 room->ObservationFailed();em2::net::GameplayInputGate().ObservationFailed();return false;
             }
-            room_tick=room->Prepare(room_frame)==em2::net::BootstrapAdmission::Ready;
-            return room_tick;
+            const auto admission=room->Prepare(room_frame);
+            room_tick=admission==em2::net::BootstrapAdmission::Ready;
+            if(admission==em2::net::BootstrapAdmission::Gameplay && gameplay && gameplay->active())
+                gameplay_tick=gameplay->Prepare(ctx,base,gameplay_frame)==em2::net::RoomGameplayAdmission::Ready;
+            return room_tick || gameplay_tick;
         }
         if(room_budget)return false;
         const auto admission=em2::net::GameplayInputGate().Prepare(network_frame);
@@ -1876,6 +1908,7 @@ PPC_FUNC_IMPL(sub_829ED310) {
         // Finish the preceding tick with its original controller frame before
         // publishing the next agreed frame for the native update.
         if(room_tick && !room->Commit(room_frame))return false;
+        if(gameplay_tick && !gameplay->Commit(gameplay_frame,ctx,base)){gameplay->ObservationFailed();return false;}
         if(network_tick && !em2::net::GameplayInputGate().Commit(network_frame)) return false;
         em2::NativeJoinTick join;
         if(room_tick){
@@ -1886,12 +1919,15 @@ PPC_FUNC_IMPL(sub_829ED310) {
         }
         ctx=arguments;
         PPC_STORE_U32(arguments.r3.u32+76,std::bit_cast<uint32_t>(1.f/30.f));
-        StartTick(base,network_tick || room_tick,room_tick?room_frame.tick:network_frame.tick);
+        StartTick(base,network_tick || room_tick || gameplay_tick,gameplay_tick?gameplay_frame.tick:(room_tick?room_frame.tick:network_frame.tick));
+        NativeTickAdmissionScope admission_scope{gameplay_tick?gameplay:nullptr,room_tick?room:nullptr,network_tick};
+        if(gameplay_tick && !gameplay->Deliver(ctx,base)){gameplay->ObservationFailed();return false;}
         if(room_tick)em2::RunNativeSynchronizedJoin(ctx,base,join);
         else if(network_tick)em2::RunNativeSynchronizedJoin(ctx,base,network_frame.players[1].buttons);
         const auto started=Clock::now();
         __imp__sub_829ED310(ctx,base);
         em2::em1::TickArchitectureScripts(ctx,base,std::bit_cast<float>(PPC_LOAD_U32(0x833FCA54)));
+        admission_scope.completed=true;
         MeasureMaximum(em2::maximum_simulation_us,started);
         return true;
     },[&] {
@@ -2267,6 +2303,33 @@ bool TestSimulation() {
     auto check=[&](bool condition,const char* message) {
         if(!condition) { REXLOG_ERROR("Simulation test: {}",message); ok=false; }
     };
+    {
+        struct Restore {
+            bool tick=in_tick,agreed=agreed_clock_tick,random=record_random,trace=capture_online_random,
+                owners=capture_online_random_owners,scripts=capture_script_random_owners;
+            uint64_t epoch=recording_epoch.load();
+            ~Restore(){in_tick=tick;agreed_clock_tick=agreed;record_random=random;capture_online_random=trace;
+                capture_online_random_owners=owners;capture_script_random_owners=scripts;recording_epoch.store(epoch);}
+        } restore;
+        for(bool throwing:{false,true}){
+            unsigned native_updates=0,post_updates=0;bool caught=false;
+            const auto csr=_mm_getcsr();const auto error=GetLastError();
+            try{
+                const auto batch=RunSimulationBatch(1,[]{return true;},[&]{++post_updates;},[&]{
+                    in_tick=agreed_clock_tick=record_random=capture_online_random=capture_online_random_owners=capture_script_random_owners=true;
+                    recording_epoch.store(912);
+                    NativeTickAdmissionScope failed;
+                    if(throwing)throw 7;
+                    return false; // Native input failed before the world update.
+                });
+                check(batch.steps==0 && !batch.finish_pending,"failed delivery cannot invent a completed native world update");
+            }catch(int){caught=true;}
+            check(caught==throwing && native_updates==0 && post_updates==0 && !in_tick && !agreed_clock_tick &&
+                !record_random && !capture_online_random && !capture_online_random_owners && !capture_script_random_owners &&
+                recording_epoch.load()==0 && _mm_getcsr()==csr && GetLastError()==error,
+                "returned/thrown delivery failure clears actual native observation clock without running world/post-update or changing host state");
+        }
+    }
     for(unsigned speed:{0u,25u,50u,100u,200u,800u}){
         SimulationScheduler clock;clock.Advance(0,speed);unsigned steps=0;
         for(int i=0;i<120;++i)steps+=clock.Advance(25000000,speed);

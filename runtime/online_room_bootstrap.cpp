@@ -94,7 +94,8 @@ BootstrapAdmission RoomBootstrapGate::Prepare(RoomBootstrapFrame& output){
     if(em2::SynchronizedControlsGeneration()!=generation_){Stop("The native controls owner was replaced during initialization");return BootstrapAdmission::Stopped;}
     if(room_->identity()!=identity_ || room_->lobby().locked==false || Mask(room_->lobby())!=roster_){Stop("The initialization identity or frozen roster changed");return BootstrapAdmission::Stopped;}
     if(room_->state()==RoomState::Running){
-        if(completion_pending_ || prepared_ || !completed_ || *completed_==UINT64_MAX || room_->next_tick()!=*completed_+1){
+        if(completion_pending_ || prepared_ || !completed_ || *completed_==UINT64_MAX ||
+            (!sampling_rebased_ && room_->next_tick()!=*completed_+1)){
             Stop("Gameplay activation did not follow the completed native tick");return BootstrapAdmission::Stopped;
         }
         if(!sampling_rebased_){

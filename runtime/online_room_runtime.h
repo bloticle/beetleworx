@@ -23,5 +23,8 @@ bool RoomClaimSaveNotice();
 // Owner thread, at a completed boundary only. No probe means NOT ready. May be
 // supplied before gate attachment, or delegated to its boundary-checked setter.
 bool SetNativeRoomReadinessProbe(RoomBootstrapGate::ReadinessProbe);
+// Explicit development gameplay owner; requires the retained frozen two-player
+// Room, native thread and real runtime input system. No implicit demo opt-in.
+bool EnableNativeRoomGameplay(unsigned physical_user);
 bool TestNativeRoomSession();
 }
