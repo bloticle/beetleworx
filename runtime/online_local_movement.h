@@ -5,6 +5,7 @@
 struct PPCContext;
 namespace em2::net {
 struct Pad;
+struct RoomMovement;
 // A local producer lease, not a network actor incarnation or simulation tick.
 struct NativeLocalMovementBinding {
     uint64_t world_epoch=0,producer_generation=0;
@@ -14,6 +15,9 @@ struct NativeLocalMovementBinding {
     std::array<uint32_t,24> action_shape{};
     std::array<uint32_t,14> device_shape{};
     std::array<uint32_t,4> event_shape{};
+    uint32_t reference=0;
+    // Native entity GUID and its exact camera component identities. Never wire data.
+    std::array<uint32_t,7> reference_shape{};
     bool operator==(const NativeLocalMovementBinding&)const=default;
 };
 // Explicit game-thread opt-in after real world admission. Default is unarmed.
@@ -26,20 +30,32 @@ void DisarmNativeLocalMovement();
 bool CaptureNativeLocalMovementBinding(PPCContext&,uint8_t* base,NativeLocalMovementBinding&);
 void ObserveNativeLocalMovementBinding(PPCContext&,uint8_t* base) noexcept;
 bool NativeLocalMovementBindingFor(PPCContext&,uint8_t* base,NativeLocalMovementBinding&);
+// Pre-tick read-only discovery. Rejects ambiguity across default/current events;
+// does not claim that a native dispatch was observed.
+bool DiscoverNativeLocalMovementBinding(PPCContext&,uint8_t* base,NativeLocalMovementBinding&);
 struct NativeLocalMovementDiagnostics {
     uint64_t observations=0,captured=0;
     uint32_t lr=0,listener=0,event=0,action=0,stage=0,best_stage=0;
     uint32_t math_return=0,axis_queries=0;
     float math_x=0,math_y=0;
+    uint64_t discoveries=0;
+    uint32_t discovery_stage=0,discovery_event=0,discovery_count=0,discovery_index=0;
+    uint32_t discovery_uid=0,discovery_candidates=0,discovery_inspect_stage=0;
 };
 // Value snapshot only. Stage100 means binding accepted; stages below100 locate
 // owner/world10, retail20, type30, action40, active event50, device60,
 // axis records70, response80, device history90. Stage1 is dispatch admission.
+// Discovery stages201..225 distinguish its pre-Inspect path; its candidate
+// rejection retains discovery_inspect_stage separately. 225 means success.
 NativeLocalMovementDiagnostics LocalMovementDiagnostics() noexcept;
 // Original native action math only: no event dispatch, actor writes, network
 // submission, camera basis, tick claim or fabricated wire actor_epoch.
 // sampled_native_user must identify the same device used to obtain this Pad.
 bool ProduceNativeLocalMovement(const NativeLocalMovementBinding&,const Pad&,
     PPCContext&,uint8_t* base,NativeActorAction&,unsigned sampled_native_user=0);
+// Ordinary native camera-reference path only. actor_epoch is supplied by the
+// authoritative room spawn lifecycle, never inferred from this local lease.
+bool ProduceNativeLocalRoomMovement(const NativeLocalMovementBinding&,const Pad&,uint64_t actor_epoch,
+    PPCContext&,uint8_t* base,RoomMovement&,unsigned sampled_native_user=0);
 bool TestNativeLocalMovement();
 }

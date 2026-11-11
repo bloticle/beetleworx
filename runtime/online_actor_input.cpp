@@ -2,6 +2,7 @@
 #include "online_actor_reference.h"
 #include "online_actor_frames.h"
 #include "online_actor_death.h"
+#include "online_actor_jump.h"
 #include "guest_read_batch.h"
 #include "ppc_context.h"
 #include <rex/logging.h>
@@ -283,6 +284,36 @@ em2::net::ActorInputResult em2::net::ReplayOwnedActorMovement(uint64_t peer,cons
         for(auto& entry:basis_entries)if(entry.staged && entry.actor.peer==peer && entry.actor.generation==actor.generation && entry.basis.tick==tick)entry.consumed=true;
         throw;
     }
+    return Result::Applied;
+}
+em2::net::ActorInputResult em2::net::detail::DispatchOwnedActorJump(uint64_t peer,const em2::net::NativeActorJump& command,PPCContext& ctx,uint8_t* base){
+    // Preserve the exact caller bytes, including ABI padding. This backend is
+    // callable only during the Jump module's private, exact-command permit.
+    struct Caller {PPCContext& ctx;std::array<uint8_t,sizeof(PPCContext)> saved;Environment environment;
+        explicit Caller(PPCContext& value):ctx(value){std::memcpy(saved.data(),&ctx,sizeof(ctx));}
+        ~Caller(){std::memcpy(&ctx,saved.data(),sizeof(ctx));}} preserve(ctx);
+    if(!OwnedJumpDispatchAuthorized(peer,command))return Result::InvalidContext;
+    if(!Owner())return Result::WrongThread;
+    if(replay || basis_update)return Result::Nested;
+    const auto actor=ByPeer(peer);if(!actor)return Result::Unregistered;
+    if(!command.generation || command.generation!=actor->generation || !Current(*actor,ctx,base))return Result::Stale;
+    if(!actor->enabled)return Result::Disabled;
+    const auto targets=ValidateOwnedJumpTargets(peer,command,ctx,base);if(targets!=Result::Applied)return targets;
+    uint32_t motion=0,reference=0;const auto context=BasisContext(*actor,ctx,base,motion,reference);if(context!=Result::Applied)return context;
+    // A premature Jump must leave a valid pending stage available for Movement.
+    const auto stage=BasisForComponent(actor->controller+24,ctx,base,false);
+    if(!stage || !stage->input_claimed || stage->consumed || stage->basis.tick!=command.tick ||
+       stage->actor.generation!=command.generation || stage->motion!=motion || stage->reference!=reference)return Result::InvalidTick;
+    const Replay state{*actor};ReplayScope scope(state);
+    ctx.r3.u64=actor->listener;ctx.r4.u64=command.action.event;ctx.r5.u64=command.action.action;
+    ctx.f1.f64=command.action.x;ctx.f2.f64=command.action.y;
+    try{__imp__sub_82A3C930(ctx,base);}
+    catch(...){
+        std::lock_guard lock(mutex);
+        for(auto& entry:basis_entries)if(entry.staged && entry.actor.peer==peer && entry.actor.generation==command.generation && entry.basis.tick==command.tick)entry.consumed=true;
+        throw;
+    }
+    // Jump input does not consume the independently staged view/motion update.
     return Result::Applied;
 }
 em2::net::ActorInputResult em2::net::ReplayOwnedActorAction(uint64_t peer,const Action& action,const ActorLookBasis& basis,PPCContext& ctx,uint8_t* base){
@@ -784,6 +815,11 @@ bool em2::net::TestOwnedActorInput(){
             if(!TestOwnedMovementFrames(ctx,base,a.peer,b.peer,FixtureBoundedOwnedController))return false;
         }
         if(!TestOwnedActorDeaths(ctx,base,a.peer,b.peer))return false;
+        {
+            struct PreserveJumpFixtureStages {BasisClock clock=basis_clock;decltype(basis_entries) entries=basis_entries;
+                ~PreserveJumpFixtureStages(){basis_clock=clock;basis_entries=entries;}} preserve_jump_fixture_stages;
+            if(!TestOwnedActorJumps(ctx,base,a.peer,b.peer))return false;
+        }
         // Restore initial per-peer cache values through ORIGINAL base callback
         // for the following historical lifecycle assertions, not manual writes.
         if(NativeCallbackFixture(a.peer,first,peer_a,ctx,base,FixtureBase)!=Result::Applied)return false;

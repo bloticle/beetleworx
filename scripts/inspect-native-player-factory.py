@@ -70,6 +70,37 @@ def inspect(capture, include_components=False, include_input=False):
         def text(address):
             return read(address, 96).split(b'\0', 1)[0].decode('ascii')
 
+        def controller_tasks(controller, entity):
+            collection = controller + 156
+            buckets, bucket_count = word(collection + 16), word(collection + 20)
+            dispatch, dispatch_count = word(collection + 36), word(collection + 40)
+            if bucket_count > 4096 or dispatch_count > 128:
+                raise RuntimeError('Unbounded native task collection')
+            bucket_bytes = read(buckets, bucket_count * 4) if bucket_count else b''
+            dispatch_bytes = read(dispatch, dispatch_count * 4) if dispatch_count else b''
+            dispatch_tasks = set(struct.unpack('>' + str(dispatch_count) + 'I', dispatch_bytes))
+            visited, named = set(), []
+            for node in struct.unpack('>' + str(bucket_count) + 'I', bucket_bytes):
+                while node:
+                    if node in visited or len(visited) >= 256:
+                        raise RuntimeError('Cyclic or oversized native task map')
+                    visited.add(node)
+                    key, task, following = struct.unpack('>3I', read(node, 12))
+                    table, owner, flags = struct.unpack('>3I', read(task, 12))
+                    named.append(dict(name=text(key), task=f'{task:08X}', vtable=f'{table:08X}',
+                        owner=f'{owner:08X}', owner_matches_entity=owner == entity,
+                        flags=f'{flags:08X}', in_dispatch=task in dispatch_tasks,
+                        start=f'{word(table + 4):08X}', stop=f'{word(table + 8):08X}',
+                        on_action=f'{word(table + 40):08X}'))
+                    node = following
+            if (word(collection + 16) != buckets or word(collection + 20) != bucket_count
+                    or word(collection + 36) != dispatch or word(collection + 40) != dispatch_count
+                    or (bucket_count and read(buckets, bucket_count * 4) != bucket_bytes)
+                    or (dispatch_count and read(dispatch, dispatch_count * 4) != dispatch_bytes)):
+                raise RuntimeError('Native task collection changed during snapshot')
+            return dict(collection=f'{collection:08X}', bucket_count=bucket_count,
+                        dispatch_count=dispatch_count, named=named)
+
         registry = word(0x833DA7E4)
         if word(registry + 4) != 0x827B58D0 or word(registry + 8) != 0x82A69948:
             raise RuntimeError('Unknown native entity registry')
@@ -126,6 +157,9 @@ def inspect(capture, include_components=False, include_input=False):
                     actor['controller_views'][label] = view
                 camera = entities.get(camera_handles[slot], 0)
                 actor['camera_entity'] = f'{camera:08X}'
+                mickey_view = actor['controller_views']['mickey']
+                if include_input and mickey_view['slot'] != 255:
+                    actor['input_tasks'] = controller_tasks(int(mickey_view['object'], 16), entity)
                 if camera:
                     actor['camera_component_count'] = word(camera + 44)
                     actor['camera_component_vtables'] = [f'{word(word(word(camera + 36) + i * 4)):08X}' for i in range(min(word(camera + 44), 8))]
