@@ -1,8 +1,6 @@
 # Native actors for larger online sessions
 
-Status: investigation, not implemented multiplayer capacity. The current
-transport and gameplay adapter still support two players. A larger roster alone
-does not create controllable actors.
+Status: development, not accepted sixteen-player gameplay. The current in-game route still uses the two-player Session adapter. The new Room transport has real sixteen-peer tests and feeds typed frames into the native owned-actor coordinator; it has not replaced the in-game startup and controller path. A larger roster alone does not create controllable actors.
 
 ## Online companion policy
 
@@ -206,3 +204,12 @@ Two private, input-free live checks ran in `tcy_autotopia_visit1.sectiona_first`
 - Successful registration/admission retained a real movement reference. The extra Mickey had one scene root and animation graph, remained grounded at health 5 for the five-second hold, released the reference, and completed native removal with its handle gone. Both original players stayed at health 5 and their handles remained unchanged.
 
 Evidence: private capture `private-gpu-profile-20261111-071443-2d3eedbd`, `game.log` for forced rollback and `game-reference-fixed.log` for successful lifetime. Successful live executable SHA256: `8A260B821342604CAC67F18DFF102DF23EBDE698E91F2EF3174FD3489D357703`. No movement/camera input or screenshots were sent. These checks establish one idle owned actor's lifecycle, not online movement or sixteen-player synchronization.
+
+
+## Room frame integration
+
+`online_room.cpp` now supports sixteen actual TCP peers with host-assigned identities, authoritative roster/start, and identical contiguous input frames. `online_actor_frames.cpp` preflights all owned actors before native action delivery, validates logical spawn incarnations separately from guest handles, and requires explicit native interpreted movement/view data. The real loopback-to-native fixture receives Room frames and executes the original action and controller callbacks for two owned actors, including different view directions and neutral release; its controlled continuation sink stops before physical contacts.
+
+The adapter is not yet connected to normal lobby startup/world stepping. Native local action production, shared checkpoint installation for all guests, actor spawning/respawn, additional actions and Oswald, complete world synchronization and Internet relay remain required. The intended native delivery point is after synchronized join and before original world update `829ED310`; all-peer preflight must happen before committing that world tick.
+
+The extra-Mickey death audit located original event handler `82A38FC8`: event61 `ReloadCheckpoint` calls global fade `82A010E8` at return `82A39504` with hardcoded player0. That event must be routed to an owned actor lifecycle transaction before the global fade loses the dying actor identity. No death interception or respawn implementation is claimed by the current room/locomotion work.

@@ -1,5 +1,6 @@
 #include "online_actor_input.h"
 #include "online_actor_reference.h"
+#include "online_actor_frames.h"
 #include "guest_read_batch.h"
 #include "ppc_context.h"
 #include <rex/logging.h>
@@ -174,7 +175,7 @@ void ApplyBasisMotion(PPCContext& ctx,uint8_t* base,PPCFunc* native){
     PPC_STORE_U32(argument+12,0);
     native(ctx,base);
 }
-Result Admission(uint64_t peer,const Action& action,const em2::net::ActorLookBasis& basis,PPCContext& ctx,uint8_t* base,Actor& actor){
+Result AdmitNativeActorAction(uint64_t peer,const Action& action,const em2::net::ActorLookBasis& basis,PPCContext& ctx,uint8_t* base,Actor& actor){
     auto found=ByPeer(peer);if(!found)return Result::Unregistered;actor=*found;
     if(!Owner())return Result::WrongThread;
     if(!Current(actor,ctx,base))return Result::Stale;
@@ -184,10 +185,26 @@ Result Admission(uint64_t peer,const Action& action,const em2::net::ActorLookBas
     if(!BasisValid(actor,basis))return Result::InvalidBasis;
     return Result::Applied;
 }
+Result MovementAdmission(uint64_t peer,const Action& action,PPCContext& ctx,uint8_t* base,Actor& actor,uint32_t& motion,uint32_t& reference){
+    const auto found=ByPeer(peer);if(!found)return Result::Unregistered;actor=*found;
+    if(!Owner())return Result::WrongThread;
+    if(replay || basis_update)return Result::Nested;
+    if(!Current(actor,ctx,base))return Result::Stale;
+    if(!actor.enabled)return Result::Disabled;
+    if(!Readable(action.action,4,base) || !std::isfinite(action.x) || !std::isfinite(action.y) ||
+       std::abs(action.x)>1 || std::abs(action.y)>1)return Result::InvalidInput;
+    const auto uid=PPC_LOAD_U32(action.action),movement=PPC_LOAD_U32(0x833DAEB8);
+    if(!movement || uid!=movement)return Result::UnsupportedAction;
+    // These native Mickey tool/brush branches precede its ordinary Movement
+    // branch and may affect shared resources. Never admit aliased authored IDs.
+    for(unsigned offset:{280u,284u,288u,292u,296u,300u})
+        if(PPC_LOAD_U32(actor.listener+offset)==uid)return Result::UnsupportedAction;
+    return BasisContext(actor,ctx,base,motion,reference);
+}
 // Test-only ingress to prove original native callback isolation before a
 // production motion/basis route exists. It is not exposed in the public API.
 Result NativeCallbackFixture(uint64_t peer,const Action& action,const em2::net::ActorLookBasis& basis,PPCContext& ctx,uint8_t* base,PPCFunc* callback){
-    ContextScope preserve(ctx);Actor actor;const auto admitted=Admission(peer,action,basis,ctx,base,actor);
+    ContextScope preserve(ctx);Actor actor;const auto admitted=AdmitNativeActorAction(peer,action,basis,ctx,base,actor);
     if(admitted!=Result::Applied)return admitted;
     Replay state{actor};ReplayScope scoped(state);
     ctx.r3.u64=actor.listener;ctx.r4.u64=action.event;ctx.r5.u64=action.action;ctx.f1.f64=action.x;ctx.f2.f64=action.y;
@@ -230,29 +247,19 @@ em2::net::ActorInputResult em2::net::PrepareOwnedActorBasis(uint64_t peer,const 
     if(free==basis_entries.end())return Result::InvalidContext;
     *free={*actor,basis,motion,reference,true,false};return Result::Applied;
 }
+em2::net::ActorInputResult em2::net::ValidateOwnedActorMovement(uint64_t peer,const Action& action,PPCContext& ctx,uint8_t* base){
+    ContextScope preserve(ctx);Actor actor;uint32_t motion=0,reference=0;
+    return MovementAdmission(peer,action,ctx,base,actor,motion,reference);
+}
 em2::net::ActorInputResult em2::net::ReplayOwnedActorMovement(uint64_t peer,const Action& action,uint64_t tick,PPCContext& ctx,uint8_t* base){
-    ContextScope preserve(ctx);
-    const auto actor=ByPeer(peer);if(!actor)return Result::Unregistered;
-    if(!Owner())return Result::WrongThread;
-    if(replay || basis_update)return Result::Nested;
-    if(!Current(*actor,ctx,base))return Result::Stale;
-    if(!actor->enabled)return Result::Disabled;
-    if(!Readable(action.action,4,base) || !std::isfinite(action.x) || !std::isfinite(action.y) ||
-       std::abs(action.x)>1 || std::abs(action.y)>1)return Result::InvalidInput;
-    const auto uid=PPC_LOAD_U32(action.action),movement=PPC_LOAD_U32(0x833DAEB8);
-    if(!movement || uid!=movement)return Result::UnsupportedAction;
-    // These native Mickey tool/brush branches precede its ordinary Movement
-    // branch and may affect shared resources. Never admit aliased authored IDs.
-    for(unsigned offset:{280u,284u,288u,292u,296u,300u})
-        if(PPC_LOAD_U32(actor->listener+offset)==uid)return Result::UnsupportedAction;
-    uint32_t motion=0,reference=0;
-    const auto context=BasisContext(*actor,ctx,base,motion,reference);if(context!=Result::Applied)return context;
-    const auto stage=BasisForComponent(actor->controller+24,ctx,base,false);
+    ContextScope preserve(ctx);Actor actor;uint32_t motion=0,reference=0;
+    const auto admission=MovementAdmission(peer,action,ctx,base,actor,motion,reference);if(admission!=Result::Applied)return admission;
+    const auto stage=BasisForComponent(actor.controller+24,ctx,base,false);
     if(!stage || stage->basis.tick!=tick || stage->motion!=motion || stage->reference!=reference)return Result::InvalidTick;
     {
         std::lock_guard lock(mutex);bool claimed=false;
         for(auto& entry:basis_entries)if(entry.staged && entry.actor.peer==peer &&
-            entry.actor.generation==actor->generation && entry.basis.tick==tick && !entry.consumed && !entry.input_claimed){
+            entry.actor.generation==actor.generation && entry.basis.tick==tick && !entry.consumed && !entry.input_claimed){
             entry.input_claimed=true;claimed=true;break;
         }
         if(!claimed)return Result::InvalidTick;
@@ -260,19 +267,19 @@ em2::net::ActorInputResult em2::net::ReplayOwnedActorMovement(uint64_t peer,cons
     // Claim before invoking native code: exceptions must never permit duplicate
     // native action/FSM side effects. Original derived handler retains global,
     // individual, lock, task-consumption and special-mode input gates.
-    const Replay state{*actor};ReplayScope scope(state);
-    ctx.r3.u64=actor->listener;ctx.r4.u64=action.event;ctx.r5.u64=action.action;
+    const Replay state{actor};ReplayScope scope(state);
+    ctx.r3.u64=actor.listener;ctx.r4.u64=action.event;ctx.r5.u64=action.action;
     ctx.f1.f64=action.x;ctx.f2.f64=action.y;
     try{__imp__sub_82A3C930(ctx,base);}
     catch(...){
         std::lock_guard lock(mutex);
-        for(auto& entry:basis_entries)if(entry.staged && entry.actor.peer==peer && entry.actor.generation==actor->generation && entry.basis.tick==tick)entry.consumed=true;
+        for(auto& entry:basis_entries)if(entry.staged && entry.actor.peer==peer && entry.actor.generation==actor.generation && entry.basis.tick==tick)entry.consumed=true;
         throw;
     }
     return Result::Applied;
 }
 em2::net::ActorInputResult em2::net::ReplayOwnedActorAction(uint64_t peer,const Action& action,const ActorLookBasis& basis,PPCContext& ctx,uint8_t* base){
-    Environment preserve;Actor actor;const auto admitted=Admission(peer,action,basis,ctx,base,actor);
+    Environment preserve;Actor actor;const auto admitted=AdmitNativeActorAction(peer,action,basis,ctx,base,actor);
     if(admitted!=Result::Applied)return admitted;
     if(PPC_LOAD_U32(action.action)!=PPC_LOAD_U32(0x833DAEB8))return Result::UnsupportedAction;
     // Even an orthonormal peer basis is NOT permission to let the later native
@@ -322,6 +329,15 @@ void FixtureActionState(PPCContext& ctx,uint8_t* base){
 }
 struct WorldVectorCaptured {};
 struct ControllerUpdateStopped {};
+void FixtureBoundedOwnedController(PPCContext& ctx,uint8_t* base){
+    ContextScope preserve(ctx);
+    try{sub_827835A8(ctx,base);}
+    catch(const ControllerUpdateStopped&){
+        if(basis_update || replay)throw std::logic_error("bounded owned controller leaked native input/basis scope");
+        return;
+    }
+    throw std::logic_error("bounded owned controller did not reach the native continuation sink");
+}
 void FixtureControllerFrameEnd(PPCContext& ctx,uint8_t*){
     if(ctx.lr!=0x82783834)throw std::runtime_error("unexpected native controller continuation");
     throw ControllerUpdateStopped{};
@@ -667,6 +683,15 @@ bool em2::net::TestOwnedActorInput(){
         PPC_STORE_U32(fsm_table+28,uint32_t(PPC_CODE_BASE)+24);
         PPC_STORE_U32(0x833DF47C,0x43000);PPC_STORE_U32(0x43000+48,0x43100);PPC_STORE_U32(0x43100+24,0);
         PPC_STORE_U32(0x44000,0x44100);PPC_STORE_U32(0x44200,0x44100);PPC_STORE_U32(0x44100+40,uint32_t(PPC_CODE_BASE)+32);
+        std::array<uint8_t,800> preflight_actor_a,preflight_actor_b;
+        std::memcpy(preflight_actor_a.data(),base+a.controller,800);std::memcpy(preflight_actor_b.data(),base+b.controller,800);
+        const auto preflight_context=ctx;const auto preflight_tick=basis_clock.tick;
+        auto input_claim_count=[](){return std::count_if(basis_entries.begin(),basis_entries.end(),[](const BasisEntry& entry){return entry.input_claimed;});};
+        const auto preflight_claims=input_claim_count();
+        if(!check(ValidateOwnedActorMovement(a.peer,first,ctx,base)==Result::Applied && ValidateOwnedActorMovement(b.peer,second,ctx,base)==Result::Applied &&
+            ValidateOwnedActorMovement(a.peer,first,ctx,base)==Result::Applied && preflight_tick==basis_clock.tick && preflight_claims==input_claim_count() &&
+            !std::memcmp(&preflight_context,&ctx,sizeof(ctx)) && !std::memcmp(preflight_actor_a.data(),base+a.controller,800) &&
+            !std::memcmp(preflight_actor_b.data(),base+b.controller,800),"all-peer Movement preflight is repeatable and does not stage, claim, deliver input or change native actor state"))return false;
         uint64_t input_tick=100;
         auto stage=[&](const Actor& actor,ActorLookBasis& basis){basis.tick=++input_tick;
             return BeginOwnedActorBasisTick(registry,input_tick,ctx,base) && PrepareOwnedActorBasis(actor.peer,basis,ctx,base)==Result::Applied;};
@@ -693,13 +718,14 @@ bool em2::net::TestOwnedActorInput(){
         bool aliases_rejected=true;
         for(unsigned offset:{280u,284u,288u,292u,296u,300u}){
             if(!stage(a,peer_a))return false;const auto previous=PPC_LOAD_U32(a.listener+offset);PPC_STORE_U32(a.listener+offset,PPC_LOAD_U32(action));
-            aliases_rejected &= deliver(a,first)==Result::UnsupportedAction;PPC_STORE_U32(a.listener+offset,previous);
+            aliases_rejected &= ValidateOwnedActorMovement(a.peer,first,ctx,base)==Result::UnsupportedAction && deliver(a,first)==Result::UnsupportedAction;PPC_STORE_U32(a.listener+offset,previous);
         }
         if(!check(aliases_rejected,"all six authored tool-action UID aliases reject before shared-resource branches"))return false;
         if(!stage(a,peer_a))return false;
         PPC_STORE_U8(0x26000+102,1);
+        const auto pause_preflight=ValidateOwnedActorMovement(a.peer,first,ctx,base);
         const auto pause_result=deliver(a,first);PPC_STORE_U8(0x26000+102,0);
-        if(!check(pause_result==Result::InvalidContext && deliver(a,first)==Result::Applied,"paused world rejects production admission without consuming its pending input"))return false;
+        if(!check(pause_preflight==Result::InvalidContext && pause_result==Result::InvalidContext && deliver(a,first)==Result::Applied,"paused world rejects production admission without consuming its pending input"))return false;
         if(!stage(a,peer_a))return false;PPC_STORE_U8(a.controller+700,1);
         const auto force_zero=deliver(a,first);PPC_STORE_U8(a.controller+700,0);
         if(!check(force_zero==Result::Applied && value(a.listener+168)==0 && value(a.listener+172)==0,
@@ -745,6 +771,11 @@ bool em2::net::TestOwnedActorInput(){
         if(!check(input_thrown && !replay && !std::memcmp(&exception_context,&ctx,sizeof(ctx)) && deliver(a,first)==Result::InvalidTick &&
             update(a) && basis_value(0x35000)==std::array<float,3>{0,0,1},
             "derived native input exception restores context/scope and retires both input and prepared motion admission"))return false;
+        {
+            struct PreserveFixtureStages {BasisClock clock=basis_clock;decltype(basis_entries) entries=basis_entries;
+                ~PreserveFixtureStages(){basis_clock=clock;basis_entries=entries;}} preserve_fixture_stages;
+            if(!TestOwnedMovementFrames(ctx,base,a.peer,b.peer,FixtureBoundedOwnedController))return false;
+        }
         // Restore initial per-peer cache values through ORIGINAL base callback
         // for the following historical lifecycle assertions, not manual writes.
         if(NativeCallbackFixture(a.peer,first,peer_a,ctx,base,FixtureBase)!=Result::Applied)return false;

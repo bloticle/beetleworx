@@ -482,3 +482,5 @@ target_sources(EM2Recomp PRIVATE online_actor_input.cpp)
 target_sources(EM2Recomp PRIVATE online_name_input.cpp)
 
 target_sources(EM2Recomp PRIVATE online_actor_reference.cpp)
+
+target_sources(EM2Recomp PRIVATE online_room.cpp online_actor_frames.cpp)

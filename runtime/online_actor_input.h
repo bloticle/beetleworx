@@ -37,6 +37,9 @@ bool OwnedActorInputFor(uint64_t peer,PPCContext&,uint8_t* base,OwnedActorInput&
 // right is consistency metadata, never a replacement native lateral axis.
 bool BeginOwnedActorBasisTick(uint32_t registry,uint64_t tick,PPCContext&,uint8_t* base);
 ActorInputResult PrepareOwnedActorBasis(uint64_t peer,const ActorLookBasis&,PPCContext&,uint8_t* base);
+// Read-only all-peer preflight; same native context/UID/ownership admission as
+// ReplayOwnedActorMovement, but no staging, tick claim or native input delivery.
+ActorInputResult ValidateOwnedActorMovement(uint64_t peer,const NativeActorAction&,PPCContext&,uint8_t* base);
 // Coordinator contract: EVERY admitted tick supplies one native Movement action,
 // including neutral, BEFORE the actor's native controller update. Missing peer
 // input means wait at the agreed world barrier, never advance with old caches.
