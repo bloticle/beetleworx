@@ -480,10 +480,10 @@ PPC_FUNC_IMPL(sub_82A5D278) {
         struct Restore {unsigned csr=_mm_getcsr();DWORD error=GetLastError();
             ~Restore(){_mm_setcsr(csr);SetLastError(error);}}restore;
         try {
-            static thread_local std::array<uint64_t,16> seen{};
-            const auto key=(uint64_t(ctx.r3.u32)<<32)|uint32_t(ctx.lr);
+            static thread_local std::array<std::array<uint32_t,3>,32> seen{};
+            const std::array<uint32_t,3> key{ctx.r3.u32,uint32_t(ctx.lr),ctx.r5.u32};
             if(std::find(seen.begin(),seen.end(),key)==seen.end()) {
-                const auto free=std::find(seen.begin(),seen.end(),uint64_t(0));
+                const auto free=std::find(seen.begin(),seen.end(),std::array<uint32_t,3>{});
                 if(free!=seen.end()) {
                     *free=key;
                     REXLOG_INFO("Native normal-camera look listener: mode {:08X}, caller {:08X}, event {:08X}, user {:08X}, axes {:.9f}/{:.9f}",
