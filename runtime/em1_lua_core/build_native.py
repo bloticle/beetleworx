@@ -7,7 +7,7 @@ import subprocess
 import sys
 
 cargo, manifest, destination = sys.argv[1:]
-process = subprocess.Popen([cargo, 'build', '--offline', '--locked', '--release',
+process = subprocess.Popen([cargo, 'build', '--locked', '--release',
     '--manifest-path', manifest, '--message-format=json'], stdout=subprocess.PIPE,
     text=True, encoding='utf-8')
 libraries = set()

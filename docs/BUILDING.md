@@ -15,6 +15,8 @@ $sdk = 'C:\SDKs\rexglue-sdk'
 
 Use your own extracted Xbox 360 disc files. The folder must contain `default.xex`, `ConfigFiles.ini`, and `packfiles`. The scripts generate translated code and menu patches locally. The optional local EMR animation GLB is used if present. Source builds without it use retail animations. Keep the extracted game folder in place because the development build links to its files.
 
+The first build downloads the Rust dependencies pinned in `Cargo.lock`. Later builds can use the Cargo cache; set `CARGO_NET_OFFLINE=true` if you need an offline build after those dependencies are cached.
+
 The build also generates renderer test inputs locally. The clear-shader fixture extracts its shader from the decoded executable and creates rectangle geometry from dimensions.
 
 The build checks the decoded executable and import layout before generating code. The supplied USA/Europe disc was verified to contain the supported executable. An executable with a different layout needs its own port of the native hooks and address mappings. The generated Windows executable checks that it is paired with the Xbox executable used for translation.
