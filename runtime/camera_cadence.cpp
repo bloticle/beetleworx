@@ -38,7 +38,7 @@ REXCVAR_DEFINE_BOOL(em2_trace_camera_background,false,"Debug","Trace-only neutra
 REXCVAR_DECLARE(bool,em2_trace_camera);
 
 namespace {
-struct TestAdmission {bool permitted=true,neutral=true,background=false;};
+struct TestAdmission {bool permitted=true,sample_available=true,background=false;em2::LiveLookInput input{};};
 thread_local const TestAdmission* test_admission=nullptr;
 enum class Admission {None,Focused,BackgroundTrace};
 thread_local bool camera_input_allowed=true;
@@ -144,17 +144,21 @@ struct FreshLook {
 };
 bool SampleFreshLook(uint32_t mode,uint8_t* base,FreshLook& result){
     result={};
-    if(test_admission)return test_admission->neutral;
-    auto* kernel=rex::kernel::kernel_state();auto* input=kernel?kernel->input_system():nullptr;
-    if(!input || !em2::SampleLiveLook(*input,0,result.input))return false;
+    if(test_admission){
+        if(!test_admission->sample_available)return false;
+        result.input=test_admission->input;
+    }else{
+        auto* kernel=rex::kernel::kernel_state();auto* input=kernel?kernel->input_system():nullptr;
+        if(!input || !em2::SampleLiveLook(*input,0,result.input))return false;
+    }
     em2::NativeCameraLookBinding binding;
     if(em2::NativeCameraLookBindingFor(mode,base,binding) && GenericLookAction(mode,binding.action,base)){
         result.binding=binding;return true;
     }
-    if(result.input.x || result.input.y)return false;
-    // Without a verified continuous action, retain any native D-pad or other
-    // cached intent through the normal simulation path instead of erasing it.
-    for(unsigned offset:{268u,272u,280u,284u})if(PPC_LOAD_U32(mode+offset))return false;
+    // Cursor-style Rotation has native event generation on the world clock.
+    // Continue integrating that untouched cached intent at the view rate;
+    // never substitute the differently curved RotationFixed stick action or
+    // switch the camera clock just because the physical stick is nonzero.
     return true;
 }
 void DispatchFreshLook(PPCContext& ctx,uint8_t* base,uint32_t mode,const em2::NativeCameraLookResult& look,
@@ -496,13 +500,30 @@ bool em2::TestCameraPresentation(){
     try{RenderPresentationCamera(update,base,.75);return false;}catch(const std::runtime_error&){}
     if(!check(!cadence.ready && !cadence.replaying && !std::memcmp(&saved,&update,sizeof(update)) && _mm_getcsr()==csr && GetLastError()==error && PPC_LOAD_U32(0x833FCA54)==delta,
         "native callback failure restores caller, clock and recursion scopes and drops retained ownership"))return false;
-    setup();admission.background=true;admission.neutral=false;update=original;
+    setup();admission.background=true;admission.sample_available=false;update=original;
     BeginFrame(true,true,60,1./60);HandleCameraPresentationUpdate(update,base,FixtureCameraUpdate);
     cadence.targets.Capture(target,1);cadence.target=target;cadence.target_tick=1;
     BeginFrame(true,true,60,1./60);RenderPresentationCamera(update,base,.5);
     if(!check(camera_fixture.calls==2 && !camera_fixture.input_allowed && CameraPresentationInputAllowed(),
         "traced neutral background replay bypasses SDK sampling and scopes mouse consumption off without leaking that state"))return false;
-    admission.background=false;admission.neutral=true;
+    admission.background=false;admission.sample_available=true;
+    setup();admission.input={25000,-12000};update=original;
+    const std::array<uint32_t,4> cached_intent{0x3E800000,0xBF000000,0x3F400000,0xBF800000};
+    unsigned cache_index=0;for(unsigned offset:{268u,272u,280u,284u})PPC_STORE_U32(mode+offset,cached_intent[cache_index++]);
+    FreshLook sampled;
+    if(!check(SampleFreshLook(mode,base,sampled) && sampled.input==admission.input && !sampled.binding,
+        "a valid nonzero pad sample keeps native cursor-style input when no fresh direct-stick action is eligible"))return false;
+    BeginFrame(true,true,60,1./60);HandleCameraPresentationUpdate(update,base,FixtureCameraUpdate);
+    cadence.targets.Capture(target,1);cadence.target=target;cadence.target_tick=1;
+    for(unsigned frame=1;frame<=60;++frame){
+        BeginFrame(true,true,60,1./60);PPC_STORE_U32(0x833FCA4C,std::bit_cast<uint32_t>(float(1.+double(frame)/60)));
+        update=original;RenderPresentationCamera(update,base,.5);
+    }
+    cache_index=0;bool caches_unchanged=true;
+    for(unsigned offset:{268u,272u,280u,284u})caches_unchanged&=PPC_LOAD_U32(mode+offset)==cached_intent[cache_index++];
+    if(!check(cadence.ready && camera_fixture.calls==61 && caches_unchanged,
+        "cursor-style pad movement retains 60 native camera updates without erasing, remapping or redispatching cached native look input"))return false;
+    admission.input={};
     for(unsigned guard=0;guard<7;++guard){
         setup();update=original;BeginFrame(true,true,60,1./60);HandleCameraPresentationUpdate(update,base,FixtureCameraUpdate);
         if(guard==0)BeginFrame(false,true,60,1./60);
@@ -511,8 +532,8 @@ bool em2::TestCameraPresentation(){
         if(guard==3)BeginFrame(true,true,60,.3);
         if(guard==4)BeginFrame(true,true,60,0);
         if(guard==5){admission.permitted=false;BeginFrame(true,true,60,1./60);RenderPresentationCamera(update,base,.5);admission.permitted=true;}
-        if(guard==6){admission.neutral=false;BeginFrame(true,true,60,1./60);RenderPresentationCamera(update,base,.5);admission.neutral=true;}
-        if(!check(!cadence.ready && !PresentationOwnsCameraNode(0x8000),"disable, native timing, cap, stall, pause, focus and unverified analog intent release camera ownership"))return false;
+        if(guard==6){admission.sample_available=false;BeginFrame(true,true,60,1./60);RenderPresentationCamera(update,base,.5);admission.sample_available=true;}
+        if(!check(!cadence.ready && !PresentationOwnsCameraNode(0x8000),"disable, native timing, cap, stall, pause, focus and unavailable input samples release camera ownership"))return false;
     }
     REXLOG_INFO("Native presentation camera passed {} ownership/roster, actual registry, 40/60/90/120/144/240-Hz cadence, target-phase, timestamp, native look dispatch, discrete-action exclusion, caller/clock, nesting and unwind checks; focused input feel still requires gameplay validation",checks);
     return true;
