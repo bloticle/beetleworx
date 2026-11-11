@@ -22,3 +22,9 @@ The build also generates renderer test inputs locally. The clear-shader fixture 
 The build checks the decoded executable and import layout before generating code. The supplied USA/Europe disc was verified to contain the supported executable. An executable with a different layout needs its own port of the native hooks and address mappings. The generated Windows executable checks that it is paired with the Xbox executable used for translation.
 
 The Windows executable is `build/runtime23/beetleworx.exe`. Its saves and settings are in `build/runtime23/user_data`.
+
+Run the tool and runtime regression tests with the same game and SDK directories:
+
+```powershell
+./scripts/test.ps1 -GameDirectory $game -RexSdk $sdk
+```
