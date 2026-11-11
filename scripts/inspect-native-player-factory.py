@@ -7,13 +7,16 @@ import argparse
 import ctypes as c
 import hashlib
 import json
+import math
 import struct
 from datetime import datetime, timezone
 from pathlib import Path
 from live_guest_base import resolve_guest_base
 
 
-def inspect(capture, include_components=False, include_input=False, include_initialization=False):
+def inspect(capture, include_components=False, include_input=False, include_initialization=False, all_input_actions=False):
+    if all_input_actions and (not include_input or include_initialization):
+        raise ValueError('--all-input-actions requires --include-input and cannot be combined with --include-initialization')
     meta = json.loads((capture / 'process.json').read_text(encoding='utf-8-sig'))
     kernel = c.WinDLL('kernel32', use_last_error=True)
     kernel.OpenProcess.argtypes = [c.c_uint32, c.c_bool, c.c_uint32]
@@ -69,6 +72,21 @@ def inspect(capture, include_components=False, include_input=False, include_init
 
         def text(address):
             return read(address, 96).split(b'\0', 1)[0].decode('ascii')
+
+        def optional_text(address):
+            if not address:
+                return dict(text=None, error='null UID')
+            try:
+                data = read(address, 96)
+                if b'\0' not in data:
+                    return dict(text=None, error='no terminator within 96 bytes', hex=data.hex())
+                return dict(text=data.split(b'\0', 1)[0].decode('ascii'))
+            except (RuntimeError, UnicodeError) as exc:
+                return dict(text=None, error=str(exc))
+
+        def float_word(data):
+            value = struct.unpack('>f', data)[0]
+            return dict(bits=data.hex(), finite=math.isfinite(value), value=value if math.isfinite(value) else None)
 
         if include_initialization:
             before = read(0x833D0098, 0x324)
@@ -200,6 +218,33 @@ def inspect(capture, include_components=False, include_input=False, include_init
                 basic_view = actor['controller_views']['basic']
                 if include_input and basic_view['slot'] != 255:
                     actor['input_tasks'] = controller_tasks(int(basic_view['object'], 16), entity)
+                if all_input_actions and actor['controller_views']['mickey']['slot'] != 255:
+                    full = int(actor['controller_views']['mickey']['object'], 16)
+                    # ORIGINAL82A3C7A0 reads these fields on the full human
+                    # controller. Tool object ownership beyond that list is
+                    # deliberately not inferred from the task-object layout.
+                    header = read(full + 684, 16)
+                    tools, tool_count, _, selected = struct.unpack('>4I', header)
+                    if tool_count > 128:
+                        raise RuntimeError('Unbounded native human controller tool list')
+                    tool_bytes = read(tools, tool_count * 4) if tool_count else b''
+                    tool_objects = []
+                    for index, obj in enumerate(struct.unpack('>' + str(tool_count) + 'I', tool_bytes)):
+                        entry = dict(index=index, object=f'{obj:08X}', selected=index == selected,
+                                     ownership='Member of this retail full-controller list; no speculative tool owner field')
+                        try:
+                            table = word(obj)
+                            entry.update(vtable=f'{table:08X}', flags_at_8=f'{word(obj + 8):08X}',
+                                         native_name_getter_80=f'{word(table + 80):08X}')
+                        except RuntimeError as exc:
+                            entry['read_error'] = str(exc)
+                        tool_objects.append(entry)
+                    actor['native_tools'] = dict(list=f'{tools:08X}', count=tool_count, selected_index=selected,
+                                                 uid_fields=[dict(listener_offset=offset, uid=f'{word(full + 80 + offset):08X}',
+                                                     **optional_text(word(full + 80 + offset))) for offset in range(280, 304, 4)],
+                                                 objects=tool_objects)
+                    if read(full + 684, 16) != header or (tool_bytes and read(tools, len(tool_bytes)) != tool_bytes):
+                        raise RuntimeError('Native retail tool-list ownership changed during snapshot')
                 if camera:
                     actor['camera_component_count'] = word(camera + 44)
                     actor['camera_component_vtables'] = [f'{word(word(word(camera + 36) + i * 4)):08X}' for i in range(min(word(camera + 44), 8))]
@@ -244,6 +289,19 @@ def inspect(capture, include_components=False, include_input=False, include_init
             event_bytes = read(event_list, event_count * 4) if event_count else b''
             events = list(struct.unpack('>' + str(event_count) + 'I', event_bytes))
             events.append(action_manager + 24)  # Original827C3D78 default event.
+            current_uid = word(action_manager + 16)
+            default_event = action_manager + 24
+            # ORIGINAL827C3D78 compares pointer UIDs, chooses inline default
+            # first, otherwise the first matching named event. No guest call.
+            current_matches = ([default_event] if word(default_event) == current_uid else
+                               [event for event in events[:-1] if word(event) == current_uid])
+            current_event = current_matches[0] if current_matches else 0
+            selection = dict(current_uid=f'{current_uid:08X}', selected=f'{current_event:08X}',
+                             matches=[f'{event:08X}' for event in current_matches],
+                             ambiguous=len(current_matches) > 1,
+                             rule='Original827C3D78 inline-default first, otherwise first pointer-UID match')
+            if all_input_actions:
+                events = list(dict.fromkeys([default_event] + ([current_event] if current_event else [])))
             movement_uid = word(0x833DAEB8)
             wanted_uids = {word(address): name for name, address in
                            [('Movement', 0x833DAEB8), ('Jump', 0x833DAEBC), ('ReleaseJump', 0x833DAEC0),
@@ -283,6 +341,8 @@ def inspect(capture, include_components=False, include_input=False, include_init
                 routes.append(route)
             captured = []
             snapshots = []
+            action_snapshots = []
+            contexts = []
             for event in dict.fromkeys(events):
                 header = read(event, 24)
                 _, listeners, listener_count, _, actions, action_count = struct.unpack('>6I', header)
@@ -291,18 +351,41 @@ def inspect(capture, include_components=False, include_input=False, include_init
                 listener_bytes = read(listeners, listener_count * 4) if listener_count else b''
                 action_bytes = read(actions, action_count * 4) if action_count else b''
                 snapshots.append((event, header, listeners, listener_bytes, actions, action_bytes))
-                for action in struct.unpack('>' + str(action_count) + 'I', action_bytes):
+                listener_values = struct.unpack('>' + str(listener_count) + 'I', listener_bytes)
+                action_values = struct.unpack('>' + str(action_count) + 'I', action_bytes)
+                if all_input_actions:
+                    listener_details = []
+                    for index, listener in enumerate(listener_values):
+                        entry = dict(index=index, object=f'{listener:08X}', retail_owners=[])
+                        for actor in actors:
+                            basic = actor.get('controller_views', {}).get('basic', {})
+                            if basic.get('listener') == f'{listener:08X}':
+                                entry['retail_owners'].append(dict(slot=actor['slot'], entity=actor['entity'],
+                                    control_mode=actor['observed_control_mode'], proof='Exact validated Basic listener subobject'))
+                        try:
+                            table = word(listener)
+                            entry.update(vtable=f'{table:08X}', callback=f'{word(table):08X}')
+                        except RuntimeError as exc:
+                            entry['read_error'] = str(exc)
+                        listener_details.append(entry)
+                    contexts.append(dict(event=f'{event:08X}', uid=f'{word(event):08X}', uid_text=optional_text(word(event)),
+                        roles=[label for label, address in [('default', default_event), ('current', current_event)] if event == address],
+                        listeners=listener_details, action_count=action_count,
+                        duplicate_listeners=[f'{value:08X}' for value in sorted(set(listener_values)) if listener_values.count(value) > 1],
+                        duplicate_action_pointers=[f'{value:08X}' for value in sorted(set(action_values)) if action_values.count(value) > 1]))
+                for ordinal, action in enumerate(action_values):
                     action_uid = word(action)
-                    if action_uid not in wanted_uids:
+                    if not all_input_actions and action_uid not in wanted_uids:
                         continue
                     shape = read(action, 436)
                     binding_count = word(action + 408)
                     if binding_count > 10:
                         raise RuntimeError('Unbounded native action binding records')
                     logical_user = word(action + 88)
-                    if logical_user > 1:
+                    if logical_user > 1 and not all_input_actions:
                         raise RuntimeError('Action binding has an unsupported logical user')
-                    route = routes[logical_user]
+                    route = routes[logical_user] if logical_user < 2 else dict(logical_user=logical_user, resolved=False,
+                        reason='Outside audited retail logical-user0/1 mapping; preserved without assuming a device')
                     input_system = word(action_manager + 72)
                     device_snapshot = None
                     if route['resolved']:
@@ -310,15 +393,19 @@ def inspect(capture, include_components=False, include_input=False, include_init
                         if device:
                             history = word(device + 60)
                             button_count, buttons = word(device + 48), word(device + 52)
-                            if button_count > 32:
-                                raise RuntimeError('Unbounded native button history')
+                            axis_count = word(device + 56)
+                            if button_count > 32 or axis_count > 32:
+                                raise RuntimeError('Unbounded native device history')
                             device_snapshot = dict(input_system=f'{input_system:08X}', object=f'{device:08X}',
-                                native_user=route['native_device'], vtable=f'{word(device):08X}', axis_count=word(device + 56), history=f'{history:08X}',
+                                native_user=route['native_device'], vtable=f'{word(device):08X}', axis_count=axis_count, history=f'{history:08X}',
                                 header_hex=read(device, 72).hex(), button_count=button_count, buttons=f'{buttons:08X}',
                                 button_records_hex=read(buttons, button_count * 20).hex() if button_count else '',
-                                ranges=[list(struct.unpack('>4i', read(history + i * 32 + 16, 16))) for i in range(min(2, word(device + 56)))])
-                    captured.append(dict(event=f'{event:08X}', action=f'{action:08X}',
-                        action_name=wanted_uids[action_uid], native_uid_text=text(action_uid), shape_hex=shape.hex(),
+                                ranges=[list(struct.unpack('>4i', read(history + i * 32 + 16, 16))) for i in range(axis_count if all_input_actions else min(2, axis_count))])
+                            if all_input_actions:
+                                device_snapshot['axis_records_hex'] = read(history, axis_count * 32).hex() if axis_count else ''
+                    item = dict(event=f'{event:08X}', action=f'{action:08X}', ordinal=ordinal,
+                        action_name=wanted_uids.get(action_uid, optional_text(action_uid)['text']),
+                        native_uid_text=optional_text(action_uid)['text'], uid_read=optional_text(action_uid), shape_hex=shape.hex(),
                         event_uid=f'{word(event):08X}',
                         uid=f'{action_uid:08X}',
                         listener_count=listener_count, action_count=action_count,
@@ -329,11 +416,26 @@ def inspect(capture, include_components=False, include_input=False, include_init
                         axis_records=[dict(user=word(action + offset), key=f'{word(action + offset + 4):08X}',
                             destination=word(action + offset + 8), inverted=read(action + offset + 16, 1)[0])
                             for offset in range(88, 88 + binding_count * 32, 32)],
-                        response=list(struct.unpack('>4f', shape[416:432])),
+                        response=[float_word(shape[off:off + 4])['value'] for off in range(416, 432, 4)],
                         curve=int.from_bytes(shape[432:436], 'big'),
-                        profile_route=route, device=device_snapshot))
+                        profile_route=route, device=device_snapshot)
+                    if all_input_actions:
+                        item.update(used_bindings=[dict(index=index, raw_hex=shape[88 + index * 32:120 + index * 32].hex(),
+                            user=int.from_bytes(shape[88 + index * 32:92 + index * 32], 'big'),
+                            key=f'{int.from_bytes(shape[92 + index * 32:96 + index * 32], "big"):08X}',
+                            destination=int.from_bytes(shape[96 + index * 32:100 + index * 32], 'big'),
+                            inverted=shape[104 + index * 32],
+                            words=[f'{int.from_bytes(shape[off:off + 4], "big"):08X}' for off in range(88 + index * 32, 120 + index * 32, 4)])
+                            for index in range(binding_count)],
+                            modifiers_raw_412=f'{int.from_bytes(shape[412:416], "big"):08X}',
+                            modifiers_note='Raw native +412 value; legacy modifier_count field does not establish modifier semantics',
+                            prefix_state_words=[dict(offset=off, **float_word(shape[off:off + 4])) for off in range(4, 80, 4)],
+                            prefix_note='Raw pre-kind state/timer words; float interpretations are mechanical, not assigned semantics',
+                            response_words=[float_word(shape[off:off + 4]) for off in range(416, 432, 4)])
+                        action_snapshots.append((action, shape, item))
+                    captured.append(item)
             if (any(read(address, len(data)) != data for address, data in route_snapshots)
-                    or word(0x833DBAD8) != action_manager or word(action_manager + 4) != event_list
+                    or word(0x833DBAD8) != action_manager or word(action_manager + 16) != current_uid or word(action_manager + 4) != event_list
                     or word(action_manager + 8) != event_count
                     or (event_count and read(event_list, event_count * 4) != event_bytes)
                     or any(read(event, 24) != header or (lb and read(lp, len(lb)) != lb)
@@ -344,6 +446,24 @@ def inspect(capture, include_components=False, include_input=False, include_init
                 current_event_uid=f'{word(action_manager + 16):08X}',
                 default_event_uid=f'{word(action_manager + 24):08X}', profile_routes=routes, actions=captured,
                 movement=[action for action in captured if action['action_name'] == 'Movement'])
+            if all_input_actions:
+                for address, shape, item in action_snapshots:
+                    after = read(address, 436)
+                    # Live clocks may move without input or suspension. Pin
+                    # identity/schema and report every other changed word.
+                    if any(after[off:off + 4] != shape[off:off + 4] for off in (0, 80, 408, 412)):
+                        raise RuntimeError('Native action identity/schema changed during snapshot')
+                    item['changed_words_during_snapshot'] = [off for off in range(0, 436, 4) if after[off:off + 4] != shape[off:off + 4]]
+                    used_count = item['binding_count']
+                    item['used_binding_shape_stable'] = after[88:88 + used_count * 32] == shape[88:88 + used_count * 32]
+                for context in contexts:
+                    members = [item for item in captured if item['event'] == context['event']]
+                    uids = set(item['uid'] for item in members)
+                    context['duplicate_uids'] = [dict(uid=uid, ordinals=[item['ordinal'] for item in members if item['uid'] == uid])
+                                                 for uid in sorted(uids) if sum(item['uid'] == uid for item in members) > 1]
+                input_bindings.update(all_input_actions=True, context_selection=selection, contexts=contexts,
+                    used_binding_shapes_stable=all(item['used_binding_shape_stable'] for item in captured),
+                    snapshot_note='Read-only non-atomic live samples; immutable ownership/schema verified; changed action words explicitly reported')
         # Exact string addresses selected by retail 8276A828 (r4 slot, r5
         # human/3D-AI/2D-AI mode), recovered from its lis/addi instructions.
         string_base = ((-32248 << 16) - 30820) & 0xFFFFFFFF
@@ -373,9 +493,12 @@ if __name__ == '__main__':
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--include-components', action='store_true')
     parser.add_argument('--include-input', action='store_true')
+    parser.add_argument('--all-input-actions', action='store_true', help='Bounded full records for default/current contexts; requires --include-input')
     parser.add_argument('--include-initialization', action='store_true')
     args = parser.parse_args()
-    result = inspect(args.capture, args.include_components, args.include_input, args.include_initialization)
+    if args.all_input_actions and (not args.include_input or args.include_initialization):
+        parser.error('--all-input-actions requires --include-input and cannot be combined with --include-initialization')
+    result = inspect(args.capture, args.include_components, args.include_input, args.include_initialization, args.all_input_actions)
     with args.output.open('x', encoding='utf-8') as output:
         output.write(json.dumps(result, indent=2, allow_nan=False) + '\n')
     print(json.dumps(dict(output=str(args.output), stable=result['stable'], prefabs=result['prefab_names'], actors=result['actors'])))

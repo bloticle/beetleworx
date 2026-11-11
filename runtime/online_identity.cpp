@@ -106,7 +106,7 @@ Hash HashFile(const File& file,bool config,std::stop_token stop,InstallationIden
         }
     }
     if(read!=file.size || fs::file_size(file.path)!=file.size || fs::last_write_time(file.path)!=file.time)throw std::runtime_error("Identity file changed while reading: "+file.key);
-    ++stats.files;stats.bytes+=read;return hash.Finish();
+    ++stats.files;stats.bytes+=read;stats.read_bytes+=read;return hash.Finish();
 }
 Hash HashTree(const fs::path& root,bool content,std::stop_token stop,InstallationIdentity& stats) {
     const auto files=Inventory(root,content,stop);Sha tree;tree.Text(content?"EM2-content-v1":"EM2-checkpoint-files-v1");tree.Number(files.size(),8);
@@ -120,38 +120,40 @@ Hash HashTree(const fs::path& root,bool content,std::stop_token stop,Installatio
     return tree.Finish();
 }
 
-std::optional<Hash> ContentCacheKey(const std::vector<File>& files,std::stop_token stop) {
-    // Bump this domain if the content tree's digest representation changes.
+using NativeMetadata=std::array<uint8_t,56>;
+std::optional<NativeMetadata> NativeFileMetadata(const File& file) {
+    const auto handle=CreateFileW(file.path.c_str(),GENERIC_READ,FILE_SHARE_READ,
+        nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(handle==INVALID_HANDLE_VALUE)return {};
+    struct Close {HANDLE handle;~Close(){CloseHandle(handle);}} close{handle};
+    FILE_ID_INFO id{};FILE_BASIC_INFO times{};LARGE_INTEGER size{};wchar_t filesystem[16]{};
+    // No metadata reuse on remote/unsupported filesystems. ChangeTime closes
+    // the same-size write + restored modification-time hole on local NTFS.
+    if(!GetFinalPathNameByHandleW(handle,nullptr,0,VOLUME_NAME_GUID|FILE_NAME_OPENED) ||
+       !GetVolumeInformationByHandleW(handle,nullptr,0,nullptr,nullptr,nullptr,filesystem,DWORD(std::size(filesystem))) ||
+       wcscmp(filesystem,L"NTFS")!=0 ||
+       !GetFileInformationByHandleEx(handle,FileIdInfo,&id,sizeof(id)) ||
+       !GetFileInformationByHandleEx(handle,FileBasicInfo,&times,sizeof(times)) ||
+       !GetFileSizeEx(handle,&size) || size.QuadPart<0 || uint64_t(size.QuadPart)!=file.size || !times.ChangeTime.QuadPart)return {};
+    NativeMetadata bytes{};size_t offset=0;
+    auto number=[&](uint64_t value){for(unsigned i=0;i<8;++i)bytes[offset++]=uint8_t(value>>((7-i)*8));};
+    number(id.VolumeSerialNumber);std::copy_n(id.FileId.Identifier,16,bytes.begin()+offset);offset+=16;
+    number(file.size);number(times.CreationTime.QuadPart);number(times.LastWriteTime.QuadPart);number(times.ChangeTime.QuadPart);
+    return bytes;
+}
+std::optional<Hash> NativeFileProof(const File& file){
+    const auto metadata=NativeFileMetadata(file);if(!metadata)return {};
+    Sha proof;proof.Text("EM2-native-file-metadata-v1");proof.Add(*metadata);return proof.Finish();
+}
+std::optional<Hash> ContentCacheKey(const std::vector<File>& files,std::stop_token stop,InstallationIdentity* physical=nullptr) {
     Sha key;key.Text("EM2-content-cache-v1");key.Number(files.size(),8);
     for(const auto& file:files){
-        Cancel(stop);
-        key.Number(file.key.size(),4);key.Text(file.key);
+        Cancel(stop);key.Number(file.key.size(),4);key.Text(file.key);
         if(file.key=="configfiles.ini"){
-            // Local graphics values have the same normalization as HashTree.
-            InstallationIdentity ignored;
-            key.Add(HashFile(file,true,stop,ignored));
-            continue;
+            InstallationIdentity ignored;key.Add(HashFile(file,true,stop,ignored));
+            if(physical)physical->read_bytes+=ignored.read_bytes;continue;
         }
-        const auto handle=CreateFileW(file.path.c_str(),GENERIC_READ,FILE_SHARE_READ,
-            nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
-        if(handle==INVALID_HANDLE_VALUE)return {};
-        struct Close {HANDLE handle;~Close(){CloseHandle(handle);}} close{handle};
-        FILE_ID_INFO id{};
-        FILE_BASIC_INFO times{};
-        LARGE_INTEGER size{};
-        wchar_t filesystem[16]{};
-        // Volume GUID paths are available for local volumes. Use the full
-        // byte scan on network shares and filesystems without NTFS metadata.
-        if(!GetFinalPathNameByHandleW(handle,nullptr,0,VOLUME_NAME_GUID|FILE_NAME_OPENED) ||
-           !GetVolumeInformationByHandleW(handle,nullptr,0,nullptr,nullptr,nullptr,filesystem,DWORD(std::size(filesystem))) ||
-           wcscmp(filesystem,L"NTFS")!=0 ||
-           !GetFileInformationByHandleEx(handle,FileIdInfo,&id,sizeof(id)) ||
-           !GetFileInformationByHandleEx(handle,FileBasicInfo,&times,sizeof(times)) ||
-           !GetFileSizeEx(handle,&size) || uint64_t(size.QuadPart)!=file.size || !times.ChangeTime.QuadPart)return {};
-        key.Number(id.VolumeSerialNumber,8);key.Add(id.FileId.Identifier);
-        key.Number(file.size,8);
-        key.Number(times.CreationTime.QuadPart,8);key.Number(times.LastWriteTime.QuadPart,8);
-        key.Number(times.ChangeTime.QuadPart,8);
+        const auto metadata=NativeFileMetadata(file);if(!metadata)return {};key.Add(*metadata);
     }
     return key.Finish();
 }
@@ -191,6 +193,74 @@ void WriteContentCache(const fs::path& path,const Hash& key,const Hash& digest) 
     if(!complete || !MoveFileExW(temporary.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))
         DeleteFileW(temporary.c_str());
 }
+struct NativeFileCacheEntry {std::string key;Hash proof{},digest{};};
+constexpr size_t kFileCacheLimit=64*1024*1024;
+constexpr std::array<uint8_t,8> kFileCacheMagic{'E','M','2','N','F','C',1,0};
+fs::path NativeFileCachePath(const fs::path& whole){auto path=whole;path+=L".files-v1";return path;}
+std::vector<NativeFileCacheEntry> ReadNativeFileCache(const fs::path& path,std::stop_token stop){
+    Cancel(stop);std::error_code error;const auto size=fs::file_size(path,error);
+    if(error || size<44 || size>kFileCacheLimit)return {};
+    std::ifstream input(path,std::ios::binary);std::vector<uint8_t> bytes(static_cast<size_t>(size));
+    if(!input.read(reinterpret_cast<char*>(bytes.data()),bytes.size()) || input.peek()!=std::char_traits<char>::eof() ||
+       !std::equal(kFileCacheMagic.begin(),kFileCacheMagic.end(),bytes.begin()))return {};
+    Sha checksum;checksum.Text("EM2-native-file-cache-v1");checksum.Add(std::span(bytes).first(bytes.size()-32));
+    const auto integrity=checksum.Finish();if(!std::equal(integrity.begin(),integrity.end(),bytes.end()-32))return {};
+    const auto end=bytes.size()-32;size_t offset=8;
+    auto number=[&](){uint32_t value=0;for(unsigned i=0;i<4;++i)value=(value<<8)|bytes[offset++];return value;};
+    const auto count=number();if(count>250000 || count>(end-12)/69)return {};
+    std::vector<NativeFileCacheEntry> records;records.reserve(count);size_t path_bytes=0;
+    for(unsigned i=0;i<count;++i){
+        Cancel(stop);if(end-offset<4)return {};const auto length=number();
+        if(!length || length>4096 || end-offset<size_t(length)+64 || (path_bytes+=length)>32*1024*1024)return {};
+        NativeFileCacheEntry record;record.key.assign(reinterpret_cast<const char*>(bytes.data()+offset),length);offset+=length;
+        if(!records.empty() && records.back().key>=record.key)return {};
+        std::copy_n(bytes.begin()+offset,32,record.proof.begin());offset+=32;
+        std::copy_n(bytes.begin()+offset,32,record.digest.begin());offset+=32;records.push_back(std::move(record));
+    }
+    if(offset!=end)return {};return records;
+}
+void WriteNativeFileCache(const fs::path& path,const std::vector<NativeFileCacheEntry>& records,std::stop_token stop){
+    if(records.size()>250000)return;
+    std::vector<uint8_t> bytes(kFileCacheMagic.begin(),kFileCacheMagic.end());
+    auto number=[&](uint32_t value){for(unsigned i=0;i<4;++i)bytes.push_back(uint8_t(value>>((3-i)*8)));};
+    number(uint32_t(records.size()));
+    for(const auto& record:records){
+        Cancel(stop);if(record.key.empty() || record.key.size()>4096 || bytes.size()+record.key.size()+100>kFileCacheLimit)return;
+        number(uint32_t(record.key.size()));bytes.insert(bytes.end(),record.key.begin(),record.key.end());
+        bytes.insert(bytes.end(),record.proof.begin(),record.proof.end());bytes.insert(bytes.end(),record.digest.begin(),record.digest.end());
+    }
+    Sha checksum;checksum.Text("EM2-native-file-cache-v1");checksum.Add(bytes);const auto integrity=checksum.Finish();bytes.insert(bytes.end(),integrity.begin(),integrity.end());
+    static std::atomic<uint64_t> sequence=0;auto temporary=path;
+    temporary+=L"."+std::to_wstring(GetCurrentProcessId())+L"."+std::to_wstring(++sequence)+L".tmp";
+    const auto handle=CreateFileW(temporary.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);if(handle==INVALID_HANDLE_VALUE)return;
+    DWORD written=0;const bool complete=WriteFile(handle,bytes.data(),DWORD(bytes.size()),&written,nullptr) && written==bytes.size() && FlushFileBuffers(handle);
+    CloseHandle(handle);
+    if(stop.stop_requested() || !complete || !MoveFileExW(temporary.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))DeleteFileW(temporary.c_str());
+    Cancel(stop);
+}
+Hash HashContentWithFileCache(const fs::path& root,const fs::path& path,std::stop_token stop,InstallationIdentity& stats){
+    const auto files=Inventory(root,true,stop);const auto cached=ReadNativeFileCache(path,stop);
+    std::vector<std::optional<Hash>> proofs;proofs.reserve(files.size());
+    std::vector<NativeFileCacheEntry> refreshed;refreshed.reserve(files.size());
+    Sha tree;tree.Text("EM2-content-v1");tree.Number(files.size(),8);
+    for(const auto& file:files){
+        Cancel(stop);const auto proof=NativeFileProof(file);proofs.push_back(proof);Hash digest{};
+        const auto prior=std::lower_bound(cached.begin(),cached.end(),file.key,[](const auto& record,const std::string& key){return record.key<key;});
+        if(proof && prior!=cached.end() && prior->key==file.key && prior->proof==*proof){
+            digest=prior->digest;++stats.files;stats.bytes+=file.size;++stats.reused_files;
+        }else digest=HashFile(file,file.key=="configfiles.ini",stop,stats);
+        if(proof)refreshed.push_back({file.key,*proof,digest});
+        tree.Number(file.key.size(),4);tree.Text(file.key);tree.Add(digest);
+    }
+    const auto after=Inventory(root,true,stop);
+    if(after.size()!=files.size())throw std::runtime_error("Identity directory changed during verification");
+    for(size_t i=0;i<files.size();++i){
+        Cancel(stop);if(files[i].key!=after[i].key || files[i].size!=after[i].size || files[i].time!=after[i].time ||
+            NativeFileProof(after[i])!=proofs[i])throw std::runtime_error("Identity file metadata changed during verification: "+files[i].key);
+    }
+    const auto digest=tree.Finish();WriteNativeFileCache(path,refreshed,stop);return digest;
+}
+
 }
 IdentityResult FingerprintProgram(const fs::path& executable,const fs::path& content,std::stop_token stop,const fs::path& cache) {
     try {
@@ -198,7 +268,7 @@ IdentityResult FingerprintProgram(const fs::path& executable,const fs::path& con
         const File build{executable,"beetleworx.exe",fs::file_size(executable),fs::last_write_time(executable)};
         identity.build=HashFile(build,false,stop,identity);
         const auto files=cache.empty()?std::vector<File>{}:Inventory(content,true,stop);
-        const auto key=cache.empty()?std::optional<Hash>{}:ContentCacheKey(files,stop);
+        const auto key=cache.empty()?std::optional<Hash>{}:ContentCacheKey(files,stop,&identity);
         const auto cached=key?ReadContentCache(cache,*key):std::optional<Hash>{};
         if(cached){
             identity.content=*cached;
@@ -206,8 +276,8 @@ IdentityResult FingerprintProgram(const fs::path& executable,const fs::path& con
             identity.files+=files.size();
             for(const auto& file:files)identity.bytes+=file.size;
         }else{
-            identity.content=HashTree(content,true,stop,identity);
-            if(key && ContentCacheKey(Inventory(content,true,stop),stop)==key)
+            identity.content=cache.empty()?HashTree(content,true,stop,identity):HashContentWithFileCache(content,NativeFileCachePath(cache),stop,identity);
+            if(key && ContentCacheKey(Inventory(content,true,stop),stop,&identity)==key)
                 WriteContentCache(cache,*key,identity.content);
         }
         Cancel(stop);return {identity,{}};
@@ -253,6 +323,47 @@ bool TestInstallationIdentity(const fs::path& root) {
                 reloaded.value && reloaded.value->reused_content_digest && reloaded.value->content==cold.value->content,
                 "corrupt identity cache is recomputed and replaced"))return false;
         }
+        if(cache_supported){
+            const auto area=root/"file-cache",tree=area/"content",sidecar=area/"identity.bin";
+            const std::string config="Gravity=9.81\n",small_payload="small1";
+            write(area/"game.exe","abc");write(tree/"configfiles.ini",config);
+            write(tree/"packfiles"/"large.pak",large);write(tree/"small.bin",small_payload);
+            auto verify=[&](bool use_cache){return FingerprintProgram(area/"game.exe",tree,{},use_cache?sidecar:fs::path{});};
+            const auto initial=verify(true);if(!check(initial.value && !initial.value->reused_files,"per-file sidecar starts from verified full bytes"))return false;
+            write(tree/"small.bin","small2");
+            const auto partial=verify(true),independent=verify(false);
+            const uint64_t minimal_reads=3+small_payload.size()+config.size()*2;
+            if(!check(partial.value && independent.value && !partial.value->reused_content_digest && partial.value->reused_files==2 &&
+                partial.value->read_bytes==minimal_reads && partial.value->content==independent.value->content &&
+                partial.value->bytes==independent.value->bytes && partial.value->files==independent.value->files,
+                "small changed file hashes only its bytes; unchanged large packfile/config reuse retains exact content-v1 digest"))return false;
+            if(!check(CreateHardLinkW((area/"small-link.bin").c_str(),(tree/"small.bin").c_str(),nullptr)!=0,"NTFS metadata-only hardlink fixture"))return false;
+            const auto metadata_only=verify(true);
+            if(!check(metadata_only.value && !metadata_only.value->reused_content_digest && metadata_only.value->reused_files==2 &&
+                metadata_only.value->read_bytes==minimal_reads && metadata_only.value->content==partial.value->content,
+                "one hardlink ChangeTime invalidates only that small file rather than every unchanged packfile"))return false;
+            auto records=ReadNativeFileCache(NativeFileCachePath(sidecar),{});
+            for(auto& record:records){record.proof={};record.digest={};}
+            WriteNativeFileCache(NativeFileCachePath(sidecar),records,{});write(sidecar,"force whole-cache miss");
+            const auto forged=verify(true);
+            if(!check(forged.value && !forged.value->reused_files && forged.value->content==partial.value->content && forged.value->read_bytes>large.size(),
+                "checksummed records with forged metadata cannot reuse caller-supplied digests"))return false;
+            auto native_cache=NativeFileCachePath(sidecar);
+            {std::fstream bytes(native_cache,std::ios::binary|std::ios::in|std::ios::out);bytes.seekg(20);const auto old=bytes.get();bytes.seekp(20);bytes.put(char(old^1));}
+            write(sidecar,"force whole-cache miss");const auto corrupt=verify(true);
+            if(!check(corrupt.value && !corrupt.value->reused_files && corrupt.value->content==partial.value->content,
+                "damaged file-cache integrity falls back to complete byte verification"))return false;
+            write(native_cache,"EM2NFC");write(sidecar,"force whole-cache miss");const auto truncated=verify(true);
+            if(!check(truncated.value && !truncated.value->reused_files && truncated.value->content==partial.value->content,
+                "truncated file cache falls back without returning an unverified identity"))return false;
+            const auto pak=tree/"packfiles"/"large.pak";const auto old_time=fs::last_write_time(pak);
+            auto modified=large;modified.back()='z';write(pak,modified);fs::last_write_time(pak,old_time);
+            const auto changed_metadata=verify(true),changed_full=verify(false);
+            if(!check(changed_metadata.value && changed_full.value && !changed_metadata.value->reused_content_digest &&
+                changed_metadata.value->reused_files==2 && changed_metadata.value->read_bytes==3+large.size()+config.size()*2 &&
+                changed_metadata.value->content!=partial.value->content && changed_metadata.value->content==changed_full.value->content,
+                "same-size packfile write with restored mtime forces new full digest through native ChangeTime"))return false;
+        }
         write(b/"content"/"pc-shader-library"/"local.em2dxbc","local compiled shader");
         write(b/"content"/"$SystemUpdate"/"dashboard.bin","unused console updater");
         const auto local_artifacts=fingerprint(b);
@@ -288,7 +399,7 @@ bool TestInstallationIdentity(const fs::path& root) {
         if(!check(altered.value && altered.value->checkpoint!=first.value->checkpoint && altered.value->build!=first.value->build,"checkpoint and executable changes detected independently"))return false;
         std::stop_source stop;stop.request_stop();const auto cancelled=FingerprintInstallation(a/"game.exe",a/"content",a/"save",stop.get_token());
         if(!check(!cancelled.value && !cancelled.error.empty() && !FingerprintInstallation(a/"missing.exe",a/"content",a/"save").value,"cancellation/missing file never returns a usable identity"))return false;
-        REXLOG_INFO("Installation identity tests passed: streamed SHA-256, relocation/case, multi-block content, graphics normalization, gameplay config, preserved-metadata edits, checkpoint/build changes and cancellation");return true;
+        REXLOG_INFO("Installation identity tests passed: streamed SHA-256, relocation/case, multi-block content, graphics normalization, per-file NTFS cache reuse/integrity/metadata-only edits, gameplay config, preserved-metadata edits, checkpoint/build changes and cancellation");return true;
     }catch(const std::exception& error){REXLOG_ERROR("Identity fixture failure: {}",error.what());return false;}
 }
 }

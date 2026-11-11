@@ -1,4 +1,5 @@
 #include "native_random.h"
+#include "online_behavior_trace.h"
 #include "simulation.h"
 #include "online.h"
 #include "online_runtime.h"
@@ -203,7 +204,10 @@ PPC_FUNC_IMPL(sub_82B6DDC8) {
     const auto caller=ctx.lr;
     Call call(base);
     __imp__sub_82B6DDC8(ctx,base);
-    if(!call.isolate)em2::RecordNativeRandom(false,uint32_t(caller),ctx.r11.u32,ctx.r3.u32,&ctx,base);
+    if(!call.isolate){
+        em2::net::ObserveNativeBehaviorRandom(uint32_t(caller),ctx,base);
+        em2::RecordNativeRandom(false,uint32_t(caller),ctx.r11.u32,ctx.r3.u32,&ctx,base);
+    }
 }
 PPC_FUNC_IMPL(sub_82B6DD98) {
     const auto caller=ctx.lr,seed=ctx.r3.u64;

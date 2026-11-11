@@ -162,7 +162,7 @@ RoomGameplayAdmission NativeRoomGameplay::Prepare(PPCContext& ctx,uint8_t* base,
         s.Stop("Gameplay lost its frozen Room, world, human actors or controls lease");return RoomGameplayAdmission::Stopped;
     }
     gameplay_waiting.store(true,std::memory_order_release);
-    if(s.pending || s.room->gameplay_completion_pending())return RoomGameplayAdmission::Waiting;
+    if(s.pending || s.room->gameplay_frame_blocked())return RoomGameplayAdmission::Waiting;
     if(s.prepared){output=*s.prepared;return RoomGameplayAdmission::Ready;}
     const auto tick=s.room->next_tick();
     if(!s.submitted){

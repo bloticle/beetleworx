@@ -41,7 +41,7 @@ struct Reader {
     std::string String(){const auto n=Byte();if(!good || n>bytes.size()-at){good=false;return {};}std::string s(reinterpret_cast<const char*>(bytes.data()+at),n);at+=n;return s;}
     bool Done()const{return good && at==bytes.size();}
 };
-Bytes Packet(Wire kind){return {'B','W','R','M',5,uint8_t(kind)};}
+Bytes Packet(Wire kind){return {'B','W','R','M',6,uint8_t(kind)};}
 using Hash=std::array<uint8_t,32>;
 bool Nonzero(const Hash& hash){return std::any_of(hash.begin(),hash.end(),[](auto n){return n!=0;});}
 void WritePad(Bytes& bytes,const Pad& pad){
@@ -165,8 +165,14 @@ struct Room::Impl {
     uint64_t gameplay_tick=0;
     bool gameplay_exhausted=false;
     std::optional<uint64_t> gameplay_pending,gameplay_verified;
-    std::optional<Hash> gameplay_local_proof;
-    std::array<std::optional<Hash>,kOnlineRoomCapacity> gameplay_proofs{};
+    uint8_t gameplay_window=1;
+    struct GameplayRound {std::optional<Hash> local;std::array<std::optional<Hash>,kOnlineRoomCapacity> proofs{};};
+    std::map<uint64_t,GameplayRound> gameplay_rounds;
+    std::array<uint64_t,kOnlineRoomCapacity> gameplay_proof_next{};
+    std::array<bool,kOnlineRoomCapacity> gameplay_proof_exhausted{};
+    size_t LocalUnverified()const{size_t n=0;for(const auto& [tick,round]:gameplay_rounds)n+=round.local.has_value();return n;}
+    bool ProofCredit(uint64_t tick)const{return !gameplay_exhausted && tick>=gameplay_tick && tick-gameplay_tick<gameplay_window;}
+    bool FrameBlocked()const{return gameplay_pending.has_value() || gameplay_exhausted || LocalUnverified()>=gameplay_window;}
     Clock::time_point loading_started{};
     bool checkpoint_mode=false,checkpoint_end=false,install_reported=false,checkpoint_confirmed=false;
     size_t checkpoint_size=0;
@@ -214,7 +220,7 @@ struct Room::Impl {
         state=RoomState::Running;submit_next=first+id.input_delay;frame_next=consume_next=first;
         raw_pads={};raw_proofs={};raw_frame.reset();local_proof.reset();local_raw_pad.reset();raw_consumed=false;
         progress=now;gameplay_tick=first;gameplay_exhausted=false;
-        gameplay_pending.reset();gameplay_verified.reset();gameplay_local_proof.reset();gameplay_proofs={};Close(listener);
+        gameplay_pending.reset();gameplay_verified.reset();gameplay_rounds.clear();gameplay_proof_next.fill(first);gameplay_proof_exhausted={};Close(listener);
         for(auto& c:connections){c->wire_next=submit_next;c->received=c->pinged=now;}
         for(uint64_t t=first;t<submit_next;++t){
             if(host)for(const auto& p:lobby.players)inputs[t][p.peer]=Neutral();
@@ -264,16 +270,21 @@ struct Room::Impl {
         return reader.Done() && local_world && identity==id && token==*local_world && revision==lobby.revision && mask==PlayerMask() && Nonzero(digest);
     }
     void GameplayVerified(uint64_t tick,Clock::time_point now){
-        gameplay_verified=tick;gameplay_pending.reset();gameplay_local_proof.reset();gameplay_proofs={};progress=now;
+        gameplay_verified=tick;gameplay_rounds.erase(tick);progress=now;
         if(tick==UINT64_MAX)gameplay_exhausted=true;else gameplay_tick=tick+1;
     }
     bool AdvanceGameplay(Clock::time_point now){
-        if(!host || state!=RoomState::Running || !gameplay_pending || !gameplay_local_proof)return true;
-        for(const auto& player:lobby.players)if(!gameplay_proofs[player.peer-1])return true;
-        const auto digest=*gameplay_local_proof;
-        for(const auto& player:lobby.players)if(*gameplay_proofs[player.peer-1]!=digest){Fail("Completed native gameplay worlds diverged");return false;}
-        const auto tick=*gameplay_pending;auto packet=Packet(Wire::GameplayVerified);WriteGameplayProof(packet,tick,digest);
-        if(!Broadcast(packet))return false;GameplayVerified(tick,now);return true;
+        if(!host || state!=RoomState::Running)return true;
+        while(!gameplay_exhausted){const auto found=gameplay_rounds.find(gameplay_tick);
+            if(found==gameplay_rounds.end() || !found->second.local)return true;
+            const auto& round=found->second;
+            for(const auto& player:lobby.players)if(!round.proofs[player.peer-1])return true;
+            const auto digest=*round.local;
+            for(const auto& player:lobby.players)if(*round.proofs[player.peer-1]!=digest){Fail("Completed native gameplay worlds diverged");return false;}
+            const auto tick=gameplay_tick;auto packet=Packet(Wire::GameplayVerified);WriteGameplayProof(packet,tick,digest);
+            if(!Broadcast(packet))return false;GameplayVerified(tick,now);
+        }
+        return true;
     }
     bool CompleteFrames(Clock::time_point){
         while(!frame_exhausted && frames.size()<Window){
@@ -305,15 +316,15 @@ struct Room::Impl {
     // False means a protocol violation. Unadmitted connections are rejected
     // individually; a violation by an admitted participant stops every peer.
     bool Message(Connection& c,std::span<const uint8_t> bytes,Clock::time_point now){
-        Reader r{bytes};if(r.Number(4)!=0x4257524D || r.Byte()!=5)return false;const auto kind=Wire(r.Byte());
+        Reader r{bytes};if(r.Number(4)!=0x4257524D || r.Byte()!=6)return false;const auto kind=Wire(r.Byte());
         if(kind==Wire::Hello){
             if(!host || c.welcomed || (state!=RoomState::Listening && state!=RoomState::Lobby))return false;
-            const auto identity=ReadIdentity(r);const auto mode=r.Byte();auto name=r.String();std::string normalized;
-            if(!r.Done() || mode!=uint8_t(checkpoint_mode) || (checkpoint_mode?!CompatibleCheckpoint(identity,id):identity!=id) || !Name(name,normalized) || !UniqueName(Snapshot(roster),0,normalized) || roster.players().size()>=roster.capacity())return false;
+            const auto identity=ReadIdentity(r);const auto mode=r.Byte(),window=r.Byte();auto name=r.String();std::string normalized;
+            if(!r.Done() || window!=gameplay_window || mode!=uint8_t(checkpoint_mode) || (checkpoint_mode?!CompatibleCheckpoint(identity,id):identity!=id) || !Name(name,normalized) || !UniqueName(Snapshot(roster),0,normalized) || roster.players().size()>=roster.capacity())return false;
             uint64_t assigned=2;while(assigned<=roster.capacity() && roster.Find(assigned))++assigned;
             if(assigned>roster.capacity() || roster.Join(assigned,normalized)!=LobbyResult::Ok)return false;
             c.peer=assigned;c.welcomed=true;state=RoomState::Lobby;
-            auto welcome=Packet(Wire::Welcome);WriteIdentity(welcome,id);U64(welcome,assigned);U8(welcome,uint8_t(checkpoint_mode));
+            auto welcome=Packet(Wire::Welcome);WriteIdentity(welcome,id);U64(welcome,assigned);U8(welcome,uint8_t(checkpoint_mode));U8(welcome,gameplay_window);
             if(!c.Queue(welcome)){Fail("Room welcome queue full");return true;}
             if(!Publish())return true;
             if(checkpoint_mode){
@@ -325,8 +336,8 @@ struct Room::Impl {
         }
         if(kind==Wire::Welcome){
             if(host || c.welcomed || state!=RoomState::Connecting)return false;
-            const auto identity=ReadIdentity(r);const auto assigned=r.Number(8);const auto mode=r.Byte();
-            if(!r.Done() || mode!=uint8_t(checkpoint_mode) || !ValidIdentity(identity) || (checkpoint_mode?!CompatibleCheckpoint(identity,id):identity!=id) || assigned<2 || assigned>kOnlineRoomCapacity)return false;
+            const auto identity=ReadIdentity(r);const auto assigned=r.Number(8);const auto mode=r.Byte(),window=r.Byte();
+            if(!r.Done() || window!=gameplay_window || mode!=uint8_t(checkpoint_mode) || !ValidIdentity(identity) || (checkpoint_mode?!CompatibleCheckpoint(identity,id):identity!=id) || assigned<2 || assigned>kOnlineRoomCapacity)return false;
             id=identity;peer=assigned;c.peer=1;c.welcomed=true;
             state=checkpoint_mode?RoomState::Transferring:RoomState::Lobby;
             if(checkpoint_mode){c.transfer=Connection::Transfer::Sending;c.transfer_progress=now;}return true;
@@ -457,15 +468,19 @@ struct Room::Impl {
             if(activate)BeginRunning(now,next);else ResetRawRound(next);return true;
         }
         if(kind==Wire::GameplayComplete){
-            if(!host || state!=RoomState::Running || gameplay_exhausted || !c.peer || c.peer>kOnlineRoomCapacity || gameplay_proofs[c.peer-1])return false;
+            if(!host || state!=RoomState::Running || gameplay_exhausted || !c.peer || c.peer>kOnlineRoomCapacity || gameplay_proof_exhausted[c.peer-1])return false;
             uint64_t tick=0;Hash digest{};
-            if(!ReadGameplayProof(r,tick,digest) || tick!=gameplay_tick || (!frame_exhausted && frame_next<=tick))return false;
-            gameplay_proofs[c.peer-1]=digest;return AdvanceGameplay(now);
+            if(!ReadGameplayProof(r,tick,digest) || !ProofCredit(tick) || tick!=gameplay_proof_next[c.peer-1] || (!frame_exhausted && frame_next<=tick))return false;
+            auto& round=gameplay_rounds[tick];if(round.proofs[c.peer-1])return false;round.proofs[c.peer-1]=digest;
+            if(tick==UINT64_MAX)gameplay_proof_exhausted[c.peer-1]=true;else gameplay_proof_next[c.peer-1]=tick+1;
+            return AdvanceGameplay(now);
         }
         if(kind==Wire::GameplayVerified){
-            if(host || state!=RoomState::Running || gameplay_exhausted || !gameplay_pending || !gameplay_local_proof)return false;
+            if(host || state!=RoomState::Running || gameplay_exhausted)return false;
             uint64_t tick=0;Hash digest{};
-            if(!ReadGameplayProof(r,tick,digest) || tick!=gameplay_tick || tick!=*gameplay_pending || digest!=*gameplay_local_proof)return false;
+            if(!ReadGameplayProof(r,tick,digest) || tick!=gameplay_tick)return false;
+            const auto round=gameplay_rounds.find(tick);
+            if(round==gameplay_rounds.end() || !round->second.local || digest!=*round->second.local)return false;
             GameplayVerified(tick,now);return true;
         }
         if(kind==Wire::Input){
@@ -496,6 +511,8 @@ struct Room::Impl {
 
 Room::Room():impl_(std::make_unique<Impl>()){}
 Room::~Room()=default;
+bool Room::SetGameplayVerificationWindow(uint8_t window){auto& p=*impl_;if(p.state!=RoomState::Idle || window<1 || window>8)return false;p.gameplay_window=window;return true;}
+uint8_t Room::gameplay_verification_window()const{return impl_->gameplay_window;}
 bool Room::Host(const Identity& id,std::string_view address,uint16_t port,uint8_t capacity,std::string_view name){
     auto& p=*impl_;std::string normalized;const auto endpoint=ParseNumericAddress(address,true);
     if(p.state!=RoomState::Idle || !Winsock() || !endpoint || !ValidIdentity(id) || capacity<2 || capacity>16 || !Name(name,normalized))return false;
@@ -525,7 +542,7 @@ bool Room::JoinInternal(const Identity& id,std::string_view address,uint16_t por
     const auto result=connect(c->socket,reinterpret_cast<const sockaddr*>(&endpoint->storage),endpoint->size);
     if(result==SOCKET_ERROR && WSAGetLastError()!=WSAEWOULDBLOCK)return false;
     c->connecting=result!=0;p.id=id;p.join_name=normalized;p.state=RoomState::Connecting;p.checkpoint_mode=checkpoint;
-    auto hello=Packet(Wire::Hello);WriteIdentity(hello,id);U8(hello,uint8_t(checkpoint));Text(hello,normalized);if(!c->Queue(hello))return false;
+    auto hello=Packet(Wire::Hello);WriteIdentity(hello,id);U8(hello,uint8_t(checkpoint));U8(hello,p.gameplay_window);Text(hello,normalized);if(!c->Queue(hello))return false;
     p.connections.push_back(std::move(c));return true;
 }
 std::shared_ptr<const std::vector<uint8_t>> Room::DownloadedCheckpoint()const{
@@ -673,27 +690,33 @@ bool Room::SubmitLocal(uint64_t tick,const RoomCommand& command){
 }
 bool Room::PeekFrame(RoomFrame& frame)const{
     const auto& p=*impl_;
-    if(p.state!=RoomState::Running || p.consume_exhausted || p.gameplay_pending || p.gameplay_exhausted || p.frames.empty() ||
-       p.frames.front().tick!=p.consume_next || p.frames.front().tick!=p.gameplay_tick)return false;
+    if(p.state!=RoomState::Running || p.consume_exhausted || p.FrameBlocked() || p.frames.empty() ||
+       p.frames.front().tick!=p.consume_next || !p.ProofCredit(p.consume_next))return false;
     frame=p.frames.front();return true;
 }
 bool Room::TakeFrame(RoomFrame& frame){
-    auto& p=*impl_;if(p.state!=RoomState::Running || p.consume_exhausted || p.gameplay_pending || p.gameplay_exhausted || p.frames.empty())return false;
+    auto& p=*impl_;if(p.state!=RoomState::Running || p.consume_exhausted || p.FrameBlocked() || p.frames.empty())return false;
     if(p.frames.front().tick!=p.consume_next){p.Fail("Room frame consumption lost contiguous ordering");return false;}
-    if(p.frames.front().tick!=p.gameplay_tick){p.Fail("Room gameplay proof lost contiguous ordering");return false;}
+    if(!p.ProofCredit(p.consume_next))return false;
     p.gameplay_pending=p.consume_next;
     frame=std::move(p.frames.front());p.frames.pop_front();if(p.consume_next==UINT64_MAX)p.consume_exhausted=true;else ++p.consume_next;return true;
 }
 bool Room::CompleteGameplay(uint64_t tick,const Hash& digest){
     auto& p=*impl_;
-    if(p.state!=RoomState::Running || !p.gameplay_pending || tick!=*p.gameplay_pending || tick!=p.gameplay_tick ||
-       p.gameplay_exhausted || p.gameplay_local_proof || !Nonzero(digest) || !p.local_world)return false;
+    if(p.state!=RoomState::Running || !p.gameplay_pending || tick!=*p.gameplay_pending || !p.ProofCredit(tick) ||
+       p.gameplay_exhausted || p.gameplay_proof_exhausted[p.peer-1] || tick!=p.gameplay_proof_next[p.peer-1] ||
+       !Nonzero(digest) || !p.local_world || p.LocalUnverified()>=p.gameplay_window)return false;
     const auto now=Clock::now();if(now-p.progress>Timeout){p.Fail("Online room completed-world progress timed out; simulation stopped");return false;}
-    p.gameplay_local_proof=digest;
-    if(p.host){p.gameplay_proofs[p.peer-1]=digest;return p.AdvanceGameplay(now);}
+    auto& round=p.gameplay_rounds[tick];if(round.local || round.proofs[p.peer-1])return false;
+    round.local=digest;round.proofs[p.peer-1]=digest;
+    p.gameplay_pending.reset();
+    if(tick==UINT64_MAX)p.gameplay_proof_exhausted[p.peer-1]=true;else p.gameplay_proof_next[p.peer-1]=tick+1;
+    if(p.host)return p.AdvanceGameplay(now);
     auto packet=Packet(Wire::GameplayComplete);p.WriteGameplayProof(packet,tick,digest);return p.Queue(*p.connections.front(),packet);
 }
-bool Room::gameplay_completion_pending()const{return impl_->gameplay_pending.has_value();}
+bool Room::gameplay_completion_pending()const{return impl_->gameplay_pending.has_value() || impl_->LocalUnverified()!=0;}
+bool Room::gameplay_frame_blocked()const{return impl_->state!=RoomState::Running || impl_->consume_exhausted || impl_->FrameBlocked() || !impl_->ProofCredit(impl_->consume_next);}
+size_t Room::pending_gameplay_verifications()const{return impl_->LocalUnverified();}
 std::optional<uint64_t> Room::verified_gameplay_tick()const{return impl_->gameplay_verified;}
 void Room::Disconnect(){auto& p=*impl_;if(p.state==RoomState::Disconnected)return;Close(p.listener);p.connections.clear();p.inputs.clear();p.echoes.clear();p.frames.clear();p.state=RoomState::Disconnected;}
 RoomState Room::state()const{return impl_->state;}
@@ -714,6 +737,7 @@ bool TestOnlineRoom(){
     Identity id;id.session[0]=7;id.build[0]=1;id.content[0]=2;id.checkpoint[0]=3;id.first_tick=100;id.input_delay=2;
     std::array<uint8_t,32> world{};world[0]=9;
     std::vector<std::unique_ptr<Room>> rooms;
+    uint8_t fixture_verification_window=1;
     auto pump=[&](auto done){const auto deadline=Clock::now()+std::chrono::seconds(5);do{for(auto& r:rooms)r->Poll();if(done())return true;std::this_thread::sleep_for(std::chrono::milliseconds(1));}while(Clock::now()<deadline);return false;};
     // Explicit fixture digests acknowledge fixture processing, not a real game world.
     auto fixture_digest=[](uint64_t tick){Hash digest{};digest[0]=0xF1;for(unsigned i=0;i<8;++i)digest[24+i]=uint8_t(tick>>(56-i*8));return digest;};
@@ -722,8 +746,8 @@ bool TestOnlineRoom(){
         for(auto& room:rooms)if(!room->CompleteGameplay(tick,digest))return false;
         return pump([&]{return std::all_of(rooms.begin(),rooms.end(),[&](const auto& room){return !room->gameplay_completion_pending() && room->verified_gameplay_tick()==tick;});});
     };
-    auto setup=[&](unsigned count){rooms.clear();rooms.push_back(std::make_unique<Room>());if(!rooms[0]->Host(id,"127.0.0.1",0,uint8_t(count),"Host"))return false;
-        for(unsigned i=1;i<count;++i){rooms.push_back(std::make_unique<Room>());if(!rooms.back()->Join(id,"127.0.0.1",rooms[0]->port(),"Guest "+std::to_string(i)))return false;}
+    auto setup=[&](unsigned count){rooms.clear();rooms.push_back(std::make_unique<Room>());if(!rooms[0]->SetGameplayVerificationWindow(fixture_verification_window) || !rooms[0]->Host(id,"127.0.0.1",0,uint8_t(count),"Host"))return false;
+        for(unsigned i=1;i<count;++i){rooms.push_back(std::make_unique<Room>());if(!rooms.back()->SetGameplayVerificationWindow(fixture_verification_window) || !rooms.back()->Join(id,"127.0.0.1",rooms[0]->port(),"Guest "+std::to_string(i)))return false;}
         return pump([&]{return std::all_of(rooms.begin(),rooms.end(),[&](const auto& r){return r->lobby().players.size()==count;});});};
     if(!check(setup(16),"sixteen real simultaneous loopback participants handshake and receive the host roster"))return false;
     for(unsigned i=0;i<16;++i)check(rooms[i]->local_peer()==i+1,"peer IDs assigned by host connection, never client supplied");
@@ -751,7 +775,7 @@ bool TestOnlineRoom(){
         if(t==id.first_tick){
             const auto digest=fixture_digest(t);
             for(unsigned peer=0;peer<15;++peer)check(rooms[peer]->CompleteGameplay(t,digest),"first fifteen native fixture completions submit once");
-            check(pump([&]{return std::count_if(rooms[0]->impl_->gameplay_proofs.begin(),rooms[0]->impl_->gameplay_proofs.end(),[](const auto& proof){return proof.has_value();})==15;}),
+            check(pump([&]{const auto round=rooms[0]->impl_->gameplay_rounds.find(t);return round!=rooms[0]->impl_->gameplay_rounds.end() && std::count_if(round->second.proofs.begin(),round->second.proofs.end(),[](const auto& proof){return proof.has_value();})==15;}),
                 "authority receives exactly fifteen of sixteen frozen peer proofs");
             for(auto& room:rooms){RoomFrame next;check(room->gameplay_completion_pending() && !room->TakeFrame(next),"one missing sixteenth world proof blocks every peer despite queued frame");}
             check(rooms[15]->CompleteGameplay(t,digest) && pump([&]{return std::all_of(rooms.begin(),rooms.end(),[&](const auto& room){return !room->gameplay_completion_pending() && room->verified_gameplay_tick()==t;});}),
@@ -826,7 +850,7 @@ bool TestOnlineRoom(){
     if(!check(running(),"remote-first gameplay completion fixture connects"))return false;
     RoomFrame ahead;
     if(!check(pump([&]{return rooms[1]->PeekFrame(ahead);}) && rooms[1]->TakeFrame(ahead) && rooms[1]->CompleteGameplay(ahead.tick,fixture_digest(ahead.tick)) &&
-        pump([&]{return rooms[0]->impl_->gameplay_proofs[1].has_value();}),"peer may finish its current native tick before slower host consumes its copy"))return false;
+        pump([&]{const auto round=rooms[0]->impl_->gameplay_rounds.find(ahead.tick);return round!=rooms[0]->impl_->gameplay_rounds.end() && round->second.proofs[1].has_value();}),"peer may finish its current native tick before slower host consumes its copy"))return false;
     check(!rooms[0]->gameplay_completion_pending() && !rooms[0]->verified_gameplay_tick(),"remote proof alone never asserts host's world has executed");
     RoomFrame host_copy;
     check(rooms[0]->TakeFrame(host_copy) && host_copy==ahead && rooms[0]->CompleteGameplay(host_copy.tick,fixture_digest(host_copy.tick)) &&
@@ -893,6 +917,128 @@ bool TestOnlineRoom(){
     for(auto& room:rooms){RoomFrame frame;check(room->verified_gameplay_tick()==UINT64_MAX && !room->gameplay_completion_pending() &&
         !room->TakeFrame(frame) && !room->SubmitLocal(0,Neutral()) && !room->CompleteGameplay(0,proof),"verified UINT64_MAX world cannot wrap native admission or proof ownership");}
     id=gameplay_saved_id;
+
+    // Real TCP windowed completion remains exact tick/digest verification;
+    // these digests acknowledge fixture execution, not a native game world.
+    fixture_verification_window=8;
+    auto window_running=[&](unsigned count){
+        if(!setup(count))return false;
+        for(auto& room:rooms)if(!room->SetReady(true))return false;
+        if(!pump([&]{return std::none_of(rooms.begin(),rooms.end(),[](const auto& room){return room->profile_pending();}) &&
+            std::all_of(rooms[0]->lobby().players.begin(),rooms[0]->lobby().players.end(),[](const auto& player){return player.ready;});}) || !rooms[0]->Start())return false;
+        if(!pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& room){return room->state()==RoomState::Loading;});}))return false;
+        for(auto& room:rooms)if(!room->WorldReady(world))return false;
+        return pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& room){return room->state()==RoomState::Running && room->gameplay_verification_window()==8;});});
+    };
+    {Room limits;check(!limits.SetGameplayVerificationWindow(0) && !limits.SetGameplayVerificationWindow(9) &&
+        limits.gameplay_verification_window()==1 && limits.SetGameplayVerificationWindow(8),"completion credit bound1..8 is explicit, default synchronous1");}
+    if(!check(window_running(16),"all sixteen real peers negotiate eight completed-world credits"))return false;
+    check(!rooms[0]->SetGameplayVerificationWindow(1) && !rooms[1]->SetGameplayVerificationWindow(1),"verification window cannot change after admission");
+    for(uint64_t tick=id.first_tick+id.input_delay;tick<id.first_tick+10;++tick)
+        for(auto& room:rooms)check(room->SubmitLocal(tick,Neutral()),"windowed fixture queues bounded independent intent");
+    if(!check(pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& room){return room->impl_->frames.size()>=9;});}),"queued frames exist beyond completion credits"))return false;
+    const auto window_progress=rooms[0]->impl_->progress;
+    RoomFrame missing;
+    if(!check(rooms[15]->TakeFrame(missing) && missing.tick==id.first_tick && !rooms[15]->CompleteGameplay(missing.tick+1,proof),
+        "one taken frame awaits its own exact local completion even with eight credits"))return false;
+    for(unsigned round=0;round<8;++round){const auto tick=id.first_tick+round;
+        for(unsigned peer=0;peer<15;++peer){RoomFrame frame;
+            if(!check(rooms[peer]->TakeFrame(frame) && frame.tick==tick && rooms[peer]->CompleteGameplay(tick,fixture_digest(tick)),
+                "first fifteen native fixture worlds complete sequentially without waiting for round-trip verification"))return false;
+            check(!rooms[peer]->CompleteGameplay(tick,fixture_digest(tick)),"windowed local completion cannot duplicate a native tick");
+        }
+    }
+    if(!check(pump([&]{const auto& rounds=rooms[0]->impl_->gameplay_rounds;
+        return rounds.size()==8 && std::all_of(rounds.begin(),rounds.end(),[](const auto& item){return std::count_if(item.second.proofs.begin(),item.second.proofs.end(),[](const auto& p){return p.has_value();})==15;});}),
+        "seven future rounds cannot overtake a missing sixteenth peer's oldest proof"))return false;
+    for(unsigned peer=0;peer<15;++peer){RoomFrame blocked;
+        check(rooms[peer]->pending_gameplay_verifications()==8 && rooms[peer]->gameplay_completion_pending() && rooms[peer]->gameplay_frame_blocked() &&
+            !rooms[peer]->PeekFrame(blocked) && !rooms[peer]->TakeFrame(blocked),"eight completed worlds exhaust bounded admission credit despite queued input");}
+    check(rooms[0]->impl_->progress==window_progress && !rooms[0]->verified_gameplay_tick(),"future completion proofs and input never extend oldest-world progress deadline");
+    check(rooms[15]->CompleteGameplay(missing.tick,fixture_digest(missing.tick)) &&
+        pump([&]{return std::all_of(rooms.begin(),rooms.end(),[&](const auto& room){return room->verified_gameplay_tick()==id.first_tick;});}),
+        "oldest all-peer consensus releases exactly one ordered credit");
+    RoomFrame ninth;
+    if(!check(rooms[0]->pending_gameplay_verifications()==7 && !rooms[0]->gameplay_frame_blocked() && rooms[0]->TakeFrame(ninth) &&
+        ninth.tick==id.first_tick+8 && rooms[0]->gameplay_frame_blocked(),"released credit permits one taken native tick, which still requires its own local completion"))return false;
+    for(unsigned round=1;round<8;++round){RoomFrame frame;const auto tick=id.first_tick+round;
+        if(!check(rooms[15]->TakeFrame(frame) && frame.tick==tick && rooms[15]->CompleteGameplay(tick,fixture_digest(tick)),"delayed final peer completes its own contiguous missing rounds"))return false;}
+    if(!check(pump([&]{return std::all_of(rooms.begin(),rooms.end(),[&](const auto& room){return room->verified_gameplay_tick()==id.first_tick+7;});}),"authority emits every acknowledgement in exact oldest-first order"))return false;
+    if(!check(rooms[0]->gameplay_frame_blocked() && rooms[0]->impl_->gameplay_pending==ninth.tick &&
+        rooms[0]->CompleteGameplay(ninth.tick,fixture_digest(ninth.tick)),"older all-peer acknowledgements never erase a newer taken frame's pending native completion"))return false;
+    for(unsigned peer=1;peer<16;++peer){RoomFrame frame;
+        if(!check(rooms[peer]->TakeFrame(frame) && frame==ninth && rooms[peer]->CompleteGameplay(frame.tick,fixture_digest(frame.tick)),"all remaining native worlds execute released ninth frame"))return false;}
+    check(pump([&]{return std::all_of(rooms.begin(),rooms.end(),[&](const auto& room){return !room->gameplay_completion_pending() &&
+        room->pending_gameplay_verifications()==0 && room->verified_gameplay_tick()==ninth.tick;});}),"full verification queue drains without fabricating local native execution");
+    // A remote may be eight completed worlds ahead of local consumption, but
+    // cannot exceed that bound or skip its own proof sequence.
+    if(!check(window_running(2),"remote-ahead eight-credit fixture connects"))return false;
+    for(uint64_t tick=id.first_tick+id.input_delay;tick<id.first_tick+9;++tick)for(auto& room:rooms)if(!room->SubmitLocal(tick,Neutral()))return false;
+    if(!check(pump([&]{return rooms[1]->impl_->frames.size()>=9;}),"remote-ahead fixture frames emitted"))return false;
+    for(unsigned i=0;i<8;++i){RoomFrame frame;if(!check(rooms[1]->TakeFrame(frame) && rooms[1]->CompleteGameplay(frame.tick,fixture_digest(frame.tick)),"remote local completion may precede slow host by bounded window"))return false;}
+    check(pump([&]{return rooms[0]->impl_->gameplay_rounds.size()==8;}) && !rooms[0]->gameplay_completion_pending() &&
+        rooms[0]->pending_gameplay_verifications()==0 && !rooms[0]->verified_gameplay_tick(),"early remote proofs never assert that the host executed a world");
+    auto overflow_proof=proof_packet(Wire::GameplayComplete,id.first_tick+8,fixture_digest(id.first_tick+8));
+    rooms[1]->impl_->connections.front()->Queue(overflow_proof);
+    check(pump([&]{return rooms[0]->state()==RoomState::Error;}),"ninth remote proof cannot allocate beyond negotiated world window");
+    if(!check(window_running(2),"eight-credit stalled native-world deadline fixture connects"))return false;
+    for(uint64_t tick=id.first_tick+id.input_delay;tick<id.first_tick+8;++tick)for(auto& room:rooms)if(!room->SubmitLocal(tick,Neutral()))return false;
+    if(!check(pump([&]{return rooms[0]->impl_->frames.size()>=8;}),"deadline fixture has full eight-frame queue"))return false;
+    for(unsigned round=0;round<8;++round){RoomFrame frame;
+        if(!check(rooms[0]->TakeFrame(frame) && rooms[0]->CompleteGameplay(frame.tick,fixture_digest(frame.tick)),"host fixture completes bounded worlds while peer has not executed"))return false;}
+    const auto credit_deadline=rooms[0]->impl_->progress,credit_clock=Clock::now();
+    for(unsigned second=1;second<15;++second){
+        for(auto& room:rooms)check(room->SubmitLocal(id.first_tick+7+second,Neutral()),"future intent may queue without extending completion deadline");
+        for(auto& room:rooms)room->Poll(credit_clock+std::chrono::seconds(second));
+    }
+    check(rooms[0]->state()==RoomState::Running && rooms[0]->impl_->progress==credit_deadline && rooms[0]->pending_gameplay_verifications()==8,
+        "local completion, future inputs and heartbeat traffic never renew oldest consensus deadline");
+    rooms[0]->Poll(credit_clock+Timeout+std::chrono::seconds(1));
+    check(rooms[0]->state()==RoomState::Error && !rooms[0]->verified_gameplay_tick(),"full verification window faults on absolute oldest-world deadline");
+    if(!check(window_running(2),"future windowed digest mismatch fixture connects"))return false;
+    if(!check(pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& room){return room->impl_->frames.size()>=2;});}),"future mismatch fixture receives both native frames"))return false;
+    for(unsigned round=0;round<2;++round){const auto tick=id.first_tick+round;
+        for(unsigned peer=0;peer<2;++peer){RoomFrame frame;
+            if(!rooms[peer]->TakeFrame(frame) || frame.tick!=tick)return false;
+            auto digest=fixture_digest(tick);if(peer==1 && round==1)digest[1]^=1;
+            if(!rooms[peer]->CompleteGameplay(tick,digest))return false;
+        }
+    }
+    check(pump([&]{return rooms[0]->state()==RoomState::Error;}) && rooms[0]->verified_gameplay_tick()==id.first_tick,
+        "future digest mismatch cannot be hidden by correct older consensus or release its credit");
+    if(!check(window_running(2),"out-of-order eight-credit proof fixture connects"))return false;
+    auto skipped_proof=proof_packet(Wire::GameplayComplete,id.first_tick+1,fixture_digest(id.first_tick+1));
+    rooms[1]->impl_->connections.front()->Queue(skipped_proof);
+    check(pump([&]{return rooms[0]->state()==RoomState::Error;}),"within-window future proof still cannot skip a peer's oldest completion");
+    if(!check(window_running(2) && take_fixture_tick(id.first_tick),"forged future acknowledgement fixture consumes oldest world"))return false;
+    for(auto& room:rooms)if(!room->CompleteGameplay(id.first_tick,proof))return false;
+    auto skipped_ack=proof_packet(Wire::GameplayVerified,id.first_tick+1,fixture_digest(id.first_tick+1));
+    rooms[0]->impl_->connections.front()->Queue(skipped_ack);
+    check(pump([&]{return rooms[1]->state()==RoomState::Error;}),"authority acknowledgement cannot skip oldest local completed proof");
+    // Exact handshake agreement; a mismatched newcomer cannot alter host policy.
+    rooms.clear();rooms.push_back(std::make_unique<Room>());rooms.push_back(std::make_unique<Room>());
+    if(!check(rooms[0]->SetGameplayVerificationWindow(8) && rooms[0]->Host(id,"127.0.0.1",0,2,"Host") &&
+        rooms[1]->Join(id,"127.0.0.1",rooms[0]->port(),"Mismatched"),"mismatched credit request reaches native handshake"))return false;
+    check(pump([&]{return rooms[1]->state()==RoomState::Error;}) && rooms[0]->gameplay_verification_window()==8 &&
+        rooms[0]->lobby().players.size()==1,"Hello rejects mixed completion windows without changing authority");
+    const auto window_saved_id=id;id.first_tick=UINT64_MAX-Window;
+    if(!check(window_running(2),"eight-credit UINT64 tail fixture begins legal late timeline"))return false;
+    for(unsigned round=0;round<Window-7;++round){const auto tick=id.first_tick+round;
+        for(auto& room:rooms)if(!room->SubmitLocal(tick+id.input_delay,Neutral()))return false;
+        if(!check(take_fixture_tick(tick) && complete_fixture_tick(tick),"late prefix completes exact native fixture worlds"))return false;
+    }
+    for(unsigned round=Window-7;round+id.input_delay<=Window;++round)
+        for(auto& room:rooms)if(!room->SubmitLocal(id.first_tick+round+id.input_delay,Neutral()))return false;
+    if(!check(pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& room){return room->impl_->frames.size()>=8;});}),"last eight representable worlds are queued"))return false;
+    for(unsigned round=Window-7;round<=Window;++round){const auto tick=id.first_tick+round;
+        for(auto& room:rooms){RoomFrame frame;if(!check(room->TakeFrame(frame) && frame.tick==tick && room->CompleteGameplay(tick,fixture_digest(tick)),
+            "full completion window reaches UINT64_MAX without wrapping proof sequence"))return false;}
+    }
+    check(pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& room){return room->verified_gameplay_tick()==UINT64_MAX;});}),"all eight tail proofs verify through exact final tick");
+    for(auto& room:rooms){RoomFrame frame;check(!room->gameplay_completion_pending() && room->gameplay_frame_blocked() && !room->TakeFrame(frame) &&
+        !room->CompleteGameplay(0,proof) && !room->SubmitLocal(0,Neutral()),"exhausted verification/consumption/source clocks cannot restart atzero");}
+    id=window_saved_id;
+    fixture_verification_window=1;
 
     if(!check(setup(2),"unsolicited WorldReady fixture connects lobby"))return false;
     auto premature=Packet(Wire::WorldReady);premature.insert(premature.end(),world.begin(),world.end());rooms[1]->impl_->connections.front()->Queue(premature);

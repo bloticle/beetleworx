@@ -1,4 +1,4 @@
-param([switch]$TraceInitialization,[switch]$Gameplay)
+param([switch]$TraceInitialization,[switch]$Gameplay,[string]$ReplayInvitationFile="",[uint32]$BehaviorTraceStartTick=0,[uint32]$BehaviorDumpTick=4294967295,[ValidateRange(1,8)][int]$VerificationWindow=1)
 $ErrorActionPreference='Stop'
 $workspace=(Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 if(Get-CimInstance Win32_Process -Filter "Name='beetleworx.exe' OR Name='EM2Recomp.exe'"){throw 'Close existing game sessions before starting an isolated Room pair.'}
@@ -9,11 +9,11 @@ $launcher=Join-Path $PSScriptRoot 'start-private-gpu-profile.ps1'
 $metadata=Join-Path $workspace 'analysis/current-private-gpu-profile.json'
 $hostRecord=$null
 try{
-    & $launcher -Scale 1 -NoGpuProfile -OriginalLighting -GameplayTiming 0 -FrameCap 30 -OnlineRoomRole host -OnlineRoomInvitationFile $invitation -TraceRoomInitialization:$TraceInitialization -OnlineRoomGameplay:$Gameplay
+    & $launcher -Scale 1 -NoGpuProfile -OriginalLighting -GameplayTiming 0 -FrameCap 30 -OnlineRoomRole host -OnlineRoomInvitationFile $invitation -OnlineRoomReplayInvitation $ReplayInvitationFile -TraceRoomInitialization:$TraceInitialization -OnlineRoomGameplay:$Gameplay -OnlineRoomBehaviorTraceStart $BehaviorTraceStartTick -OnlineRoomBehaviorDumpTick $BehaviorDumpTick -OnlineRoomVerificationWindow $VerificationWindow
     $hostRecord=Get-Content -LiteralPath $metadata -Raw | ConvertFrom-Json
     if($hostRecord.online_room_role -ne 'host'){throw 'Host launch did not produce its expected private metadata.'}
     $hostRecord | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $pair 'host-process.json')
-    & $launcher -Scale 1 -NoGpuProfile -OriginalLighting -GameplayTiming 0 -FrameCap 30 -OnlineRoomRole guest -OnlineRoomInvitationFile $invitation -AllowConcurrentRoomProbe -TraceRoomInitialization:$TraceInitialization -OnlineRoomGameplay:$Gameplay
+    & $launcher -Scale 1 -NoGpuProfile -OriginalLighting -GameplayTiming 0 -FrameCap 30 -OnlineRoomRole guest -OnlineRoomInvitationFile $invitation -AllowConcurrentRoomProbe -TraceRoomInitialization:$TraceInitialization -OnlineRoomGameplay:$Gameplay -OnlineRoomBehaviorTraceStart $BehaviorTraceStartTick -OnlineRoomBehaviorDumpTick $BehaviorDumpTick -OnlineRoomVerificationWindow $VerificationWindow
     $guestRecord=Get-Content -LiteralPath $metadata -Raw | ConvertFrom-Json
     if($guestRecord.online_room_role -ne 'guest'){throw 'Guest launch did not produce its expected private metadata.'}
     $guestRecord | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $pair 'guest-process.json')

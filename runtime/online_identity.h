@@ -10,6 +10,9 @@ namespace em2::net {
 struct InstallationIdentity {
     std::array<uint8_t,32> build{},content{},checkpoint{};
     uint64_t files=0,bytes=0;
+    // Physical verification reads (including build/config key scans); logical
+    // files/bytes above retain their existing protocol-independent semantics.
+    uint64_t read_bytes=0,reused_files=0;
     bool reused_content_digest=false;
 };
 struct IdentityResult {std::optional<InstallationIdentity> value;std::string error;};

@@ -32,6 +32,8 @@ REXCVAR_DEFINE_STRING(em2_room_probe_role,"","Debug","Private native Room loopba
 REXCVAR_DEFINE_STRING(em2_room_probe_invitation_file,"","Debug","Private native Room probe NEW absolute invitation path");
 REXCVAR_DEFINE_INT32(em2_room_probe_expected_players,2,"Debug","Private native Room probe transport participant count 2..16; not playable actor capacity");
 REXCVAR_DEFINE_BOOL(em2_room_probe_gameplay,false,"Debug","Explicit private two-retail-player native gameplay experiment; no public-menu enablement");
+REXCVAR_DEFINE_INT32(em2_room_probe_verification_window,1,"Debug","Private native Room completed-update credit 1..8; must match on all peers");
+REXCVAR_DEFINE_STRING(em2_room_probe_replay_invitation_file,"","Debug","Host-only private loopback replay: reuse a captured session nonce while freshly verifying build/content/save");
 namespace em2::net {
 namespace {
 namespace fs=std::filesystem;
@@ -147,6 +149,8 @@ bool PreparePrivateRoomProbe(const fs::path& executable,const fs::path& content,
         Require(count>=2 && count<=16,"Private Room probe expects 2..16 transport participants");
         Require(!REXCVAR_GET(em2_room_probe_gameplay) || count==2,"Private retail gameplay currently requires exactly two participants");
         Require(REXCVAR_GET(em2_private_profile) && !REXCVAR_GET(em2_user_data_directory).empty(),"Private Room probe requires private_profile and explicit isolated user root");
+        const auto window=REXCVAR_GET(em2_room_probe_verification_window);
+        Require(window>=1 && window<=8 && boot.SetGameplayVerificationWindow(uint8_t(window)),"Private Room verification window must be 1..8");
         Require(REXCVAR_GET(em2_online_auto_continue),"Private Room probe requires native online automatic Continue enabled");
         Require(!REXCVAR_GET(em2_online_menu) && !REXCVAR_GET(em2_online_qa_prelaunch) && REXCVAR_GET(em2_online_qa_role).empty() &&
             REXCVAR_GET(em2_native_lobby_qa_role).empty() && !REXCVAR_GET(em2_open_native_online_menu) &&
@@ -196,8 +200,22 @@ bool PreparePrivateRoomProbe(const fs::path& executable,const fs::path& content,
         if(role=="host"){
             Require(MissingFile(invitation),"Private Room host invitation already exists; never replacing it");
             const auto source=user/"42560816";NoReparse(source);Require(fs::is_directory(source),"Private Room host requires an already isolated campaign copy");
-            Require(boot.Host(paths,source,"127.0.0.1","127.0.0.1",uint8_t(count),"Room probe host"),"Private Room host preparation rejected");
+            std::optional<std::array<uint8_t,16>> replay;
+            const auto replay_path=fs::path(REXCVAR_GET(em2_room_probe_replay_invitation_file));
+            if(!replay_path.empty()){
+                Require(replay_path.is_absolute(),"Private replay invitation path must be absolute");
+                NoReparse(replay_path);const auto canonical=fs::canonical(replay_path);
+                Require(Within(canonical,analysis) && canonical!=invitation,"Private replay requires an existing separate analysis invitation");
+                const auto encoded=ReadInvitation(canonical);
+                Require(bool(encoded),"Private replay invitation is not readable");
+                const auto old=DecodeInvite(*encoded);
+                Require(old && old->first_tick==0 && old->input_delay==2,"Private replay requires the same zero-start/two-tick timeline");
+                replay=old->session;
+                REXLOG_INFO("Private Room host replaying captured session nonce from {}; build/content/checkpoint are freshly measured, new port/invitation/root",canonical.string());
+            }
+            Require(boot.Host(paths,source,"127.0.0.1","127.0.0.1",uint8_t(count),"Room probe host",0,2,replay),"Private Room host preparation rejected");
         }else{
+            Require(REXCVAR_GET(em2_room_probe_replay_invitation_file).empty(),"Only the private host selects the replay identity");
             const auto deadline=Clock::now()+std::chrono::seconds(180);std::optional<std::string> code;
             auto next_wait_log=Clock::now();
             while(Clock::now()<deadline){code=ReadInvitation(invitation);if(code)break;

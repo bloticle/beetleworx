@@ -32,6 +32,10 @@ public:
     ~Room();
     Room(const Room&)=delete;
     Room& operator=(const Room&)=delete;
+    // Exact Hello/Welcome agreement, immutable after Host/Join. One preserves
+    // synchronous verification; at most eight completed worlds may await proof.
+    bool SetGameplayVerificationWindow(uint8_t completed_worlds);
+    uint8_t gameplay_verification_window()const;
     bool Host(const Identity&,std::string_view numeric_address,uint16_t port,
         uint8_t gameplay_capacity,std::string_view name="Player 1");
     bool Join(const Identity&,std::string_view numeric_address,uint16_t port,std::string_view name);
@@ -80,14 +84,18 @@ public:
     bool SubmitLocal(uint64_t tick,const RoomCommand&);
     // Inspect without advancing the transport timeline. Native admission may
     // need to wait; only TakeFrame commits consumption of this same tick.
-    // A previous consumed tick awaiting all-peer completion blocks both calls.
+    // A taken tick awaiting local Complete, or a full verification-credit
+    // window, blocks both calls. No frame skips the ordered native timeline.
     bool PeekFrame(RoomFrame&)const;
     bool TakeFrame(RoomFrame&);
-    // One consumed native tick may be outstanding. All frozen peers must
-    // acknowledge the same nonzero completed-world digest before another tick
-    // can be inspected/consumed. Queued input is not a world completion.
+    // Exactly one taken frame awaits local Complete. Completed worlds retain
+    // their exact nonzero digests until ordered all-peer consensus releases
+    // bounded credit; this does not change native tick duration or digest.
     bool CompleteGameplay(uint64_t consumed_tick,const std::array<uint8_t,32>& observation_digest);
     bool gameplay_completion_pending()const;
+    // Admission credit, distinct from the broad outstanding-proof query above.
+    bool gameplay_frame_blocked()const;
+    std::size_t pending_gameplay_verifications()const;
     std::optional<uint64_t> verified_gameplay_tick()const;
     void Disconnect();
     RoomState state()const;

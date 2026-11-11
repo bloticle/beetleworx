@@ -11,12 +11,14 @@ OBSERVATION = re.compile(
     r"modes (?P<modes>[^,]+), bits (?P<positions>[^,]+), life (?P<life>[^,]+), "
     r"ammo (?P<ammo>[^,]+), CRT calls/seeds (?P<random_calls>[^,]+), "
     r"last state (?P<random_state>[0-9A-Fa-f]+), stream (?P<random_stream>[0-9A-Fa-f]+), "
-    r"digest (?P<digest>[0-9a-f]{64})"
+    r"digest (?P<digest>[0-9a-f]{64})(?:, agreed (?P<agreed>true|false))?"
 )
 
 
 def read_observations(path):
     observations, conflicts = {}, set()
+    ignored = {"pre_admission": 0, "unagreed": 0}
+    legacy_started = False
     with path.open(encoding="utf-8", errors="replace") as source:
         for line in source:
             match = OBSERVATION.search(line)
@@ -24,16 +26,29 @@ def read_observations(path):
                 continue
             fields = match.groupdict()
             tick = int(fields.pop("tick"))
+            agreed = fields.pop("agreed")
+            if agreed == "false":
+                ignored["unagreed"] += 1
+                continue
+            if agreed is None and not legacy_started:
+                # This harness negotiates first_tick=0. Unagreed logging uses
+                # native tick_number, incremented before observation (>=1).
+                # Old logs therefore start their agreed stream at tick zero;
+                # pre-load diagnostics may otherwise collide with later ticks.
+                if tick != 0:
+                    ignored["pre_admission"] += 1
+                    continue
+                legacy_started = True
             if tick in observations and observations[tick] != fields:
                 conflicts.add(tick)
             else:
                 observations[tick] = fields
-    return observations, sorted(conflicts)
+    return observations, sorted(conflicts), ignored
 
 
 def compare(host, guest, minimum):
-    left, left_conflicts = read_observations(host)
-    right, right_conflicts = read_observations(guest)
+    left, left_conflicts, left_ignored = read_observations(host)
+    right, right_conflicts, right_ignored = read_observations(guest)
     shared = sorted(left.keys() & right.keys())
     mismatches = [tick for tick in shared if left[tick]["digest"] != right[tick]["digest"]]
     contiguous = bool(shared) and shared == list(range(shared[0], shared[-1] + 1))
@@ -51,6 +66,7 @@ def compare(host, guest, minimum):
         "contiguous": contiguous, "mismatches": mismatches,
         "first_mismatch_fields": differences,
         "duplicate_conflicts": {"host": left_conflicts, "guest": right_conflicts},
+        "ignored_diagnostics": {"host": left_ignored, "guest": right_ignored},
         "limitation": "Only recorded observation fields are compared; this does not establish full-world determinism or playable multiplayer.",
     }
 

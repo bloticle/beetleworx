@@ -14,12 +14,14 @@ public:
 private:
     unsigned pending_=0;
 };
-// Defer finalization until the next tick is admitted. If admission stops, the
-// native outer finish call owns the last pending tick, exactly once.
+// Normally defer finalization until the next tick is admitted. An owner whose
+// admission requires the preceding completion must finish before asking for
+// another frame. The outer finish owns only a remaining pending tick.
 template<class Prepare,class Finish,class Run,class Boundary>
-SimulationBatch RunSimulationBatch(unsigned planned,Prepare prepare,Finish finish,Run run,Boundary boundary) {
+SimulationBatch RunSimulationBatch(unsigned planned,Prepare prepare,Finish finish,Run run,Boundary boundary,bool finish_before_admission=false) {
     SimulationBatch result;
     for(unsigned i=0;i<planned;++i) {
+        if(finish_before_admission && result.finish_pending) {finish();result.finish_pending=false;}
         if(!prepare()) break;
         if(result.finish_pending) {finish();result.finish_pending=false;}
         if(!boundary())break;

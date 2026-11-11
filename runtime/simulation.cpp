@@ -13,6 +13,7 @@
 #include "render_options.h"
 #include "native_sampler.h"
 #include "native_random.h"
+#include "online_behavior_trace.h"
 #include "skinning.h"
 #include "physics_timing.h"
 #include "players.h"
@@ -79,6 +80,8 @@ PPC_EXTERN_FUNC(__imp__sub_830B5240);
 PPC_EXTERN_FUNC(__imp__sub_830751E0);
 PPC_EXTERN_FUNC(__imp__sub_826C9F38);
 PPC_EXTERN_FUNC(__imp__sub_831BC328);
+PPC_EXTERN_FUNC(__imp__sub_831C1360);
+PPC_EXTERN_FUNC(__imp__sub_831C13F0);
 PPC_EXTERN_FUNC(__imp__sub_8273D880);
 PPC_EXTERN_FUNC(__imp__sub_82581840);
 PPC_EXTERN_FUNC(__imp__sub_82568C20);
@@ -1290,12 +1293,12 @@ void CompleteNetworkObservation(PPCContext& ctx,uint8_t* base) {
         std::string hex;for(auto byte:*digest)hex+=fmt::format("{:02x}",byte);
         const auto& a=observations[0];const auto& b=observations[1];
         if(report && REXCVAR_GET(em2_trace_online_random_owners))REXLOG_INFO("Native online scene clock: tick {}, seconds {:08X}, accumulated {:016X}, counter {}, previous {}",observed_tick,PPC_LOAD_U32(0x833FCA4C),PPC_LOAD_U64(0x833FCA38),PPC_LOAD_U64(0x833FCA60),PPC_LOAD_U64(0x833FCA68));
-        REXLOG_INFO("Native gameplay observation v4: level '{}' state '{}' interior '{}' epoch {}, tick {}, modes {}/{}, bits {:08X}/{:08X}/{:08X}/{:08X}/{:08X}/{:08X}, life {}/{}/{}/{}, ammo {:08X}/{:08X}/{:08X}/{:08X}/{:08X}/{:08X}, CRT calls/seeds {}/{}, last state {:08X}, stream {:016X}, digest {}",
+        REXLOG_INFO("Native gameplay observation v4: level '{}' state '{}' interior '{}' epoch {}, tick {}, modes {}/{}, bits {:08X}/{:08X}/{:08X}/{:08X}/{:08X}/{:08X}, life {}/{}/{}/{}, ammo {:08X}/{:08X}/{:08X}/{:08X}/{:08X}/{:08X}, CRT calls/seeds {}/{}, last state {:08X}, stream {:016X}, digest {}, agreed {}",
             state.world.level.data(),state.world.state.data(),state.world.interior.data(),tick_number,observed_tick,a.mode,b.mode,std::bit_cast<uint32_t>(a.position[0]),std::bit_cast<uint32_t>(a.position[1]),std::bit_cast<uint32_t>(a.position[2]),
             std::bit_cast<uint32_t>(b.position[0]),std::bit_cast<uint32_t>(b.position[1]),std::bit_cast<uint32_t>(b.position[2]),
             state.life[0],state.life[1],state.life[2],state.life[3],std::bit_cast<uint32_t>(state.ammo[0]),std::bit_cast<uint32_t>(state.ammo[1]),
             std::bit_cast<uint32_t>(state.ammo[2]),std::bit_cast<uint32_t>(state.ammo[3]),std::bit_cast<uint32_t>(state.ammo[4]),std::bit_cast<uint32_t>(state.ammo[5]),
-            state.random.calls,state.random.seeds,state.random.last_state,state.random.sequence,hex);
+            state.random.calls,state.random.seeds,state.random.last_state,state.random.sequence,hex,report);
     }
     if(report && capture_online_random){
         for(size_t i=0;i<online_random_trace_size;++i){const auto& event=online_random_trace[i];
@@ -1397,6 +1400,7 @@ void RecordTransform(uint32_t object,uint8_t* base,bool camera=false) {
 
 void StartTick(uint8_t* base,bool agreed=false,uint64_t input_tick=0) {
     agreed_clock_tick=agreed;clock_input_tick=input_tick;
+    if(agreed)em2::net::BeginNativeBehaviorTraceTick(input_tick);
     random_observation={};
     online_random_trace_size=0;online_random_owner_size=0;
     const uint64_t random_start=REXCVAR_GET(em2_trace_online_random_start_tick);
@@ -1715,8 +1719,9 @@ PPC_FUNC_IMPL(sub_8273D880) {
         }
     }
 }
-void em2::ResetOnlineRandomTraceHistory(){random_failure_history.reset();trace_target_cache={};script_wait_trace_size=0;}
+void em2::ResetOnlineRandomTraceHistory(){random_failure_history.reset();trace_target_cache={};script_wait_trace_size=0;em2::net::ResetNativeBehaviorTrace();}
 void em2::DumpOnlineRandomTraceHistory(){
+    em2::net::DumpNativeBehaviorTrace();
     if(!random_failure_history)return;
     struct HostState{DWORD error=GetLastError();unsigned csr=_mm_getcsr();~HostState(){SetLastError(error);_mm_setcsr(csr);}}host_state;
     LogScriptWaitTrace();
@@ -1942,7 +1947,7 @@ PPC_FUNC_IMPL(sub_829ED310) {
         if(!em2::net::RoomBootstrapActive())em2::net::UpdateNativeOnlineSession(base,true);
         return (network_budget || (!em2::net::GameplayInputGate().active() && !em2::net::RoomBootstrapActive())) &&
             !em2::net::NativeOnlineTiming().halted && !em2::net::RoomBootstrapHalted();
-    });
+    },gameplay && gameplay->active());
     frame_steps=batch.steps;
     if(network_budget && !network_debt.Consume(batch.steps)) {
         REXLOG_ERROR("Online simulation consumed more ticks than its bounded schedule");network_debt.Reset();
@@ -2290,6 +2295,50 @@ static bool TestNativeClockIntervals() {
         if(sum!=frequency || FixedClockInterval(frequency,UINT64_MAX)!=FixedClockInterval(frequency,UINT64_MAX%30))return false;
     }
     if(!scope_ok)return false;
+    // Execute the actual native NPC timer helpers against consecutive original
+    // core-clock updates. Changing the sampled host counter must not change
+    // the cached scaled game counter used by 831C13F0. This distinguishes that
+    // counter from the intentionally local raw counter at 833FCA68.
+    for(const uint64_t frequency:{1000000ull,50000001ull}) {
+        std::vector<uint32_t> reference;
+        for(unsigned peer=0;peer<2;++peer) {
+            std::memset(base+0x833FCA20,0,128);
+            const uint64_t epoch=peer?9000000000ull:1000000000ull;
+            PPC_STORE_U64(0x833FCA60,epoch);
+            PPC_STORE_U64(0x833D04D8,frequency);
+            PPC_STORE_U32(0x833D04E0,std::bit_cast<uint32_t>(1.f/float(frequency)));
+            PPC_STORE_U32(0x833FCA80,30);
+            PPC_STORE_U32(0x833C01C0,std::bit_cast<uint32_t>(1.f));
+            tick_frequency=frequency;
+            PPCContext context{};context.r1.u64=0xF000;context.fpscr.InitHost();
+            context.r3.u64=0x2000;context.f1.f64=0;
+            __imp__sub_831C1360(context,base);
+            for(unsigned tick=0;tick<1080;++tick) {
+                // Different host stalls/epochs, identical authored simulation.
+                agreed_clock_tick=true;clock_input_tick=tick;
+                PPC_STORE_U8(0x833FCA86,tick>=20 && tick<23);
+                UpdateFixedClock(context,base,epoch+uint64_t(tick+1)*(peer?987654321ull:1000ull));
+                context.r3.u64=0x2000;
+                __imp__sub_831C13F0(context,base);
+                const auto elapsed=std::bit_cast<uint32_t>(float(context.f1.f64));
+                if(!peer)reference.push_back(elapsed);
+                else if(reference[tick]!=elapsed) {
+                    REXLOG_ERROR("Native NPC timer differs across host pacing: frequency {}, tick {}",frequency,tick);return false;
+                }
+                // Native single-precision accumulation may land slightly below
+                // 35 seconds; require the authored tick boundary, while the
+                // comparison above requires bit-exact elapsed time on peers.
+                if(tick==1052 && std::abs(context.f1.f64-35.)>1./30.) {
+                    REXLOG_ERROR("Native NPC timer lost authored 35-second boundary: {}",context.f1.f64);return false;
+                }
+                if(tick==1053) {
+                    context.r3.u64=0x2000;context.f1.f64=.25;
+                    __imp__sub_831C1360(context,base);
+                }
+            }
+        }
+    }
+    REXLOG_INFO("Original native NPC timers: 2160 exact peer comparisons across host stalls, local epochs, fractional frequency, pause, 35-second boundary and delayed reset");
     REXLOG_INFO("Agreed native clock: {} byte-exact output comparisons across local phases, counters, pauses, scales and tick exhaustion; local-phase control differs only as expected",comparisons);
     return true;
 }
@@ -2342,6 +2391,32 @@ bool TestSimulation() {
         check(FixedTimingPolicy(cap,false,false,false,false)==(cap!=30),"compatibility timing must retain the original 30-FPS native path");
         check(FixedTimingPolicy(cap,true,false,true,false) && FixedTimingPolicy(cap,true,false,false,true) &&
               FixedTimingPolicy(cap,true,true,false,false),"online ownership and explicit fixed override must win over native menu selection");
+    }
+    // A real Room owner cannot prepare a frame while its prior native update
+    // still awaits post-update/Complete. Finalize it before the next admission
+    // so low presentation rates can run multiple authored ticks per frame.
+    for(int fps:{15,20,30,60,120}) {
+        SimulationScheduler clock;SimulationDebt debt;
+        unsigned updates=0,finishes=0;bool pending=false,ordered=true;
+        int64_t previous=0;
+        for(int frame=0;frame<=fps*10;++frame) {
+            const auto now=int64_t(frame)*1000000000/fps;
+            const auto due=ScheduleSimulationFrame(clock,debt,now-previous,true,false);previous=now;
+            const auto batch=RunSimulationBatch(due,[&]{return !pending;},[&]{
+                ordered&=pending;pending=false;++finishes;
+            },[&]{ordered&=!pending;pending=true;++updates;return true;},[]{return true;},true);
+            if(batch.finish_pending){ordered&=pending;pending=false;++finishes;}
+            check(debt.Consume(batch.steps),"completed-first Room batch consumes only executed simulation debt");
+        }
+        check(ordered && !pending && updates==301 && finishes==301,
+            "completion-dependent admission sustains thirty native ticks at 15/20/30/60/120 presentation Hz with exactly one post-update each");
+    }
+    {
+        unsigned updates=0,finishes=0;bool pending=false;
+        const auto batch=RunSimulationBatch(3,[&]{return updates<1;},[&]{pending=false;++finishes;},
+            [&]{pending=true;++updates;return true;},[]{return true;},true);
+        check(updates==1 && finishes==1 && !pending && batch.steps==1 && !batch.finish_pending,
+            "blocked next admission cannot leave an already completed Room tick for outer finalization");
     }
     for(int fps:{30,60,90,120,240}) {
         SimulationScheduler clock;SimulationDebt debt;unsigned executed=0,finished=0;

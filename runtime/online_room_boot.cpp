@@ -18,7 +18,7 @@ bool NameValid(std::string_view text){LobbyRoster roster(2);return roster.Join(1
 }
 struct OnlineRoomBoot::Impl {
     BootStatus status;BootPaths paths;bool host=false,cancelling=false,installation_started=false;
-    std::string listen,advertised,name;uint16_t port=0;uint8_t capacity=0;
+    std::string listen,advertised,name;uint16_t port=0;uint8_t capacity=0,verification_window=1;
     std::optional<Invite> invite;
     std::unique_ptr<Room> room;
     std::stop_source stop;
@@ -38,12 +38,21 @@ struct OnlineRoomBoot::Impl {
 };
 OnlineRoomBoot::OnlineRoomBoot():impl_(std::make_unique<Impl>()){}
 OnlineRoomBoot::~OnlineRoomBoot(){impl_->stop.request_stop();}
+bool OnlineRoomBoot::SetGameplayVerificationWindow(uint8_t limit){
+    auto& p=*impl_;
+    if(p.status.state!=BootState::Idle || limit<1 || limit>8)return false;
+    p.verification_window=limit;return true;
+}
 bool OnlineRoomBoot::Host(BootPaths paths,const fs::path& source,std::string listen,std::string advertised,
-    uint8_t capacity,std::string name,uint16_t port,uint8_t delay){
+    uint8_t capacity,std::string name,uint16_t port,uint8_t delay,std::optional<std::array<uint8_t,16>> session_nonce){
     auto& p=*impl_;if(p.status.state!=BootState::Idle || capacity<2 || capacity>kOnlineRoomCapacity || delay>12 || !NameValid(name))return false;
     const auto local=ParseNumericAddress(listen,true),remote=ParseNumericAddress(advertised);
     if(!local || !remote || local->ipv6()!=remote->ipv6())return false;
-    std::array<uint8_t,16> nonce{};if(!NewSessionNonce(nonce))return false;
+    std::array<uint8_t,16> nonce{};
+    if(session_nonce){
+        nonce=*session_nonce;
+        if(std::all_of(nonce.begin(),nonce.end(),[](auto value){return value==0;}))return false;
+    }else if(!NewSessionNonce(nonce))return false;
     if(!EncodeInvite(Invite{advertised,port?port:uint16_t(1),nonce,0,delay}))return false;
     const auto initialization=paths.startup_policy==StartupPolicy::NativeMenu?InitializationPolicy::SharedNativeV1:ConfiguredNativeInitializationPolicy();
     p.paths=std::move(paths);p.host=true;p.listen=std::move(listen);p.advertised=std::move(advertised);p.name=std::move(name);p.port=port;p.capacity=capacity;
@@ -72,6 +81,7 @@ void OnlineRoomBoot::Poll(){
         if(p.preparation.valid()){
             if(p.preparation.wait_for(std::chrono::seconds(0))!=std::future_status::ready)return;
             auto prepared=p.preparation.get();p.room=std::make_unique<Room>();
+            if(!p.room->SetGameplayVerificationWindow(p.verification_window))throw std::runtime_error("Invalid gameplay verification window");
             if(p.host){
                 if(!p.room->HostWithCheckpoint(prepared.identity,p.listen,p.port,p.capacity,p.name,std::move(prepared.bundle)))throw std::runtime_error("Could not host the verified online room. Check the address and port.");
                 const auto invite=EncodeInvite(Invite{p.advertised,p.room->port(),prepared.identity.session,prepared.identity.first_tick,prepared.identity.input_delay});
@@ -146,6 +156,11 @@ bool TestOnlineRoomBoot(const fs::path& root){
         };
         {
             OnlineRoomBoot invalid;
+            check(!invalid.SetGameplayVerificationWindow(0) && !invalid.SetGameplayVerificationWindow(9) &&
+                invalid.SetGameplayVerificationWindow(8) && invalid.SetGameplayVerificationWindow(1),
+                "verification credit configured before asynchronous preparation with strict bounds");
+            check(!invalid.Host(paths("zero-replay"),base/"frozen","127.0.0.1","127.0.0.1",3,"Host",0,2,std::array<uint8_t,16>{}) &&
+                invalid.status().state==BootState::Idle && !fs::exists(base/"zero-replay"),"explicit zero session identity rejects before workers or files");
             check(!invalid.Join(paths("invalid-invite"),"not an invitation","Guest") && !invalid.Host(paths("invalid-name"),base/"frozen","127.0.0.1","127.0.0.1",3,"bad\nname") &&
                 !invalid.Host(paths("bad-capacity"),base/"frozen","127.0.0.1","127.0.0.1",17,"Host") &&
                 !invalid.Host(paths("bad-delay"),base/"frozen","127.0.0.1","127.0.0.1",3,"Host",0,13) &&
@@ -162,11 +177,14 @@ bool TestOnlineRoomBoot(const fs::path& root){
                 !fs::exists(base/"content"/"forbidden-room-root"),"shared existing preparation rejects relative/nested/existing destination without selecting normal saves");
         }
         boots.clear();boots.push_back(std::make_unique<OnlineRoomBoot>());
-        if(!check(boots[0]->Host(paths("host"),base/"frozen","127.0.0.1","127.0.0.1",3,"Host",0,0) &&
+        check(boots[0]->SetGameplayVerificationWindow(8),"host configures bounded completion credit before workers");
+        std::array<uint8_t,16> replay_nonce{};replay_nonce[0]=0xA5;
+        if(!check(boots[0]->Host(paths("host"),base/"frozen","127.0.0.1","127.0.0.1",3,"Host",0,0,replay_nonce) &&
             pump([&]{return boots[0]->status().state==BootState::WaitingForPeer && !boots[0]->status().invitation.empty();}),"host worker verifies assets, packs and privately installs before publishing real invitation"))return false;
         const auto invitation=boots[0]->status().invitation;const auto decoded=DecodeInvite(invitation);
-        check(decoded && decoded->input_delay==0 && !boots[0]->TakeStarted(),"same invitation codec retains exact zero delay; waiting host cannot hand off");
-        for(unsigned i=1;i<3;++i){boots.push_back(std::make_unique<OnlineRoomBoot>());check(boots[i]->Join(paths("guest-"+std::to_string(i)),invitation,"Guest "+std::to_string(i)),"fresh guest without any local save begins shared fingerprint/download worker flow");}
+        check(decoded && decoded->input_delay==0 && decoded->session==replay_nonce && !boots[0]->TakeStarted(),"same invitation codec retains explicit session identity and exact zero delay; waiting host cannot hand off");
+        check(!boots[0]->SetGameplayVerificationWindow(1),"running preparation cannot change negotiated verification credit");
+        for(unsigned i=1;i<3;++i){boots.push_back(std::make_unique<OnlineRoomBoot>());check(boots[i]->SetGameplayVerificationWindow(8) && boots[i]->Join(paths("guest-"+std::to_string(i)),invitation,"Guest "+std::to_string(i)),"fresh guest without any local save begins shared fingerprint/download worker flow with matching completion credit");}
         if(!check(pump([&]{
             const auto progress=boots[0]->checkpoint_progress();
             return std::all_of(boots.begin(),boots.end(),[](const auto& boot){return boot->status().state==BootState::Ready;}) && progress.size()==3 &&
@@ -183,7 +201,7 @@ bool TestOnlineRoomBoot(const fs::path& root){
         if(!check(pump([&]{return std::all_of(boots.begin(),boots.end(),[](const auto& boot){return boot->room_state()==RoomState::Loading;});}),"Start reaches each coordinator as Loading, not native-world activation"))return false;
         std::vector<RoomBootResult> results;
         for(unsigned i=0;i<3;++i){auto result=boots[i]->TakeStarted();
-            if(!check(result && result->room && result->room->state()==RoomState::Loading && boots[i]->status().state==BootState::Taken && !boots[i]->TakeStarted(),"frozen Loading transport handed off exactly once"))return false;
+            if(!check(result && result->room && result->room->state()==RoomState::Loading && result->room->gameplay_verification_window()==8 && boots[i]->status().state==BootState::Taken && !boots[i]->TakeStarted(),"frozen Loading transport and negotiated completion credit handed off exactly once"))return false;
             check(result->user_data==paths(i?"guest-"+std::to_string(i):"host").new_user_data,"handoff retains the exact private worker save root");
             const auto installed=PackCheckpoint(result->user_data/"42560816");check(installed.value && installed.value->bytes==original.value->bytes,"host and every guest have byte-identical worker-installed checkpoint trees");
             boots[i]->Cancel();results.push_back(std::move(*result));

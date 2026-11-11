@@ -16,9 +16,13 @@ public:
     ~OnlineRoomBoot();
     OnlineRoomBoot(const OnlineRoomBoot&)=delete;
     OnlineRoomBoot& operator=(const OnlineRoomBoot&)=delete;
+    // Configure before starting workers; the same limit must be negotiated by
+    // every peer. One preserves the synchronous completion policy.
+    bool SetGameplayVerificationWindow(uint8_t completed_worlds);
     bool Host(BootPaths,const std::filesystem::path& frozen_checkpoint,
         std::string listen_address,std::string advertised_address,uint8_t gameplay_capacity,
-        std::string name="Player 1",uint16_t port=0,uint8_t input_delay=2);
+        std::string name="Player 1",uint16_t port=0,uint8_t input_delay=2,
+        std::optional<std::array<uint8_t,16>> session_nonce={});
     bool Join(BootPaths,std::string invitation,std::string name);
     void Poll();
     void Cancel();
