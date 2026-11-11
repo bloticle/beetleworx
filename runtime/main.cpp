@@ -84,6 +84,8 @@
 #include "online_local_movement.h"
 #include "online_local_jump.h"
 #include "online_basic_input_test.h"
+#include "online_room_boot.h"
+#include "online_world_random.h"
 
 #include "online_name_input.h"
 #include "online_native_menu.h"
@@ -452,7 +454,10 @@ public:
             ExitProcess(success?0:1);
         }
         if (REXCVAR_GET(em2_test_online_input)) {
-            const bool success=em2::net::TestOnlineRoom() && em2::net::TestNativeLocalMovement() && em2::net::TestNativeLocalJump() && em2::net::TestNativeGenericBasicInput() && em2::net::TestOwnedActorInput();
+            const auto fixture=exe_dir/("online-input-test-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+            const bool created=CreateDirectoryW(fixture.c_str(),nullptr)!=0;
+            const bool success=created && em2::net::TestOnlineRoom() && em2::net::TestOnlineRoomBoot(fixture/"boot") && em2::net::TestNativeWorldInitializationSeed() && em2::net::TestNativeLocalMovement() && em2::net::TestNativeLocalJump() && em2::net::TestNativeGenericBasicInput() && em2::net::TestOwnedActorInput() && em2::TestCanonicalNativeJoin();
+            if(created){std::error_code cleanup_error;std::filesystem::remove_all(fixture,cleanup_error);}
             spdlog::shutdown();ExitProcess(success?0:1);
         }
         if (REXCVAR_GET(em2_test_video_blocks)) {
@@ -490,7 +495,7 @@ public:
             const auto test_nonce=std::chrono::system_clock::now().time_since_epoch().count();
             const auto test_dir=exe_dir / ("pc-settings-test-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(test_nonce));
             const auto settings_ok=em2::TestGuestReadBatch() && em2::TestPCSettings(test_dir,game_dir/"ConfigFiles.ini") && em2::TestContentSetup(test_dir/"content-setup") && em2::TestContentLibraryPersistence(test_dir/"content-library") && em2::net::TestNativeContentRoot(test_dir/"content-root") && em2::TestDiscImageImport(test_dir/"disc-image") && em2::TestPackReads(test_dir/"pack-reads");
-            const auto controls_ok=em2::TestPsoBinaryCache(test_dir/"pso-cache") && em2::TestControls(test_dir/"controls") && em2::TestEngineWorkbench() && em2::TestGPUInterruptLifetime() && em2::TestGameplayMods(test_dir/"gameplay-mods") && em2::net::TestInstallationIdentity(test_dir/"online-identity") && em2::net::TestOnlineInvites() && em2::net::TestLANDiscovery() && em2::net::TestRouterMapping() && em2::net::TestNativeUpnpAutomation() && em2::net::TestUpnpRouterMapping() && em2::net::TestCheckpointBundles(test_dir/"checkpoint") && em2::net::TestCheckpointTransport(test_dir/"checkpoint-transport") && em2::net::TestOnlineBoot(test_dir/"online-boot") && em2::net::TestRetainedHostCampaigns(test_dir/"online-campaigns") && em2::net::TestNativeOnlineSession() && em2::net::TestOnlineNotices() && em2::TestAllocationTrace() && em2::TestPlatformAllocations() && em2::TestMovieTextureMemory() && em2::TestNativeHeapBudget() && em2::TestShadowResourceCreation() && em2::TestLiveShadowResize() && em2::TestNativeResources() && em2::TestNativeEntityProbe();
+            const auto controls_ok=em2::TestPsoBinaryCache(test_dir/"pso-cache") && em2::TestControls(test_dir/"controls") && em2::TestEngineWorkbench() && em2::TestGPUInterruptLifetime() && em2::TestGameplayMods(test_dir/"gameplay-mods") && em2::net::TestInstallationIdentity(test_dir/"online-identity") && em2::net::TestOnlineInvites() && em2::net::TestLANDiscovery() && em2::net::TestRouterMapping() && em2::net::TestNativeUpnpAutomation() && em2::net::TestUpnpRouterMapping() && em2::net::TestCheckpointBundles(test_dir/"checkpoint") && em2::net::TestCheckpointTransport(test_dir/"checkpoint-transport") && em2::net::TestOnlineBoot(test_dir/"online-boot") && em2::net::TestOnlineRoomBoot(test_dir/"online-room-boot") && em2::net::TestRetainedHostCampaigns(test_dir/"online-campaigns") && em2::net::TestNativeOnlineSession() && em2::net::TestOnlineNotices() && em2::TestAllocationTrace() && em2::TestPlatformAllocations() && em2::TestMovieTextureMemory() && em2::TestNativeHeapBudget() && em2::TestShadowResourceCreation() && em2::TestLiveShadowResize() && em2::TestNativeResources() && em2::TestNativeEntityProbe();
             const auto lowering_ok=em2::TestLinkTimeDispatch() && em2::TestNativeRandom() && em2::net::TestOnlinePerceptionBudget() && em2::TestPhysicsTiming() && em2::TestNativeMatrixMath() && em2::TestNativeMaterialBinding() && em2::TestMickeyEarInstances() && em2::TestNativeTypeCheck() && (!em2::HasLoweringTests || em2::TestLowering());
             std::string em1_collision_error;
             const auto em1_collision_ok=em2::em1::TestLevelPartitionClassification(em1_collision_error) && em2::em1::TestKeyframeColorEvaluator(em1_collision_error) && em2::em1::TestNifContainerCompatibility(em1_collision_error) && em2::em1::TestEm1HavokCollision(em1_collision_error) && em2::em1::TestNifFixedPointUvPromotion(em1_collision_error) && em2::em1::TestPortableBcPixels(em1_collision_error) && em2::em1::TestPreviewDiffusePeState(em1_collision_error) && em2::em1::TestLevelOriginalScriptLibrary() && em2::em1::TestLevelOriginalAudioOwnership();

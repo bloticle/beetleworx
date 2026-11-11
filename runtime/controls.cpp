@@ -77,6 +77,7 @@ bool online_join_controls=false,online_join_start=false;
 uint64_t controls_generation=0;
 uint64_t view_poll_epoch=0;
 struct SynchronizedControls {
+    DWORD owner_thread=0;
     bool active=false,has_frame=false,exhausted=false;
     uint64_t next=0;
     em2::net::Frame frame{};
@@ -547,7 +548,7 @@ bool BeginSynchronizedControls(uint64_t first_tick) {
     ++controls_generation;
     ++view_poll_epoch;
     ResetWheelInputs();
-    synchronized_controls={};synchronized_controls.active=true;synchronized_controls.next=first_tick;
+    synchronized_controls={};synchronized_controls.active=true;synchronized_controls.owner_thread=GetCurrentThreadId();synchronized_controls.next=first_tick;
     for(auto& sample:synchronized_controls.samples) sample.next=first_tick;
     for(auto& pending:pending_keys) pending.fill(false);
     for(auto& valid:latched_valid) valid.fill(false);
@@ -556,12 +557,18 @@ bool BeginSynchronizedControls(uint64_t first_tick) {
 bool PublishSynchronizedControls(const net::Frame& frame) {
     std::lock_guard lock(controls_mutex);
     auto& state=synchronized_controls;
-    if(!state.active) return false;
+    if(!state.active || state.owner_thread!=GetCurrentThreadId()) return false;
     if(state.has_frame && frame.tick==state.frame.tick) return frame==state.frame;
     if(state.exhausted || frame.tick!=state.next) return false;
     state.frame=frame;state.has_frame=true;
     if(state.next==UINT64_MAX) state.exhausted=true;else ++state.next;
     return true;
+}
+bool ReadPublishedSynchronizedControls(uint64_t& generation,net::Frame& frame){
+    std::lock_guard lock(controls_mutex);
+    if(!controls_generation || !synchronized_controls.active || !synchronized_controls.has_frame ||
+       synchronized_controls.owner_thread!=GetCurrentThreadId())return false;
+    generation=controls_generation;frame=synchronized_controls.frame;return true;
 }
 void EndSynchronizedControls() {
     std::lock_guard lock(controls_mutex);

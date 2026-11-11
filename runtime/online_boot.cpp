@@ -1,5 +1,6 @@
 #include "online_address.h"
 #include "online_boot.h"
+#include "online_boot_prepare.h"
 #include "online_discovery.h"
 #include "online_checkpoint.h"
 #include "online_campaigns.h"
@@ -19,7 +20,7 @@ REXCVAR_DECLARE(bool,em2_online_world_random);
 namespace em2::net {
 namespace {
 namespace fs=std::filesystem;
-struct Prepared {Identity identity;std::shared_ptr<const CheckpointBundle> bundle;};
+using Prepared=PreparedOnlineBoot;
 void Require(bool ok,const char* text){if(!ok)throw std::runtime_error(text);}
 bool Within(const fs::path& child,const fs::path& root) {
     auto c=child.begin();for(auto r=root.begin();r!=root.end();++r,++c) {
@@ -72,6 +73,11 @@ Prepared Prepare(const BootPaths& paths,const fs::path& source,bool host,uint8_t
         std::error_code error;if(fs::is_empty(destination,error) && !error)fs::remove(destination,error);throw;
     }
 }
+}
+PreparedOnlineBoot PrepareOnlineBoot(const BootPaths& paths,const fs::path& source,bool host,uint8_t delay,
+    InitializationPolicy initialization,const std::array<uint8_t,16>& nonce,
+    const std::shared_ptr<std::atomic<PreparationStep>>& step,std::stop_token stop){
+    return Prepare(paths,source,host,delay,initialization,nonce,step,stop);
 }
 struct OnlineBoot::Impl {
     BootStatus status;BootPaths paths;bool host=false,cancelling=false;

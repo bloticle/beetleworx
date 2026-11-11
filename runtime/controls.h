@@ -31,6 +31,9 @@ bool TestControls(const std::filesystem::path& directory);
 // frames only after the simulation barrier agrees on the next exact tick.
 bool BeginSynchronizedControls(uint64_t first_tick);
 bool PublishSynchronizedControls(const net::Frame&);
+// Read-only admission proof. Returns only a fully published frame on the
+// thread that began this generation; never polls or consumes local input.
+bool ReadPublishedSynchronizedControls(uint64_t& generation,net::Frame& frame);
 void EndSynchronizedControls();
 // Sample once per sequential local tick, before adding the network delay.
 // Repeated calls for a tick return its cached sample, not newer device input.

@@ -65,6 +65,8 @@ bool RequestSimulationSteps(unsigned count);
 void ResetPlayerMotionHistory(PPCContext& ctx,uint8_t* base);
 void RecordCameraInput(unsigned user,int16_t x,int16_t y,uint16_t buttons);
 bool InAgreedSimulationTick();
+// Current native update only; no timeline mutation or network-owner lookup.
+bool CurrentAgreedSimulationTick(uint64_t& tick);
 void ResetOnlineRandomTraceHistory();
 void DumpOnlineRandomTraceHistory();
 void RecordNativeRandom(bool reseed,uint32_t caller,uint32_t state,uint32_t result,const PPCContext* context=nullptr,uint8_t* base=nullptr);

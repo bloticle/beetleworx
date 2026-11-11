@@ -1,9 +1,19 @@
 #pragma once
 #include "ppc_context.h"
+#include "online.h"
 namespace em2 {
 bool TestNativePlayerActions();
 bool TestCanonicalNativeJoin();
 void ResetNativeSynchronizedJoinTiming();
+struct NativeJoinTick {
+    // Exact current published-controls generation, not a session pointer.
+    uint64_t owner_generation=0;
+    net::Frame raw_retail{};
+    bool joining=false;
+};
+enum class NativeJoinResult {Inactive,OutsideAgreedTick,Unpublished,NotReady,Nested,Duplicate,Dispatched};
+NativeJoinResult RunNativeSynchronizedJoin(PPCContext&,uint8_t*,const NativeJoinTick&);
+// Legacy Session/InputGate adapter; new owners use the explicit context above.
 void RunNativeSynchronizedJoin(PPCContext&,uint8_t*,uint16_t buttons);
 void RequestCharacterSwap();
 void UpdateCharacterSwap(PPCContext& ctx,uint8_t* base);

@@ -5,6 +5,7 @@
 #include "em1_level_collision.h"
 #include "ppc_context.h"
 #include "players.h"
+#include "controls.h"
 #include "allocation_trace.h"
 #include "native_engine.h"
 #include "mickey_ears.h"
@@ -22,6 +23,8 @@
 #include <chrono>
 #include <cstring>
 #include <string>
+#include <thread>
+#include <stdexcept>
 #include <windows.h>
 
 PPC_EXTERN_FUNC(__imp__sub_8276D6C8);
@@ -78,6 +81,10 @@ struct Record {
     uint32_t entity=0,controller=0,mode=0;
 };
 thread_local bool canonical_join_dispatch=false;
+struct NativeJoinLease {uint64_t generation=0,tick=0;DWORD thread=0;};
+thread_local NativeJoinLease native_join_lease;
+bool ExplicitJoinOwnsCurrentTick();
+bool SuppressOrdinaryJoin(bool scoped,bool legacy,bool explicit_owner){return !scoped && (legacy || explicit_owner);}
 uint32_t direct_boot_controls_pending=0;
 std::atomic<bool> swap_requested{false},oswald_selected{false},swap_recovering{false};
 std::atomic<const char*> swap_notice{nullptr};
@@ -298,7 +305,9 @@ bool ActionBelongsToSlot(uint32_t action,uint32_t slot,uint8_t* base) {
 }
 
 PPC_FUNC_IMPL(sub_8276EF50) {
-    if(!canonical_join_dispatch && em2::net::SynchronizedSessionActive() && em2::net::NativeOnlineStatus().state==em2::net::NativeSessionState::Joining){ctx.r3.u64=0;return;}
+    if(!canonical_join_dispatch && SuppressOrdinaryJoin(false,
+        em2::net::SynchronizedSessionActive() && em2::net::NativeOnlineStatus().state==em2::net::NativeSessionState::Joining,
+        ExplicitJoinOwnsCurrentTick())){ctx.r3.u64=0;return;}
     const auto manager=ctx.r3.u32;
     const auto before=ReadRecord(manager,1,base);
     __imp__sub_8276EF50(ctx,base);
@@ -1487,9 +1496,17 @@ struct NativeJoinClock {
     uint32_t manager=0;
     uint64_t current_tick=0,reset_tick=0;
     double delay=0;
-    void Begin(uint32_t owner,uint64_t tick){
-        if(!initialized || manager!=owner || tick<current_tick){*this={true,owner,tick,tick,0};}
+    uint64_t owner_generation=0,last_dispatch_tick=0;
+    bool dispatch_claimed=false;
+    void Begin(uint32_t owner,uint64_t tick,uint64_t generation=0){
+        if(!initialized || manager!=owner || tick<current_tick || owner_generation!=generation){
+            *this={};initialized=true;manager=owner;current_tick=reset_tick=tick;owner_generation=generation;
+        }
         current_tick=tick;
+    }
+    bool ClaimDispatch(){
+        if(dispatch_claimed && last_dispatch_tick==current_tick)return false;
+        dispatch_claimed=true;last_dispatch_tick=current_tick;return true;
     }
     double Elapsed()const{return double(float(double(current_tick-reset_tick)/30.0-delay));}
     void Reset(double seconds){reset_tick=current_tick;delay=seconds>0?seconds:0;}
@@ -1509,6 +1526,10 @@ void JoinReset(PPCContext& ctx,uint8_t* base,PPCFunc* original){
     if(canonical){const auto csr=_mm_getcsr();native_join_clock.Reset(delay);_mm_setcsr(csr);}
 }
 bool TestRetailJoinHelpers(){
+    struct RestoreFixtureState {
+        NativeJoinClock clock=native_join_clock;bool dispatch=canonical_join_dispatch;unsigned csr=_mm_getcsr();
+        ~RestoreFixtureState(){native_join_clock=clock;canonical_join_dispatch=dispatch;_mm_setcsr(csr);}
+    }restore_fixture_state;
     auto* base=static_cast<uint8_t*>(VirtualAlloc(nullptr,0x100000000ull,MEM_RESERVE,PAGE_READWRITE));
     if(!base)return false;
     struct Release{uint8_t* base;~Release(){VirtualFree(base,0,MEM_RELEASE);}}release{base};
@@ -1563,44 +1584,134 @@ bool TestRetailJoinHelpers(){
     _mm_setcsr(initial_csr);
     return true;
 }
-void DispatchCanonicalJoin(PPCContext& ctx,uint8_t* base,uint32_t manager,PPCFunc* handler){
+void DispatchCanonicalJoin(PPCContext& ctx,uint8_t* base,uint32_t manager,PPCFunc* handler,uint64_t tick=0,bool trace_allowed=false){
     if(ctx.r1.u32<1024)return;
-    struct Restore {PPCContext& ctx;PPCContext saved;bool prior=canonical_join_dispatch;unsigned csr=_mm_getcsr();~Restore(){ctx=saved;canonical_join_dispatch=prior;_mm_setcsr(csr);}}restore{ctx,ctx};
+    struct Restore {PPCContext& ctx;std::array<uint8_t,sizeof(PPCContext)> saved;bool prior=canonical_join_dispatch;unsigned csr=_mm_getcsr();DWORD error=GetLastError();
+        explicit Restore(PPCContext& value):ctx(value){std::memcpy(saved.data(),&ctx,sizeof(ctx));}
+        ~Restore(){std::memcpy(&ctx,saved.data(),sizeof(ctx));canonical_join_dispatch=prior;_mm_setcsr(csr);SetLastError(error);}}restore{ctx};
     const auto stack=ctx.r1.u32-512,event=stack+96,argument=stack+100;
     PPC_STORE_U32(stack,ctx.r1.u32);PPC_STORE_U32(event,0x8211F6B4);PPC_STORE_U32(argument,0x8208CB2C);
-    const bool trace=REXCVAR_GET(em2_trace_players) && em2::net::GameplayInputGate().active();
+    const bool trace=trace_allowed && REXCVAR_GET(em2_trace_players);
     const auto counter=trace?PPC_LOAD_U32(manager+684):0;
     const auto mode=trace?PPC_LOAD_U32(manager+352):0;
     const auto clock=trace?PPC_LOAD_U64(0x833FCA60):0;
     const auto start=trace?PPC_LOAD_U64(manager+696):0;
     canonical_join_dispatch=true;ctx.r1.u64=stack;ctx.r3.u64=manager;ctx.r4.u64=event;ctx.r5.u64=argument;
     handler(ctx,base);
-    if(trace)REXLOG_INFO("Native synchronized join: tick {}, result {}, mode {}->{}, retry {}->{}, threshold {:08X}, clock {}, timer {}",em2::net::GameplayInputGate().committed_tick(),ctx.r3.u32,mode,PPC_LOAD_U32(manager+352),counter,PPC_LOAD_U32(manager+684),PPC_LOAD_U32(manager+688),clock,start);
+    if(trace)REXLOG_INFO("Native synchronized join: tick {}, result {}, mode {}->{}, retry {}->{}, threshold {:08X}, clock {}, timer {}",tick,ctx.r3.u32,mode,PPC_LOAD_U32(manager+352),counter,PPC_LOAD_U32(manager+684),PPC_LOAD_U32(manager+688),clock,start);
 }
 }
 PPC_FUNC_IMPL(sub_831C13F0){JoinElapsed(ctx,base,__imp__sub_831C13F0);}
 PPC_FUNC_IMPL(sub_831C1360){JoinReset(ctx,base,__imp__sub_831C1360);}
-void em2::ResetNativeSynchronizedJoinTiming(){native_join_clock={};}
-void em2::RunNativeSynchronizedJoin(PPCContext& ctx,uint8_t* base,uint16_t buttons){
-    if(!(buttons&0x10) || !InAgreedSimulationTick() || net::NativeOnlineStatus().state!=net::NativeSessionState::Joining || !NativeOnlineJoinAllowed(base))return;
+void em2::ResetNativeSynchronizedJoinTiming(){native_join_clock={};native_join_lease={};}
+namespace {
+bool LeaseMatches(const NativeJoinLease& lease,uint64_t generation,uint64_t published_tick,uint64_t agreed_tick,DWORD thread){
+    return lease.generation && lease.generation==generation && lease.tick==published_tick && lease.tick==agreed_tick && lease.thread==thread;
+}
+bool ExplicitJoinOwnsCurrentTick(){
+    uint64_t tick=0,generation=0;em2::net::Frame frame;
+    return native_join_lease.generation && em2::CurrentAgreedSimulationTick(tick) &&
+        em2::ReadPublishedSynchronizedControls(generation,frame) && LeaseMatches(native_join_lease,generation,frame.tick,tick,GetCurrentThreadId());
+}
+em2::NativeJoinResult JoinTickAdmission(const em2::NativeJoinTick& request,uint64_t generation,const em2::net::Frame& published,uint64_t agreed_tick){
+    if(!request.joining || !(request.raw_retail.players[1].buttons&0x10))return em2::NativeJoinResult::Inactive;
+    if(!request.owner_generation || request.owner_generation!=generation || request.raw_retail!=published || request.raw_retail.tick!=agreed_tick)
+        return em2::NativeJoinResult::Unpublished;
+    return em2::NativeJoinResult::Dispatched;
+}
+}
+em2::NativeJoinResult em2::RunNativeSynchronizedJoin(PPCContext& ctx,uint8_t* base,const NativeJoinTick& request){
+    const auto csr=_mm_getcsr();const auto error=GetLastError();
+    struct Environment {unsigned csr;DWORD error;~Environment(){_mm_setcsr(csr);SetLastError(error);}}environment{csr,error};
+    if(!request.joining || !(request.raw_retail.players[1].buttons&0x10))return NativeJoinResult::Inactive;
+    if(canonical_join_dispatch)return NativeJoinResult::Nested;
+    uint64_t agreed_tick=0,generation=0;net::Frame published;
+    if(!CurrentAgreedSimulationTick(agreed_tick))return NativeJoinResult::OutsideAgreedTick;
+    if(!ReadPublishedSynchronizedControls(generation,published))return NativeJoinResult::Unpublished;
+    const auto admission=JoinTickAdmission(request,generation,published,agreed_tick);
+    if(admission!=NativeJoinResult::Dispatched)return admission;
+    if(!base || ctx.r1.u32<1024 || !NativeOnlineJoinAllowed(base))return NativeJoinResult::NotReady;
     const auto manager=PPC_LOAD_U32(0x833DAB60);
-    native_join_clock.Begin(manager,net::GameplayInputGate().committed_tick());
-    DispatchCanonicalJoin(ctx,base,manager,sub_8276EF50);
+    native_join_clock.Begin(manager,agreed_tick,generation);
+    if(!native_join_clock.ClaimDispatch())return NativeJoinResult::Duplicate;
+    native_join_lease={generation,agreed_tick,GetCurrentThreadId()};
+    DispatchCanonicalJoin(ctx,base,manager,sub_8276EF50,agreed_tick,true);
+    return NativeJoinResult::Dispatched;
+}
+void em2::RunNativeSynchronizedJoin(PPCContext& ctx,uint8_t* base,uint16_t buttons){
+    if(!(buttons&0x10) || net::NativeOnlineStatus().state!=net::NativeSessionState::Joining)return;
+    NativeJoinTick request;request.joining=true;
+    if(!ReadPublishedSynchronizedControls(request.owner_generation,request.raw_retail) ||
+       request.raw_retail.tick!=net::GameplayInputGate().committed_tick() || request.raw_retail.players[1].buttons!=buttons)return;
+    RunNativeSynchronizedJoin(ctx,base,request);
 }
 bool em2::TestCanonicalNativeJoin(){
+    const auto fail=[](unsigned line){REXLOG_ERROR("Canonical native join fixture failed at players.cpp:{}",line);return false;};
     const auto saved_clock=native_join_clock;
-    struct RestoreClock{NativeJoinClock saved;bool dispatch=canonical_join_dispatch;unsigned csr=_mm_getcsr();~RestoreClock(){native_join_clock=saved;canonical_join_dispatch=dispatch;_mm_setcsr(csr);}}restore_clock{saved_clock};
-    if(!TestRetailJoinHelpers())return false;
+    struct RestoreClock{NativeJoinClock saved;NativeJoinLease lease=native_join_lease;bool dispatch=canonical_join_dispatch;unsigned csr=_mm_getcsr();DWORD error=GetLastError();
+        ~RestoreClock(){native_join_clock=saved;native_join_lease=lease;canonical_join_dispatch=dispatch;_mm_setcsr(csr);SetLastError(error);}}restore_clock{saved_clock};
+    if(!TestRetailJoinHelpers())return fail(__LINE__);
+    // Real published input proof is read-only and bound to Begin's thread.
+    // This headless fixture owns a fresh controls generation, never a Session.
+    if(!BeginSynchronizedControls(730))return fail(__LINE__);
+    struct ControlsScope {~ControlsScope(){EndSynchronizedControls();}}controls_scope;
+    uint64_t generation=99;net::Frame published;published.tick=99;
+    if(ReadPublishedSynchronizedControls(generation,published) || generation!=99 || published.tick!=99)return fail(__LINE__);
+    net::Frame frame;frame.tick=730;frame.players[0].left_x=-123;frame.players[1].buttons=0x10;frame.players[1].right_y=321;
+    if(!PublishSynchronizedControls(frame) || !ReadPublishedSynchronizedControls(generation,published) || !generation || published!=frame)return fail(__LINE__);
+    bool wrong_thread_read=true,wrong_thread_publish=true;
+    std::thread other([&]{uint64_t epoch=0;net::Frame out;wrong_thread_read=ReadPublishedSynchronizedControls(epoch,out);
+        auto next=frame;++next.tick;next.players[0].left_x=999;wrong_thread_publish=PublishSynchronizedControls(next);});other.join();
+    uint64_t retained_generation=0;net::Frame retained;
+    if(wrong_thread_read || wrong_thread_publish || !ReadPublishedSynchronizedControls(retained_generation,retained) ||
+       retained_generation!=generation || retained!=frame)return fail(__LINE__);
+    NativeJoinTick request{generation,frame,true};
+    if(JoinTickAdmission(request,generation,frame,730)!=NativeJoinResult::Dispatched)return fail(__LINE__);
+    auto bad=request;bad.owner_generation=0;
+    if(JoinTickAdmission(bad,generation,frame,730)!=NativeJoinResult::Unpublished)return fail(__LINE__);
+    bad=request;++bad.owner_generation;
+    if(JoinTickAdmission(bad,generation,frame,730)!=NativeJoinResult::Unpublished)return fail(__LINE__);
+    bad=request;++bad.raw_retail.players[0].left_x;
+    if(JoinTickAdmission(bad,generation,frame,730)!=NativeJoinResult::Unpublished ||
+       JoinTickAdmission(request,generation,frame,731)!=NativeJoinResult::Unpublished)return fail(__LINE__);
+    uint64_t unchanged_tick=0xDEADBEEF;
+    if(CurrentAgreedSimulationTick(unchanged_tick) || unchanged_tick!=0xDEADBEEF)return fail(__LINE__);
+    PPCContext admission_ctx{};admission_ctx.r1.u64=0xF000;admission_ctx.fpscr.InitHost();
+    std::array<uint8_t,sizeof(PPCContext)> admission_before;std::memcpy(admission_before.data(),&admission_ctx,sizeof(admission_ctx));
+    if(RunNativeSynchronizedJoin(admission_ctx,nullptr,request)!=NativeJoinResult::OutsideAgreedTick ||
+       std::memcmp(&admission_ctx,admission_before.data(),sizeof(admission_ctx)))return fail(__LINE__);
+    canonical_join_dispatch=true;
+    const auto nested=RunNativeSynchronizedJoin(admission_ctx,nullptr,request);canonical_join_dispatch=false;
+    if(nested!=NativeJoinResult::Nested)return fail(__LINE__);
+    native_join_lease={generation,730,GetCurrentThreadId()};
+    const auto owned=LeaseMatches(native_join_lease,generation,730,730,GetCurrentThreadId());
+    if(!owned || !SuppressOrdinaryJoin(false,false,owned) || SuppressOrdinaryJoin(true,false,owned) ||
+       LeaseMatches(native_join_lease,generation,730,731,GetCurrentThreadId()) ||
+       LeaseMatches(native_join_lease,generation+1,730,730,GetCurrentThreadId()) ||
+       LeaseMatches(native_join_lease,generation,730,730,GetCurrentThreadId()+1))return fail(__LINE__);
+    ResetNativeSynchronizedJoinTiming();if(native_join_lease.generation || SuppressOrdinaryJoin(false,false,ExplicitJoinOwnsCurrentTick()))return fail(__LINE__);
+    NativeJoinClock claims;claims.Begin(0x2000,730,generation);
+    if(!claims.ClaimDispatch() || claims.ClaimDispatch())return fail(__LINE__);
+    claims.Reset(.5);claims.Begin(0x2000,731,generation);
+    if(!claims.ClaimDispatch() || !(claims.Elapsed()<0))return fail(__LINE__);
+    claims.Begin(0x2000,731,generation+1);
+    if(!claims.ClaimDispatch() || claims.Elapsed()!=0)return fail(__LINE__);
+    // Retire and reacquire the same controls API: an old owner's exact frame
+    // must fail even if manager and agreed tick would otherwise be identical.
+    EndSynchronizedControls();if(!BeginSynchronizedControls(730) || !PublishSynchronizedControls(frame))return fail(__LINE__);
+    uint64_t replacement=0;if(!ReadPublishedSynchronizedControls(replacement,published) || replacement==generation ||
+       JoinTickAdmission(request,replacement,published,730)!=NativeJoinResult::Unpublished)return fail(__LINE__);
+
     // Check the actual native reset's future-delay semantics at tick boundaries,
     // including manager replacement and timeline restart.
-    NativeJoinClock a;a.Begin(0x2000,40);if(a.Elapsed()!=0)return false;
-    a.Begin(0x2000,55);a.Reset(0.5);if(a.Elapsed()!=-0.5)return false;
-    a.Begin(0x2000,69);if(!(a.Elapsed()<0))return false;
-    a.Begin(0x2000,70);if(a.Elapsed()!=0)return false;
-    a.Begin(0x2000,71);if(!(a.Elapsed()>0))return false;
-    a.Begin(0x4000,1040);if(a.Elapsed()!=0)return false;
-    a.Begin(0x4000,0);if(a.Elapsed()!=0)return false;
-    a.Reset(-1);if(a.Elapsed()!=0)return false;
+    NativeJoinClock a;a.Begin(0x2000,40);if(a.Elapsed()!=0)return fail(__LINE__);
+    a.Begin(0x2000,55);a.Reset(0.5);if(a.Elapsed()!=-0.5)return fail(__LINE__);
+    a.Begin(0x2000,69);if(!(a.Elapsed()<0))return fail(__LINE__);
+    a.Begin(0x2000,70);if(a.Elapsed()!=0)return fail(__LINE__);
+    a.Begin(0x2000,71);if(!(a.Elapsed()>0))return fail(__LINE__);
+    a.Begin(0x4000,1040);if(a.Elapsed()!=0)return fail(__LINE__);
+    a.Begin(0x4000,0);if(a.Elapsed()!=0)return fail(__LINE__);
+    a.Reset(-1);if(a.Elapsed()!=0)return fail(__LINE__);
     std::array<uint8_t,65536> memory{};auto* base=memory.data();
     PPCContext ctx{};ctx.r1.u64=0xF000;ctx.r3.u64=0xABCDEF;ctx.r31.u64=0x99887766;ctx.lr=0x12345678;ctx.fpscr.InitHost();
     const auto saved=ctx;const auto csr=_mm_getcsr();
@@ -1617,16 +1728,24 @@ bool em2::TestCanonicalNativeJoin(){
         ctx=saved;ctx.lr=caller?0x8276EFC8:0x8276EFCC;ctx.r3.u64=address?0x2000+696:0x2000+700;
         auto expected=ctx;timer(expected,base);canonical_join_dispatch=dispatch;
         JoinElapsed(ctx,base,timer);if(dispatch && caller && address)expected.f1.f64=0.5;
-        if(std::memcmp(&ctx,&expected,sizeof(ctx)) || PPC_LOAD_U32(0x100)!=0x11223344)return false;
+        if(std::memcmp(&ctx,&expected,sizeof(ctx)) || PPC_LOAD_U32(0x100)!=0x11223344)return fail(__LINE__);
     }
     ctx=saved;ctx.lr=0x8276F070;ctx.r3.u64=0x2000+696;ctx.f1.f64=0.25;canonical_join_dispatch=true;
-    JoinReset(ctx,base,timer);if(native_join_clock.Elapsed()!=-0.25)return false;
-    native_join_clock.Begin(0x2000,49);if(native_join_clock.Elapsed()!=0.75)return false;
-    ResetNativeSynchronizedJoinTiming();if(native_join_clock.initialized)return false;
+    JoinReset(ctx,base,timer);if(native_join_clock.Elapsed()!=-0.25)return fail(__LINE__);
+    native_join_clock.Begin(0x2000,49);if(native_join_clock.Elapsed()!=0.75)return fail(__LINE__);
+    ResetNativeSynchronizedJoinTiming();if(native_join_clock.initialized)return fail(__LINE__);
     ctx=saved;canonical_join_dispatch=restore_clock.dispatch;
     DispatchCanonicalJoin(ctx,base,0x2000,handler);
-    if(!PPC_LOAD_U32(0x2000) || canonical_join_dispatch || std::memcmp(&ctx,&saved,sizeof(ctx)) || _mm_getcsr()!=csr)return false;
+    if(!PPC_LOAD_U32(0x2000) || canonical_join_dispatch || std::memcmp(&ctx,&saved,sizeof(ctx)) || _mm_getcsr()!=csr)return fail(__LINE__);
     RunNativeSynchronizedJoin(ctx,nullptr,0x10);
-    if(std::memcmp(&ctx,&saved,sizeof(ctx)) || _mm_getcsr()!=csr)return false;
-    REXLOG_INFO("Canonical native join passed clock/reset boundaries, distinct local elapsed results and exact caller/scope isolation, borrowed stack/fixed-string arguments, complete caller/FP restoration and inactive tick rejection; native campaign acceptance separate");return true;
+    if(std::memcmp(&ctx,&saved,sizeof(ctx)) || _mm_getcsr()!=csr)return fail(__LINE__);
+    constexpr auto padding_begin=offsetof(PPCContext,vscr_sat)+sizeof(ctx.vscr_sat),padding_end=offsetof(PPCContext,f0);
+    static_assert(padding_end>padding_begin);
+    std::memset(reinterpret_cast<uint8_t*>(&ctx)+padding_begin,0xA7,padding_end-padding_begin);
+    std::array<uint8_t,sizeof(PPCContext)> raw_before;std::memcpy(raw_before.data(),&ctx,sizeof(ctx));
+    SetLastError(0xE230);const auto before_error=GetLastError();bool threw=false;
+    const auto throwing=+[](PPCContext& call,uint8_t*){call.r1.u64=0x1234;call.r5.u64=0x5566;SetLastError(42);_mm_setcsr(_mm_getcsr()|0x20);throw std::runtime_error("join fixture unwind");};
+    try{DispatchCanonicalJoin(ctx,base,0x2000,throwing);}catch(const std::runtime_error&){threw=true;}
+    if(!threw || canonical_join_dispatch || std::memcmp(&ctx,raw_before.data(),sizeof(ctx)) || _mm_getcsr()!=csr || GetLastError()!=before_error)return fail(__LINE__);
+    REXLOG_INFO("Canonical native join passed published-frame owner/thread/generation and agreed-tick admission, duplicate/nested isolation, clock/reset boundaries, distinct local elapsed results and exact caller/scope isolation, borrowed stack/fixed-string arguments, complete caller/FP restoration and inactive tick rejection; native campaign acceptance separate");return true;
 }

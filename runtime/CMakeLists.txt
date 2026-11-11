@@ -485,3 +485,4 @@ target_sources(EM2Recomp PRIVATE online_actor_reference.cpp)
 
 target_sources(EM2Recomp PRIVATE online_room.cpp online_actor_frames.cpp online_actor_death.cpp online_actor_jump.cpp online_local_movement.cpp online_local_jump.cpp)
 target_sources(EM2Recomp PRIVATE online_basic_input_test.cpp)
+target_sources(EM2Recomp PRIVATE online_room_boot.cpp)

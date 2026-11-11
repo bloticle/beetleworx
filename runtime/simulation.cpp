@@ -1621,6 +1621,10 @@ void RecordCameraInput(unsigned user,int16_t x,int16_t y,uint16_t buttons) {
 }
 
 bool em2::InAgreedSimulationTick(){return in_tick && agreed_clock_tick;}
+bool em2::CurrentAgreedSimulationTick(uint64_t& tick){
+    if(!InAgreedSimulationTick())return false;
+    tick=clock_input_tick;return true;
+}
 
 PPC_FUNC_IMPL(sub_8273D880) {
     // The coroutine scheduler subtracts one of the native clock deltas from

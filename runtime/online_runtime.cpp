@@ -36,9 +36,7 @@ struct Owner {
     std::atomic<DWORD> thread{0};
     std::optional<std::chrono::steady_clock::time_point> loading_poll;
     unsigned device=0;bool preparing=false,attached=false,continue_claimed=false,profile_claimed=false,menu_preparation=false;
-    uint64_t world_load_sequence=0;
-    std::array<uint64_t,2> player_initialization_sequence{};
-    InitializationPolicy initialization_policy=InitializationPolicy::Original;
+    NativeInitializationContext initialization;
     std::mutex status_mutex;NativeSessionStatus status;
     void StopPrelaunch(){if(prelaunch.joinable()){prelaunch.request_stop();prelaunch.join();}}
     ~Owner(){StopPrelaunch();}
@@ -48,6 +46,7 @@ struct Owner {
     }
     void Fail(const std::string& error) {
         const auto detail=error;
+        initialization.Fail();
         em2::DumpOnlineRandomTraceHistory();
         SetOnlineJoinControls(false);
         if(session)session->Disconnect();
@@ -62,7 +61,7 @@ bool ClaimOwnerThread(Owner& owner) {
     DWORD empty=0;const auto current=GetCurrentThreadId();
     owner.thread.compare_exchange_strong(empty,current,std::memory_order_acq_rel);
     if(owner.thread.load(std::memory_order_acquire)!=current)return false;
-    owner.StopPrelaunch();return true;
+    owner.StopPrelaunch();return owner.initialization.BindThread();
 }
 bool PollLoadingAt(std::chrono::steady_clock::time_point now) {
     auto& owner=RuntimeOwner();
@@ -89,31 +88,23 @@ bool PollLoadingAt(std::chrono::steady_clock::time_point now) {
 bool PollNativeOnlineLoading(){return PollLoadingAt(std::chrono::steady_clock::now());}
 bool PrepareNativeOnlineWorldRandom(std::string_view destination){
     auto& owner=RuntimeOwner();
-    if(owner.initialization_policy!=InitializationPolicy::SharedNativeV1 || !owner.session || destination.empty() || destination.size()>96 ||
-       owner.thread.load(std::memory_order_acquire)!=GetCurrentThreadId() ||
-       NativeOnlineStatus().state==NativeSessionState::Failed)return false;
-    const auto sequence=++owner.world_load_sequence;
-    const auto seed=NativeWorldInitializationSeed(owner.session->identity(),destination,sequence);
-    em2::BeginNativeOnlineWorldRandom(seed);
+    const auto seed=owner.initialization.World(destination);if(!seed)return false;
+    em2::BeginNativeOnlineWorldRandom(seed->value);
     struct Restore{unsigned csr=_mm_getcsr();DWORD error=GetLastError();~Restore(){_mm_setcsr(csr);SetLastError(error);}}restore;
-    try{REXLOG_INFO("Native online world initialization: sequence {}, destination '{}', thread {}, seed {:08X}",sequence,destination,GetCurrentThreadId(),seed);}catch(...){}
+    try{REXLOG_INFO("Native online world initialization: sequence {}, destination '{}', thread {}, seed {:08X}",seed->sequence,destination,GetCurrentThreadId(),seed->value);}catch(...){}
     return true;
 }
 bool PrepareNativeOnlinePlayerRandom(uint32_t slot,uint32_t mode){
     auto& owner=RuntimeOwner();
-    if(owner.initialization_policy!=InitializationPolicy::SharedNativeV1 || !owner.session || slot>=2 || mode>2 || GameplayInputGate().active() ||
-       owner.thread.load(std::memory_order_acquire)!=GetCurrentThreadId() ||
-       NativeOnlineStatus().state==NativeSessionState::Failed)return false;
     // 8276A828 selects the authoritative native prefab from slot/mode; these
     // are identical on both copies and do not mean the locally owned wire lane.
     // Persistent Mickey is created after the frontend has consumed more rand
     // calls, outside LoadLevel itself. Seed its complete native initializer,
     // including all component/physics/script construction, before its first draw.
-    const auto sequence=++owner.player_initialization_sequence[slot];
-    const auto seed=NativePlayerInitializationSeed(owner.session->identity(),slot,mode,sequence);
-    em2::BeginNativeOnlineWorldRandom(seed);
+    const auto seed=owner.initialization.Player(slot,mode,GameplayInputGate().active());if(!seed)return false;
+    em2::BeginNativeOnlineWorldRandom(seed->value);
     struct Restore{unsigned csr=_mm_getcsr();DWORD error=GetLastError();~Restore(){_mm_setcsr(csr);SetLastError(error);}}restore;
-    try{REXLOG_INFO("Native online player initialization: slot {}, mode {}, sequence {}, thread {}, seed {:08X}",slot,mode,sequence,GetCurrentThreadId(),seed);}catch(...){}
+    try{REXLOG_INFO("Native online player initialization: slot {}, mode {}, sequence {}, thread {}, seed {:08X}",slot,mode,seed->sequence,GetCurrentThreadId(),seed->value);}catch(...){}
     return true;
 }
 bool BindNativeOnlineThread(){auto& owner=RuntimeOwner();return owner.session && ClaimOwnerThread(owner);}
@@ -135,10 +126,8 @@ bool StartNativeOnlinePrelaunchPolling() {
 bool AdoptNativeOnlineSession(std::unique_ptr<Session>& ready,unsigned device) {
     auto& owner=RuntimeOwner();
     if(!ready || ready->state()!=State::Ready || device>=2 || owner.session || GameplayInputGate().active())return false;
+    if(!owner.initialization.Arm(ready->identity()))return false;
     owner.session=std::move(ready);owner.device=device;owner.preparing=owner.attached=owner.menu_preparation=false;
-    owner.world_load_sequence=0;
-    owner.player_initialization_sequence={};
-    owner.initialization_policy=owner.session->identity().initialization_policy;
     owner.thread.store(0,std::memory_order_release);
     owner.loading_poll.reset();
     owner.continue_claimed=owner.profile_claimed=false;
@@ -277,7 +266,7 @@ void ReleaseNativeOnlineSession() {
     retained_session_active.store(false,std::memory_order_release);
     owner.thread.store(0,std::memory_order_release);
     owner.loading_poll.reset();
-    owner.initialization_policy=InitializationPolicy::Original;
+    owner.initialization.Release();
 }
 bool TestNativeOnlineSession() {
     if(!TestNativeOnlineHandoff())return false;
