@@ -1,3 +1,5 @@
+#include "online_actor_input.h"
+#include "online_actor_reference.h"
 #include "guest_read_batch.h"
 #include "native_engine.h"
 #include "native_player_spawn.h"
@@ -29,6 +31,8 @@
 REXCVAR_DECLARE(bool,em2_private_profile);
 REXCVAR_DECLARE(std::string,em2_user_data_directory);
 REXCVAR_DEFINE_INT32(em2_probe_extra_native_players,0,"Debug","Private one-shot: construct, admit and destroy 1..14 additional native characters without assigning controls or replacing retail slots");
+REXCVAR_DEFINE_BOOL(em2_probe_owned_native_player_reject,false,"Debug","Private owned-player probe: force pre-admission rejection to verify native rollback");
+REXCVAR_DEFINE_BOOL(em2_probe_owned_native_player,false,"Debug","Private single-Mickey probe: quarantine broadcast input and attach a native owned movement reference; no movement injection");
 REXCVAR_DEFINE_INT32(em2_probe_extra_native_players_hold_seconds,0,"Debug","Private extra-character demo lifetime, 0..900 seconds; zero runs the immediate cleanup test");
 
 PPC_EXTERN_FUNC(__imp__sub_825430D8);
@@ -54,6 +58,8 @@ PPC_EXTERN_FUNC(__imp__sub_827CAE68);
 PPC_EXTERN_FUNC(__imp__sub_8275C728);
 PPC_EXTERN_FUNC(__imp__sub_8275C970);
 PPC_EXTERN_FUNC(__imp__sub_827CA5F0);
+PPC_EXTERN_FUNC(__imp__sub_82747128);
+PPC_EXTERN_FUNC(__imp__sub_8308B3E8);
 PPC_EXTERN_FUNC(__imp__sub_827AC868);
 
 namespace {
@@ -228,7 +234,10 @@ void ProbeExtraNativePlayers(PPCContext& ctx,uint8_t* base,const std::array<em2:
     const auto requested=REXCVAR_GET(em2_probe_extra_native_players);
     if(requested<1 || requested>14 || !REXCVAR_GET(em2_private_profile) ||
        REXCVAR_GET(em2_user_data_directory).empty() || em2::net::SynchronizedSessionActive())return;
-    struct Probe {unsigned ready=0,age=0;bool attempted=false,failed=false,queued=false,finished=false;
+    const bool owned=REXCVAR_GET(em2_probe_owned_native_player);
+    if(owned && requested!=1)return;
+    struct Probe {uint64_t peer=0;em2::net::ActorMovementReference reference;
+        unsigned ready=0,age=0;bool attempted=false,failed=false,queued=false,finished=false;
         uint32_t registry=0,manager=0;std::array<uint32_t,2> original{},original_entities{};std::vector<uint32_t> handles,entities;
         std::chrono::steady_clock::time_point created{},observed{};};
     static Probe probe;
@@ -248,7 +257,18 @@ void ProbeExtraNativePlayers(PPCContext& ctx,uint8_t* base,const std::array<em2:
         if(++probe.ready<settled)return;
     }else if(probe.registry!=registry || probe.manager!=manager || probe.original!=originals() ||
              probe.original_entities!=std::array<uint32_t,2>{snapshot[0].entity,snapshot[1].entity}){
-        probe.finished=true;REXLOG_ERROR("Extra native player probe: world changed before cleanup verification; no stale calls issued");return;
+        if(owned && registry==probe.registry){
+            // A retail respawn is not permission to unquarantine a still-live
+            // extra actor. Stop the hold and clean it through the same registry.
+            if(probe.peer)em2::net::SetOwnedActorInputEnabled(probe.peer,false);
+            probe.failed=true;probe.manager=manager;probe.original=originals();
+            probe.original_entities={snapshot[0].entity,snapshot[1].entity};
+            REXLOG_ERROR("Owned native player probe: retail identities changed; disabled extra input and beginning verified cleanup");
+        }else{
+            if(probe.peer)em2::net::UnregisterOwnedActorInput(probe.peer);
+            probe.reference={};probe.peer=0;
+            probe.finished=true;REXLOG_ERROR("Extra native player probe: world changed before cleanup verification; no stale calls issued");return;
+        }
     }
     if(ctx.r1.u32<32768 || !Readable(ctx.r1.u32-32768,32768,base))return;
     // Native calls may allocate/change mappings; do not retain GuestReadBatch
@@ -259,6 +279,33 @@ void ProbeExtraNativePlayers(PPCContext& ctx,uint8_t* base,const std::array<em2:
     auto resolve=[&](uint32_t handle){
         PPC_STORE_U32(handle_scratch,handle);ctx.r3.u64=registry;ctx.r4.u64=handle_scratch;
         __imp__sub_82732A18(ctx,base);return ctx.r3.u32;
+    };
+    // This token exists only in the synchronous fresh-factory branch below.
+    // Never call this after entering admission, including partial admission.
+    auto discard_fresh=[&](uint32_t handle,uint32_t entity){
+        const auto owner=PPC_LOAD_U32(registry+152);
+        if(!handle || resolve(handle)!=entity || !Readable(entity-8,104,base) ||
+           entity==snapshot[0].entity || entity==snapshot[1].entity || !Readable(owner,112,base))return false;
+        const auto table=PPC_LOAD_U32(entity);
+        if(table!=0x8208D908 || !Readable(table,368,base) || PPC_LOAD_U32(table)!=0x827C8E30 ||
+           PPC_LOAD_U32(table+4)!=0x827C8E58 || PPC_LOAD_U32(table+364)!=0x827C8C70 || !PPC_LOAD_U32(entity-4))return false;
+        const auto pending=PPC_LOAD_U32(registry+192),pending_count=PPC_LOAD_U32(registry+196);
+        if(pending_count>65536 || (pending_count && !Readable(pending,size_t(pending_count)*4,base)))return false;
+        for(uint32_t i=0;i<pending_count;++i)if(PPC_LOAD_U32(pending+4*i)==entity)return false;
+        const auto children=PPC_LOAD_U32(owner+16),count=PPC_LOAD_U32(owner+24);
+        if(!count || count>65536 || !Readable(children,size_t(count)*4,base))return false;
+        uint32_t index=0,matches=0;
+        for(uint32_t i=0;i<count;++i)if(PPC_LOAD_U32(children+4*i)==entity){index=i;++matches;}
+        if(matches!=1)return false;
+        const auto hold=scope.stack+896;PPC_STORE_U32(hold,0);
+        ctx.r3.u64=hold;ctx.r4.u64=entity;__imp__sub_8308B3E8(ctx,base);
+        // Native owner removal erases child/name indexes and NiPointers. It
+        // never initializes or deactivates unadmitted component listeners.
+        ctx.r3.u64=owner;ctx.r4.u64=index;__imp__sub_82747128(ctx,base);
+        ctx.r3.u64=hold;ctx.r4.u64=0;__imp__sub_8308B3E8(ctx,base);
+        const auto remaining=resolve(handle);
+        REXLOG_INFO("Owned native player rollback: default owner count {} -> {}, handle {:08X} remaining {:08X}; no admission, no component deactivation, retail handles unchanged {}",count,PPC_LOAD_U32(owner+24),handle,remaining,originals()==probe.original);
+        return !remaining && PPC_LOAD_U32(owner+24)==count-1 && originals()==probe.original;
     };
     // Exact GetHealth export path (827CF240): entity int-property getter
     // vtable+204 with descriptor833DBB14. Read only; never restore/set health.
@@ -350,16 +397,47 @@ void ProbeExtraNativePlayers(PPCContext& ctx,uint8_t* base,const std::array<em2:
             const auto hp=health(entity);
             REXLOG_INFO("Extra native player spawned health: instance {} character {} entity {:08X} present {} health {}",i,character,entity,bool(hp),hp.value_or(INT32_MIN));
             observe_players("constructed",i);
-            if(!valid){probe.failed=true;break;}
+            if(!valid){
+                probe.failed=true;
+                if(owned){
+                    const auto discarded=unique && discard_fresh(handle,entity);
+                    probe.finished=true;
+                    REXLOG_ERROR("Owned native player probe: invalid fresh actor, native rollback complete {}; no actor admitted",discarded);
+                    return;
+                }
+                break;
+            }
+            if(owned){
+                em2::net::OwnedActorInput input;
+                const bool forced=REXCVAR_GET(em2_probe_owned_native_player_reject);
+                if(forced || !em2::net::RegisterOwnedActorInput(1000,handle,ctx,base,input)){
+                    const auto discarded=discard_fresh(handle,entity);
+                    probe.failed=probe.finished=true;
+                    REXLOG_INFO("Owned native player probe: registration rejected forced {} rollback complete {}; no actor admitted",forced,discarded);
+                    return;
+                }
+                probe.peer=input.peer;
+                REXLOG_INFO("Owned native player probe: registered peer {} handle {:08X} controller {:08X}, listener {:08X}; ordinary broadcasts quarantined",input.peer,input.handle,input.controller,input.listener);
+            }
         }
         for(const auto entity:probe.entities){
-            // Match retail 8276CCF0's native initialization before admission.
-            // DestroyEntity invokes component deactivation, which must only
-            // run after those components have joined the world's registries.
+            // Match retail time-mode propagation, then native admission. Admission
+            // activates component listeners; the owned actor is quarantined
+            // before entering it, including its partial-failure boundary.
             ctx.r3.u64=entity-8;ctx.r4.u64=0;__imp__sub_827CAE68(ctx,base);
             ctx.r3.u64=registry;ctx.r4.u64=entity;ctx.r5.u64=0;__imp__sub_82742F70(ctx,base);
             REXLOG_INFO("Extra native player probe: admitted entity {:08X}, retail handles unchanged {}",entity,originals()==probe.original);
             if(originals()!=probe.original)probe.failed=true;
+        }
+        if(owned && probe.peer && !probe.failed){
+            const auto camera_controller=PPC_LOAD_U32(manager+28);
+            const auto camera_handle=Readable(camera_controller,24,base)?PPC_LOAD_U32(camera_controller+20):0;
+            const auto result=em2::net::AttachOwnedActorMovementReference(probe.peer,camera_handle,ctx,base,probe.reference);
+            em2::net::OwnedActorInput input;const auto current=em2::net::OwnedActorInputFor(probe.peer,ctx,base,input);
+            const auto reference=current && Readable(input.controller,100,base)?PPC_LOAD_U32(input.controller+96):0;
+            const bool usable=current && Readable(reference,96,base) && PPC_LOAD_U32(reference)==0x8208D908 && PPC_LOAD_U32(reference+44)==2 && (result==em2::net::ActorReferenceResult::Attached || result==em2::net::ActorReferenceResult::ExistingReference);
+            REXLOG_INFO("Owned native player probe: movement reference result {} camera handle {:08X} retained entity {:08X} usable {}; original camera/player arrays unchanged {}; no movement input sent",int(result),camera_handle,reference,usable,originals()==probe.original);
+            if(!usable)probe.failed=true;
         }
         observe_players("admitted",-1);
         probe.created=probe.observed=std::chrono::steady_clock::now();
@@ -404,7 +482,22 @@ void ProbeExtraNativePlayers(PPCContext& ctx,uint8_t* base,const std::array<em2:
         }
         // Original destruction queues and retains the world-owned entity until
         // the engine removes it. No manual free/refcount/manager pointer edits.
-        for(const auto entity:probe.entities){ctx.r3.u64=registry;ctx.r4.u64=entity;__imp__sub_82744E90(ctx,base);}
+        if(probe.peer){
+            em2::net::SetOwnedActorInputEnabled(probe.peer,false);
+            if(probe.reference.active){
+                const auto result=em2::net::ReleaseOwnedActorMovementReference(probe.reference,ctx,base);
+                REXLOG_INFO("Owned native player probe: release before native destruction result {}",int(result));
+                if(result!=em2::net::ActorReferenceResult::Released && result!=em2::net::ActorReferenceResult::AlreadyReplaced)probe.failed=true;
+            }
+        }
+        for(size_t i=0;i<probe.entities.size();++i){
+            const auto entity=resolve(probe.handles[i]);
+            if(!entity)continue;
+            if(entity!=probe.entities[i] || entity==snapshot[0].entity || entity==snapshot[1].entity){
+                probe.failed=true;REXLOG_ERROR("Extra native player cleanup rejected a changed or retail entity identity");continue;
+            }
+            ctx.r3.u64=registry;ctx.r4.u64=entity;__imp__sub_82744E90(ctx,base);
+        }
         probe.queued=true;
         REXLOG_INFO("Extra native player probe: queued native destruction for {} instances, retail handles unchanged {}",probe.entities.size(),originals()==probe.original);
         return;
@@ -412,6 +505,7 @@ void ProbeExtraNativePlayers(PPCContext& ctx,uint8_t* base,const std::array<em2:
     ++probe.age;
     unsigned remaining=0;for(const auto handle:probe.handles)remaining+=resolve(handle)!=0;
     if(remaining && probe.age<120)return;
+    if(!remaining && probe.peer){em2::net::UnregisterOwnedActorInput(probe.peer);probe.peer=0;}
     probe.finished=true;
     const bool success=!probe.failed && probe.entities.size()==size_t(requested) && !remaining && originals()==probe.original;
     REXLOG_INFO("Extra native player probe: completed success {} requested {} created {} remaining {} retail handles unchanged {}; construction/admission/lifetime only, no input/replication proof",success,requested,probe.entities.size(),remaining,originals()==probe.original);

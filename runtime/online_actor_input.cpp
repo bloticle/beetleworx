@@ -1,4 +1,5 @@
 #include "online_actor_input.h"
+#include "online_actor_reference.h"
 #include "guest_read_batch.h"
 #include "ppc_context.h"
 #include <rex/logging.h>
@@ -23,6 +24,9 @@ PPC_EXTERN_FUNC(__imp__sub_82A69948);
 PPC_EXTERN_FUNC(__imp__sub_82783208);
 PPC_EXTERN_FUNC(__imp__sub_827874B0);
 PPC_EXTERN_FUNC(__imp__sub_8278A790);
+PPC_EXTERN_FUNC(__imp__sub_827835A8);
+PPC_EXTERN_FUNC(__imp__sub_827CA160);
+PPC_EXTERN_FUNC(sub_827835A8);
 
 namespace {
 using Actor=em2::net::OwnedActorInput;
@@ -32,6 +36,14 @@ std::mutex mutex;
 std::array<Actor,16> actors{};
 DWORD owner_thread=0;
 uint64_t generation=0;
+struct BasisClock {uint32_t registry=0;uint64_t tick=0;bool valid=false;};
+struct BasisEntry {Actor actor;em2::net::ActorLookBasis basis;uint32_t motion=0,reference=0;bool staged=false,consumed=false,input_claimed=false;};
+BasisClock basis_clock;
+std::array<BasisEntry,16> basis_entries{};
+struct BasisUpdate {BasisEntry entry;};
+thread_local const BasisUpdate* basis_update=nullptr;
+// Only isolated native controller fixtures may omit the coordinator input step.
+thread_local bool basis_fixture_without_input=false;
 struct Environment {unsigned csr=_mm_getcsr();DWORD error=GetLastError();~Environment(){_mm_setcsr(csr);SetLastError(error);}};
 struct ContextScope {PPCContext& ctx;PPCContext saved;Environment environment;explicit ContextScope(PPCContext& c):ctx(c),saved(c){}~ContextScope(){ctx=saved;}};
 bool Readable(uint32_t address,size_t size,uint8_t* base){return base && address>=4096 && uint64_t(address)+size<=0x100000000ull && em2::GuestReadBatch::Readable(base+address,size);}
@@ -84,6 +96,84 @@ bool BasisValid(const Actor& actor,const em2::net::ActorLookBasis& basis){
         right+=double(basis.right[i])*basis.right[i];forward+=double(basis.forward[i])*basis.forward[i];dot+=double(basis.right[i])*basis.forward[i];}
     return std::abs(right-1)<1e-4 && std::abs(forward-1)<1e-4 && std::abs(dot)<1e-4;
 }
+bool BasisWorldReady(uint32_t registry,uint8_t* base){
+    if(!base || !registry || PPC_LOAD_U32(0x833DA7E4)!=registry)return false;
+    const auto manager=PPC_LOAD_U32(0x833DAB60),profile=PPC_LOAD_U32(0x833DAD98);
+    return Readable(manager,640,base) && PPC_LOAD_U8(manager+357) && Readable(profile,103,base) && !PPC_LOAD_U8(profile+102);
+}
+bool NativeMotionFor(const Actor& actor,uint8_t* base,uint32_t& motion){
+    const auto types=PPC_LOAD_U32(actor.entity+88),list=PPC_LOAD_U32(actor.entity+36);
+    const auto kind=PPC_LOAD_U8(0x833DAF54);
+    if(!Readable(types,unsigned(kind)+1,base))return false;
+    const auto slot=PPC_LOAD_U8(types+kind);if(slot==255 || !Readable(list,unsigned(slot)*4+4,base))return false;
+    const auto face=PPC_LOAD_U32(list+unsigned(slot)*4);if(face<8 || !Readable(face-8,896,base))return false;
+    motion=face-8;
+    return PPC_LOAD_U32(motion+48)==actor.entity-8;
+}
+Result BasisContext(const Actor& actor,PPCContext& ctx,uint8_t* base,uint32_t& motion,uint32_t& reference){
+    if(!Current(actor,ctx,base))return Result::Stale;
+    if(!BasisWorldReady(actor.registry,base))return Result::InvalidContext;
+    const auto component=actor.controller+24;
+    // Original per-frame controller's ordinary-reference path ONLY. Captured
+    // transition bases and scripted/alternate references retain native rules.
+    if((PPC_LOAD_U8(component+44)&0x80) || PPC_LOAD_U8(component+233) ||
+       PPC_LOAD_U32(component+284) || PPC_LOAD_U8(component+289))return Result::InvalidContext;
+    reference=PPC_LOAD_U32(component+72);
+    if(!Readable(reference,96,base) || PPC_LOAD_U32(reference)!=0x8208D908 ||
+       PPC_LOAD_U32(0x8208D908+172)!=0x827CA160)return Result::ReferenceRequired;
+    if(!NativeMotionFor(actor,base,motion))return Result::InvalidContext;
+    return Result::Applied;
+}
+std::optional<BasisEntry> BasisForComponent(uint32_t component,PPCContext& ctx,uint8_t* base,bool require_input=true){
+    BasisEntry entry;BasisClock clock;
+    {std::lock_guard lock(mutex);clock=basis_clock;for(const auto& candidate:basis_entries)
+        if(candidate.staged && !candidate.consumed && candidate.actor.controller+24==component){entry=candidate;break;}}
+    if(!entry.staged || !Owner())return {};
+    auto retire=[&](){std::lock_guard lock(mutex);for(auto& pending:basis_entries)
+        if(pending.staged && pending.actor.peer==entry.actor.peer && pending.actor.generation==entry.actor.generation && pending.basis.tick==entry.basis.tick)pending.consumed=true;};
+    if(!clock.valid || clock.registry!=entry.actor.registry || clock.tick!=entry.basis.tick ||
+       (require_input && !entry.input_claimed && !basis_fixture_without_input)){retire();return {};}
+    const auto actor=ByPeer(entry.actor.peer);
+    if(!actor || !actor->enabled || actor->generation!=entry.actor.generation){retire();return {};}
+    uint32_t motion=0,reference=0;
+    if(BasisContext(*actor,ctx,base,motion,reference)!=Result::Applied || motion!=entry.motion || reference!=entry.reference){retire();return {};}
+    return entry;
+}
+void UpdateBasisController(PPCContext& ctx,uint8_t* base,PPCFunc* native){
+    if(basis_update){
+        struct Suspend {const BasisUpdate* saved=basis_update;Suspend(){basis_update=nullptr;}~Suspend(){basis_update=saved;}}suspend;
+        native(ctx,base);return;
+    }
+    std::optional<BasisEntry> admitted;
+    {Environment preserve;admitted=BasisForComponent(ctx.r3.u32,ctx,base);}
+    if(!admitted){native(ctx,base);return;}
+    const BasisUpdate update{*admitted};
+    struct Scope {const BasisUpdate* saved=basis_update;explicit Scope(const BasisUpdate& value){basis_update=&value;}~Scope(){basis_update=saved;}}scope{update};
+    native(ctx,base);
+}
+bool ClaimBasisBoundary(PPCContext& ctx,uint8_t* base,BasisEntry& output){
+    if(!basis_update || ctx.lr!=0x827837E8 || ctx.r27.u32!=basis_update->entry.actor.controller+24 ||
+       ctx.r3.u32!=basis_update->entry.motion || ctx.r31.u32!=ctx.r1.u32 || ctx.r6.u32!=ctx.r1.u32+96 || !Readable(ctx.r6.u32,16,base))return false;
+    const auto current=BasisForComponent(ctx.r27.u32,ctx,base);if(!current || current->actor.generation!=basis_update->entry.actor.generation ||
+        current->basis.tick!=basis_update->entry.basis.tick)return false;
+    std::lock_guard lock(mutex);
+    for(auto& entry:basis_entries)if(entry.staged && !entry.consumed && entry.actor.peer==current->actor.peer &&
+        entry.actor.generation==current->actor.generation && entry.basis.tick==current->basis.tick){entry.consumed=true;output=*current;return true;}
+    return false;
+}
+void ApplyBasisMotion(PPCContext& ctx,uint8_t* base,PPCFunc* native){
+    BasisEntry entry;bool apply=false;
+    {Environment preserve;apply=ClaimBasisBoundary(ctx,base,entry);}
+    if(!apply){native(ctx,base);return;}
+    const auto argument=ctx.r6.u32;
+    std::array<uint8_t,16> saved;std::memcpy(saved.data(),base+argument,saved.size());
+    struct RestoreArgument {uint8_t* base;uint32_t at;const std::array<uint8_t,16>& bytes;~RestoreArgument(){std::memcpy(base+at,bytes.data(),bytes.size());}}restore{base,argument,saved};
+    // Original caller's local vector at frame+96, never a human input cache,
+    // NiPointer, authoritative transform or camera array entry.
+    for(unsigned i=0;i<3;++i)PPC_STORE_U32(argument+i*4,std::bit_cast<uint32_t>(entry.basis.forward[i]));
+    PPC_STORE_U32(argument+12,0);
+    native(ctx,base);
+}
 Result Admission(uint64_t peer,const Action& action,const em2::net::ActorLookBasis& basis,PPCContext& ctx,uint8_t* base,Actor& actor){
     auto found=ByPeer(peer);if(!found)return Result::Unregistered;actor=*found;
     if(!Owner())return Result::WrongThread;
@@ -114,16 +204,82 @@ bool em2::net::RegisterOwnedActorInput(uint64_t peer,uint32_t handle,PPCContext&
     const auto free=std::find_if(actors.begin(),actors.end(),[](const Actor& value){return !value.peer;});if(free==actors.end())return false;
     owner_thread=GetCurrentThreadId();candidate.generation=++generation;candidate.enabled=true;*free=candidate;output=candidate;return true;
 }
-bool em2::net::SetOwnedActorInputEnabled(uint64_t peer,bool enabled){std::lock_guard lock(mutex);if(owner_thread!=GetCurrentThreadId())return false;for(auto& actor:actors)if(actor.peer==peer && peer){actor.enabled=enabled;return true;}return false;}
-void em2::net::UnregisterOwnedActorInput(uint64_t peer){std::lock_guard lock(mutex);if(owner_thread!=GetCurrentThreadId())return;for(auto& actor:actors)if(actor.peer==peer && peer)actor={};}
-void em2::net::ResetOwnedActorInputs(){std::lock_guard lock(mutex);if(owner_thread && owner_thread!=GetCurrentThreadId())return;actors={};owner_thread=0;}
+bool em2::net::SetOwnedActorInputEnabled(uint64_t peer,bool enabled){std::lock_guard lock(mutex);if(owner_thread!=GetCurrentThreadId())return false;for(auto& actor:actors)if(actor.peer==peer && peer){actor.enabled=enabled;for(auto& entry:basis_entries)if(entry.actor.peer==peer)entry={};return true;}return false;}
+void em2::net::UnregisterOwnedActorInput(uint64_t peer){std::lock_guard lock(mutex);if(owner_thread!=GetCurrentThreadId())return;for(auto& actor:actors)if(actor.peer==peer && peer)actor={};for(auto& entry:basis_entries)if(entry.actor.peer==peer)entry={};}
+void em2::net::ResetOwnedActorInputs(){std::lock_guard lock(mutex);if(owner_thread && owner_thread!=GetCurrentThreadId())return;actors={};basis_entries={};basis_clock={};owner_thread=0;}
 bool em2::net::OwnedActorInputFor(uint64_t peer,PPCContext& ctx,uint8_t* base,Actor& output){Environment preserve;output={};auto found=ByPeer(peer);if(!found || !Owner() || !Current(*found,ctx,base))return false;output=*found;return true;}
+bool em2::net::BeginOwnedActorBasisTick(uint32_t registry,uint64_t tick,PPCContext&,uint8_t* base){
+    Environment preserve;if(!Owner() || basis_update || !BasisWorldReady(registry,base))return false;
+    std::lock_guard lock(mutex);
+    if(basis_clock.valid && (basis_clock.registry!=registry || tick<=basis_clock.tick))return false;
+    basis_clock={registry,tick,true};basis_entries={};return true;
+}
+em2::net::ActorInputResult em2::net::PrepareOwnedActorBasis(uint64_t peer,const ActorLookBasis& basis,PPCContext& ctx,uint8_t* base){
+    Environment preserve;const auto actor=ByPeer(peer);if(!actor)return Result::Unregistered;
+    if(!Owner())return Result::WrongThread;
+    if(basis_update)return Result::Nested;
+    if(!actor->enabled)return Result::Disabled;
+    if(!BasisValid(*actor,basis) || basis.forward[1]!=0 || basis.right[1]!=0 ||
+        std::abs(basis.right[0]-basis.forward[2])>1e-4f || std::abs(basis.right[2]+basis.forward[0])>1e-4f)return Result::InvalidBasis;
+    BasisClock clock;{std::lock_guard lock(mutex);clock=basis_clock;}
+    if(!clock.valid || clock.registry!=actor->registry || clock.tick!=basis.tick)return Result::InvalidTick;
+    uint32_t motion=0,reference=0;const auto result=BasisContext(*actor,ctx,base,motion,reference);if(result!=Result::Applied)return result;
+    std::lock_guard lock(mutex);
+    for(const auto& entry:basis_entries)if(entry.staged && entry.actor.peer==peer)return Result::InvalidTick;
+    const auto free=std::find_if(basis_entries.begin(),basis_entries.end(),[](const BasisEntry& value){return !value.staged;});
+    if(free==basis_entries.end())return Result::InvalidContext;
+    *free={*actor,basis,motion,reference,true,false};return Result::Applied;
+}
+em2::net::ActorInputResult em2::net::ReplayOwnedActorMovement(uint64_t peer,const Action& action,uint64_t tick,PPCContext& ctx,uint8_t* base){
+    ContextScope preserve(ctx);
+    const auto actor=ByPeer(peer);if(!actor)return Result::Unregistered;
+    if(!Owner())return Result::WrongThread;
+    if(replay || basis_update)return Result::Nested;
+    if(!Current(*actor,ctx,base))return Result::Stale;
+    if(!actor->enabled)return Result::Disabled;
+    if(!Readable(action.action,4,base) || !std::isfinite(action.x) || !std::isfinite(action.y) ||
+       std::abs(action.x)>1 || std::abs(action.y)>1)return Result::InvalidInput;
+    const auto uid=PPC_LOAD_U32(action.action),movement=PPC_LOAD_U32(0x833DAEB8);
+    if(!movement || uid!=movement)return Result::UnsupportedAction;
+    // These native Mickey tool/brush branches precede its ordinary Movement
+    // branch and may affect shared resources. Never admit aliased authored IDs.
+    for(unsigned offset:{280u,284u,288u,292u,296u,300u})
+        if(PPC_LOAD_U32(actor->listener+offset)==uid)return Result::UnsupportedAction;
+    uint32_t motion=0,reference=0;
+    const auto context=BasisContext(*actor,ctx,base,motion,reference);if(context!=Result::Applied)return context;
+    const auto stage=BasisForComponent(actor->controller+24,ctx,base,false);
+    if(!stage || stage->basis.tick!=tick || stage->motion!=motion || stage->reference!=reference)return Result::InvalidTick;
+    {
+        std::lock_guard lock(mutex);bool claimed=false;
+        for(auto& entry:basis_entries)if(entry.staged && entry.actor.peer==peer &&
+            entry.actor.generation==actor->generation && entry.basis.tick==tick && !entry.consumed && !entry.input_claimed){
+            entry.input_claimed=true;claimed=true;break;
+        }
+        if(!claimed)return Result::InvalidTick;
+    }
+    // Claim before invoking native code: exceptions must never permit duplicate
+    // native action/FSM side effects. Original derived handler retains global,
+    // individual, lock, task-consumption and special-mode input gates.
+    const Replay state{*actor};ReplayScope scope(state);
+    ctx.r3.u64=actor->listener;ctx.r4.u64=action.event;ctx.r5.u64=action.action;
+    ctx.f1.f64=action.x;ctx.f2.f64=action.y;
+    try{__imp__sub_82A3C930(ctx,base);}
+    catch(...){
+        std::lock_guard lock(mutex);
+        for(auto& entry:basis_entries)if(entry.staged && entry.actor.peer==peer && entry.actor.generation==actor->generation && entry.basis.tick==tick)entry.consumed=true;
+        throw;
+    }
+    return Result::Applied;
+}
 em2::net::ActorInputResult em2::net::ReplayOwnedActorAction(uint64_t peer,const Action& action,const ActorLookBasis& basis,PPCContext& ctx,uint8_t* base){
     Environment preserve;Actor actor;const auto admitted=Admission(peer,action,basis,ctx,base,actor);
     if(admitted!=Result::Applied)return admitted;
+    if(PPC_LOAD_U32(action.action)!=PPC_LOAD_U32(0x833DAEB8))return Result::UnsupportedAction;
     // Even an orthonormal peer basis is NOT permission to let the later native
     // NavigationInput task resolve its view through a retail two-slot camera.
-    // No audited basis consumer exists yet: leave native action caches intact.
+    // Only ReplayOwnedActorMovement can authorize the proved staged-tick route.
+    // Generic action replay has no complete native gameplay contract and never
+    // changes action caches.
     return Result::BasisRouteUnverified;
 }
 bool em2::net::SuppressOwnedActorInput(PPCContext& ctx,uint8_t* base){if(!Quarantine(ctx,base))return false;ctx.r3.u64=0;return true;}
@@ -135,6 +291,8 @@ PPC_FUNC_IMPL(sub_8276B968){
     }
     __imp__sub_8276B968(ctx,base);
 }
+PPC_FUNC_IMPL(sub_827835A8){UpdateBasisController(ctx,base,__imp__sub_827835A8);}
+PPC_FUNC_IMPL(sub_827874B0){ApplyBasisMotion(ctx,base,__imp__sub_827874B0);}
 
 namespace {
 void FixtureBase(PPCContext& ctx,uint8_t* base){if(!em2::net::SuppressOwnedActorInput(ctx,base))__imp__sub_82783CE8(ctx,base);}
@@ -151,7 +309,34 @@ void FixtureCameraTransform(PPCContext& ctx,uint8_t* base){
     std::memcpy(base+output,base+entity+256,48);
     ctx.r3.u64=1;
 }
+void FixtureNoActionState(PPCContext& ctx,uint8_t*){ctx.r3.u64=0;}
+void FixtureCurrentActionState(PPCContext& ctx,uint8_t*){ctx.r3.u64=0x44000;}
+void FixtureActionState(PPCContext& ctx,uint8_t* base){
+    const auto object=ctx.r3.u32;
+    PPC_STORE_U32(object+20,PPC_LOAD_U32(object+20)+1);
+    PPC_STORE_U32(object+24,ctx.r4.u32);
+    PPC_STORE_U32(object+28,std::bit_cast<uint32_t>(float(ctx.f1.f64)));
+    PPC_STORE_U32(object+32,std::bit_cast<uint32_t>(float(ctx.f2.f64)));
+    if(PPC_LOAD_U32(object+36))throw std::runtime_error("native action-state unwind");
+    ctx.r3.u64=PPC_LOAD_U32(object+16);
+}
 struct WorldVectorCaptured {};
+struct ControllerUpdateStopped {};
+void FixtureControllerFrameEnd(PPCContext& ctx,uint8_t*){
+    if(ctx.lr!=0x82783834)throw std::runtime_error("unexpected native controller continuation");
+    throw ControllerUpdateStopped{};
+}
+void FixtureNativeReferenceTransform(PPCContext& ctx,uint8_t* base){
+    if(ctx.lr!=0x827CA1B4 || ctx.r4.u32!=0x833DA808 || ctx.r6.u32)
+        throw std::runtime_error("unexpected native reference component property ABI");
+    const auto reference=PPC_LOAD_U32(ctx.r3.u32+4);
+    PPC_STORE_U32(reference+52,PPC_LOAD_U32(reference+52)+1);
+    std::memcpy(base+ctx.r5.u32,base+reference+256,48);ctx.r3.u64=1;
+}
+void FixtureInspectBasisArgument(PPCContext& ctx,uint8_t* base){
+    ctx.r3.u64=PPC_LOAD_U32(ctx.r6.u32)==std::bit_cast<uint32_t>(1.f) &&
+        PPC_LOAD_U32(ctx.r6.u32+4)==0 && PPC_LOAD_U32(ctx.r6.u32+8)==0;
+}
 struct WorldVectorProbe {uint32_t motion=0;std::array<float,3> vector{};bool reached=false;};
 thread_local WorldVectorProbe* world_vector_probe=nullptr;
 void FixtureMotionWorldVector(PPCContext& ctx,uint8_t* base){
@@ -167,9 +352,9 @@ void FixtureMotionWorldVector(PPCContext& ctx,uint8_t* base){
 }
 bool em2::net::TestOwnedActorInput(){
     auto* base=static_cast<uint8_t*>(VirtualAlloc(nullptr,0x100000000ull,MEM_RESERVE,PAGE_NOACCESS));
-    struct Restore {uint8_t* base;decltype(actors) prior;DWORD thread;uint64_t serial;const Replay* scope=replay;Environment environment;
-        explicit Restore(uint8_t* memory):base(memory){std::lock_guard lock(mutex);prior=actors;thread=owner_thread;serial=generation;actors={};owner_thread=0;}
-        ~Restore(){std::lock_guard lock(mutex);actors=prior;owner_thread=thread;generation=serial;replay=scope;if(base)VirtualFree(base,0,MEM_RELEASE);}
+    struct Restore {uint8_t* base;decltype(actors) prior;decltype(basis_entries) prior_bases;BasisClock prior_clock;DWORD thread;uint64_t serial;const Replay* scope=replay;const BasisUpdate* update=basis_update;Environment environment;
+        explicit Restore(uint8_t* memory):base(memory){std::lock_guard lock(mutex);prior=actors;prior_bases=basis_entries;prior_clock=basis_clock;thread=owner_thread;serial=generation;actors={};basis_entries={};basis_clock={};owner_thread=0;}
+        ~Restore(){std::lock_guard lock(mutex);actors=prior;basis_entries=prior_bases;basis_clock=prior_clock;owner_thread=thread;generation=serial;replay=scope;basis_update=update;if(base)VirtualFree(base,0,MEM_RELEASE);}
     }restore{base};
     const auto path=std::filesystem::path(__FILE__).parent_path().parent_path()/"private/image.bin";
     std::error_code error;const auto image_size=std::filesystem::file_size(path,error);
@@ -222,6 +407,7 @@ bool em2::net::TestOwnedActorInput(){
     auto value=[&](uint32_t at){return std::bit_cast<float>(PPC_LOAD_U32(at));};
     if(!check(value(a.listener+168)==first.y && value(a.listener+172)==first.x && value(b.listener+168)==second.y && value(b.listener+172)==second.x,
         "opposite native movement samples reach only their own controller caches without manual cache writes"))return false;
+    if(!TestOwnedActorMovementReferences(ctx,base,a.peer,b.peer))return false;
     {
     // The projection probe intentionally snapshots different action samples.
     // Restore the complete fixture controllers before testing subsequent
@@ -331,6 +517,243 @@ bool em2::net::TestOwnedActorInput(){
         if(!check(!world_vector_probe && !std::memcmp(retail.data(),base+manager,retail.size()),
             "native vector interception restores its private scope and never writes the retail camera/player array"))return false;
     }
+    {
+        struct RestoreControllers {
+            uint8_t* base;std::array<uint32_t,2> controllers,types;std::array<std::array<uint8_t,800>,2> bytes;
+            uint8_t ready;BasisClock clock;decltype(basis_entries) entries;
+            RestoreControllers(uint8_t* memory,std::array<uint32_t,2> objects,std::array<uint32_t,2> type_tables):base(memory),controllers(objects),types(type_tables),ready(PPC_LOAD_U8(manager+357)),clock(basis_clock),entries(basis_entries){
+                for(unsigned i=0;i<2;++i)std::memcpy(bytes[i].data(),base+controllers[i],800);}
+            ~RestoreControllers(){for(unsigned i=0;i<2;++i){std::memcpy(base+controllers[i],bytes[i].data(),800);PPC_STORE_U8(types[i]+4,255);}
+                PPC_STORE_U8(manager+357,ready);basis_clock=clock;basis_entries=entries;}
+        }restore_controllers{base,controllers,types};
+        struct IsolatedBasisFixture {bool prior=basis_fixture_without_input;IsolatedBasisFixture(){basis_fixture_without_input=true;}~IsolatedBasisFixture(){basis_fixture_without_input=prior;}} isolated_basis_fixture;
+        // Genuine NiEntity dispatch and original827CA160 component-property
+        // iteration. Only the leaf property source and the first subsequent
+        // FSM continuation are fixture sinks; the entire native controller
+        // update and native Motion boundary execute normally.
+        auto* native_dispatch=&PPC_LOOKUP_FUNC(base,0x827CA160);
+        const auto page=reinterpret_cast<uintptr_t>(native_dispatch)&~uintptr_t(4095);
+        if(!VirtualAlloc(reinterpret_cast<void*>(page),4096,MEM_COMMIT,PAGE_READWRITE))return false;
+        *native_dispatch=__imp__sub_827CA160;
+        PPC_LOOKUP_FUNC(base,uint32_t(PPC_CODE_BASE)+16)=FixtureNativeReferenceTransform;
+        PPC_LOOKUP_FUNC(base,uint32_t(PPC_CODE_BASE)+20)=FixtureControllerFrameEnd;
+        constexpr uint32_t reference=0x3A000,reference_list=0x3B000,reference_component=0x3B100,reference_table=0x3B200,fsm_table=0x42000;
+        PPC_STORE_U32(reference,0x8208D908);PPC_STORE_U32(reference+36,reference_list);PPC_STORE_U32(reference+44,1);
+        PPC_STORE_U32(reference_list,reference_component);PPC_STORE_U32(reference_component,reference_table);PPC_STORE_U32(reference_component+4,reference);
+        PPC_STORE_U32(reference_table+172,uint32_t(PPC_CODE_BASE)+16);PPC_STORE_U32(fsm_table+12,uint32_t(PPC_CODE_BASE)+20);
+        for(unsigned j=0;j<12;++j)PPC_STORE_U32(reference+256+j*4,std::bit_cast<uint32_t>(j%5==0?1.f:0.f));
+        // Retained reference forward is +Z; staged peer views deliberately
+        // disagree, making fallback or accidental shared-view use observable.
+        PPC_STORE_U32(reference+256+32,0);PPC_STORE_U32(reference+256+36,0);PPC_STORE_U32(reference+256+40,std::bit_cast<uint32_t>(1.f));
+        auto put=[&](uint32_t at,float input){PPC_STORE_U32(at,std::bit_cast<uint32_t>(input));};
+        for(unsigned i=0;i<2;++i){
+            const auto motion=0x35000u+i*0x1000;
+            std::memset(base+motion,0,1024);PPC_STORE_U32(motion+48,entities[i]-8);PPC_STORE_U32(motion+568,0x1e);put(motion+876,1);
+            PPC_STORE_U8(types[i]+4,1);PPC_STORE_U32(lists[i]+4,motion+8);
+            PPC_STORE_U8(controllers[i]+68,0);PPC_STORE_U32(controllers[i]+96,reference);PPC_STORE_U32(controllers[i]+104,fsm_table);
+            PPC_STORE_U8(controllers[i]+257,0);PPC_STORE_U32(controllers[i]+308,0);PPC_STORE_U8(controllers[i]+313,0);
+        }
+        PPC_STORE_U8(manager+357,1);PPC_STORE_U8(0x26000+102,0);
+        auto update=[&](const Actor& actor){auto call=context();call.r3.u64=actor.controller+24;
+            try{sub_827835A8(call,base);}catch(const ControllerUpdateStopped&){
+                return !basis_update && PPC_LOAD_U32(call.r1.u32+96)==0 && PPC_LOAD_U32(call.r1.u32+100)==0 &&
+                    PPC_LOAD_U32(call.r1.u32+104)==std::bit_cast<uint32_t>(1.f);}
+            return false;
+        };
+        auto basis_value=[&](uint32_t motion){return std::array<float,3>{value(motion+176),value(motion+180),value(motion+184)};};
+        ActorLookBasis peer_a{a.peer,a.generation,10,{0,0,-1},{1,0,0}},peer_b{b.peer,b.generation,10,{0,0,1},{-1,0,0}};
+        if(!check(BeginOwnedActorBasisTick(registry,10,ctx,base) && !BeginOwnedActorBasisTick(registry,10,ctx,base) &&
+            !BeginOwnedActorBasisTick(registry,9,ctx,base),"authoritative basis ticks reject duplicate/backward clock advancement"))return false;
+        auto pitched=peer_a;pitched.right={1,0,0};pitched.forward={0,.6f,.8f};
+        auto vertical=pitched;vertical.forward={0,1,0};
+        auto tiny_pitch=pitched;tiny_pitch.forward={0,1e-8f,1};
+        auto mirrored=peer_a;mirrored.right={0,0,1};
+        if(!check(PrepareOwnedActorBasis(a.peer,pitched,ctx,base)==Result::InvalidBasis &&
+            PrepareOwnedActorBasis(a.peer,vertical,ctx,base)==Result::InvalidBasis &&
+            PrepareOwnedActorBasis(a.peer,tiny_pitch,ctx,base)==Result::InvalidBasis &&
+            PrepareOwnedActorBasis(a.peer,mirrored,ctx,base)==Result::InvalidBasis,
+            "staging requires explicit ground-projected native basis: pitched/vertical/tiny-Y/mirrored alternatives reject"))return false;
+        if(!check(PrepareOwnedActorBasis(a.peer,peer_a,ctx,base)==Result::Applied && PrepareOwnedActorBasis(b.peer,peer_b,ctx,base)==Result::Applied &&
+            PrepareOwnedActorBasis(a.peer,peer_b,ctx,base)==Result::InvalidBasis,
+            "two owned actors stage immutable views identified by peer/generation/current world tick"))return false;
+        const auto incoming=ctx;const auto input_csr=_mm_getcsr();const auto input_error=GetLastError();
+        if(!check(PrepareOwnedActorBasis(a.peer,peer_a,ctx,base)==Result::InvalidTick && !std::memcmp(&incoming,&ctx,sizeof(ctx)) &&
+            _mm_getcsr()==input_csr && GetLastError()==input_error,"staging cannot mutate an already admitted basis or caller context/FP/LastError"))return false;
+        if(!check(update(a) && update(b) && basis_value(0x35000)==peer_a.forward && basis_value(0x36000)==peer_b.forward,
+            "actual native controller callsites deliver independent staged bases through original Motion setter"))return false;
+        if(!check(update(a) && basis_value(0x35000)==std::array<float,3>{0,0,1} && basis_value(0x36000)==peer_b.forward,
+            "consumed tick cannot reapply a peer basis; exact native retained-reference fallback remains independent"))return false;
+        // New tick invalidates every previous stage. Remote input is still
+        // gated, so this fallback is a native behavior probe, not stale-input
+        // gameplay admission.
+        if(!check(BeginOwnedActorBasisTick(registry,11,ctx,base) && PrepareOwnedActorBasis(a.peer,peer_a,ctx,base)==Result::InvalidTick &&
+            update(b) && basis_value(0x36000)==std::array<float,3>{0,0,1},"new simulation tick invalidates stale staged bases"))return false;
+        peer_a.tick=11;peer_b.tick=11;
+        auto rejects_context=[&](uint32_t at,uint32_t bits,bool byte,Result expected){const auto prior=byte?uint32_t(PPC_LOAD_U8(at)):PPC_LOAD_U32(at);
+            if(byte)PPC_STORE_U8(at,uint8_t(bits));else PPC_STORE_U32(at,bits);
+            const auto result=PrepareOwnedActorBasis(a.peer,peer_a,ctx,base);
+            if(byte)PPC_STORE_U8(at,uint8_t(prior));else PPC_STORE_U32(at,prior);return result==expected;};
+        if(!check(rejects_context(a.controller+257,1,true,Result::InvalidContext) && rejects_context(a.controller+308,123,false,Result::InvalidContext) &&
+            rejects_context(a.controller+313,1,true,Result::InvalidContext),"captured camera transitions and alternate/scripted references cannot admit peer-basis replacement"))return false;
+        if(!check(rejects_context(a.controller+68,0x80,true,Result::InvalidContext) && rejects_context(0x26000+102,1,true,Result::InvalidContext) &&
+            rejects_context(manager+357,0,true,Result::InvalidContext),"disabled component, pause and unready world reject basis staging"))return false;
+        if(!check(rejects_context(a.controller+96,0,false,Result::ReferenceRequired),"missing retained native reference is not fabricated"))return false;
+        auto invalid=peer_a;invalid.generation++;
+        if(!check(PrepareOwnedActorBasis(a.peer,invalid,ctx,base)==Result::InvalidBasis &&
+            rejects_context(0x833DA7E4,registry+4,false,Result::Stale),"actor-generation and world-registry changes reject old basis ownership"))return false;
+        if(!check(PrepareOwnedActorBasis(a.peer,peer_a,ctx,base)==Result::Applied,"valid native state can stage after rejected transitions without weakening guards"))return false;
+        {
+            ContextScope caller(ctx);ctx.r3.u64=a.controller+24;
+            UpdateBasisController(ctx,base,[](PPCContext& call,uint8_t* memory){
+                auto* base=memory; // PPC guest-load/store macros use this local name.
+                if(!basis_update)throw std::logic_error("guard fixture missing owned update scope");
+                const auto entry=basis_update->entry;
+                const auto argument=call.r1.u32+96;std::array<uint8_t,32> saved;
+                std::memcpy(saved.data(),memory+argument,saved.size());
+                struct ScratchRestore {uint8_t* destination;const std::array<uint8_t,32>& saved;~ScratchRestore(){std::memcpy(destination,saved.data(),saved.size());}}scratch{memory+argument,saved};
+                for(unsigned offset:{0u,16u}){PPC_STORE_U32(argument+offset,0);PPC_STORE_U32(argument+offset+4,0);PPC_STORE_U32(argument+offset+8,std::bit_cast<uint32_t>(1.f));PPC_STORE_U32(argument+offset+12,0);}
+                const auto caller_state=call;unsigned passed=0;
+                for(unsigned variant=0;variant<5;++variant){
+                    call=caller_state;call.r27.u64=entry.actor.controller+24;call.r3.u64=entry.motion;call.r31=call.r1;call.r6.u64=argument;call.lr=0x827837E8;
+                    if(variant==0)call.lr+=4;
+                    if(variant==1)call.r27.u64+=4;
+                    if(variant==2)call.r3.u64+=4096;
+                    if(variant==3)call.r31.u64+=16;
+                    if(variant==4)call.r6.u64+=16;
+                    ApplyBasisMotion(call,memory,FixtureInspectBasisArgument);passed+=call.r3.u32==0;
+                }
+                call=caller_state;call.r3.u64=passed;
+            });
+            if(!check(ctx.r3.u32==5,"wrong native caller LR/component/motion/frame/vector identities preserve exact original basis arguments"))return false;
+        }
+        // The native stack vector must be restored even if Motion throws.
+        // Calling the shared controller wrapper with a bounded fixture body
+        // allows a deliberate native Motion exception without a physics body.
+        const auto preserved_input=ctx;ctx.r3.u64=a.controller+24;
+        bool thrown=false;
+        try{UpdateBasisController(ctx,base,[](PPCContext& call,uint8_t* memory){
+            auto* base=memory;
+            if(!basis_update)throw std::logic_error("missing fixture basis scope");
+            const auto entry=basis_update->entry;
+            // Recursive native controller calls cannot inherit a peer scope.
+            auto nested=call;UpdateBasisController(nested,memory,[](PPCContext&,uint8_t*){
+                if(basis_update)throw std::logic_error("nested controller borrowed peer basis");});
+            ContextScope restore(call);
+            call.r27.u64=entry.actor.controller+24;call.r3.u64=entry.motion;call.r31=call.r1;call.r6.u64=call.r1.u32+96;call.lr=0x827837E8;
+            const auto argument=call.r6.u32;std::array<uint8_t,16> previous;
+            std::memcpy(previous.data(),memory+argument,previous.size());
+            struct StackRestore {uint8_t* destination;const std::array<uint8_t,16>& saved;~StackRestore(){std::memcpy(destination,saved.data(),saved.size());}}stack_restore{memory+argument,previous};
+            PPC_STORE_U32(argument,0);PPC_STORE_U32(argument+4,0);PPC_STORE_U32(argument+8,std::bit_cast<uint32_t>(1.f));PPC_STORE_U32(argument+12,0);
+            try{ApplyBasisMotion(call,memory,[](PPCContext& native,uint8_t* memory){
+                auto* base=memory;
+                if(PPC_LOAD_U32(native.r6.u32)!=std::bit_cast<uint32_t>(1.f) || PPC_LOAD_U32(native.r6.u32+4) || PPC_LOAD_U32(native.r6.u32+8))
+                    throw std::logic_error("native Motion never received scoped peer basis");
+                throw std::runtime_error("basis motion unwind");});}
+            catch(const std::runtime_error&){if(PPC_LOAD_U32(argument) || PPC_LOAD_U32(argument+4) || PPC_LOAD_U32(argument+8)!=std::bit_cast<uint32_t>(1.f) || PPC_LOAD_U32(argument+12))
+                throw std::logic_error("native stack basis was not restored");throw;}
+        });}
+        catch(const std::runtime_error&){thrown=true;}
+        ctx=preserved_input;
+        if(!check(thrown && !basis_update,"nested controller suspension and native Motion exception restore scoped basis arguments/ownership"))return false;
+        // Production admission MUST receive an agreed native input before
+        // allowing peer-basis movement. Execute original derived Mickey input,
+        // its original base handler, task/FSM gates and retained-reference
+        // controller path; no direct action-cache writes authorize movement.
+        basis_fixture_without_input=false;
+        PPC_LOOKUP_FUNC(base,uint32_t(PPC_CODE_BASE)+24)=FixtureNoActionState;
+        PPC_LOOKUP_FUNC(base,uint32_t(PPC_CODE_BASE)+28)=FixtureCurrentActionState;
+        PPC_LOOKUP_FUNC(base,uint32_t(PPC_CODE_BASE)+32)=FixtureActionState;
+        PPC_STORE_U32(fsm_table+20,uint32_t(PPC_CODE_BASE)+24);
+        PPC_STORE_U32(fsm_table+28,uint32_t(PPC_CODE_BASE)+24);
+        PPC_STORE_U32(0x833DF47C,0x43000);PPC_STORE_U32(0x43000+48,0x43100);PPC_STORE_U32(0x43100+24,0);
+        PPC_STORE_U32(0x44000,0x44100);PPC_STORE_U32(0x44200,0x44100);PPC_STORE_U32(0x44100+40,uint32_t(PPC_CODE_BASE)+32);
+        uint64_t input_tick=100;
+        auto stage=[&](const Actor& actor,ActorLookBasis& basis){basis.tick=++input_tick;
+            return BeginOwnedActorBasisTick(registry,input_tick,ctx,base) && PrepareOwnedActorBasis(actor.peer,basis,ctx,base)==Result::Applied;};
+        auto deliver=[&](const Actor& actor,const NativeActorAction& input){return ReplayOwnedActorMovement(actor.peer,input,input_tick,ctx,base);};
+        if(!check(stage(a,peer_a) && update(a) && basis_value(0x35000)==std::array<float,3>{0,0,1} &&
+            deliver(a,first)==Result::InvalidTick,"native update without agreed input cannot borrow the staged peer view or accept late input"))return false;
+        peer_a.tick=++input_tick;peer_b.tick=input_tick;
+        if(!check(BeginOwnedActorBasisTick(registry,input_tick,ctx,base) && PrepareOwnedActorBasis(a.peer,peer_a,ctx,base)==Result::Applied &&
+            PrepareOwnedActorBasis(b.peer,peer_b,ctx,base)==Result::Applied,"production input stages two distinct peers in the same agreed tick"))return false;
+        const auto production_context=ctx;const auto production_csr=_mm_getcsr();const auto production_error=GetLastError();
+        if(!check(deliver(a,first)==Result::Applied && deliver(b,second)==Result::Applied &&
+            value(a.listener+168)==first.y && value(a.listener+172)==first.x && value(b.listener+168)==second.y && value(b.listener+172)==second.x &&
+            !std::memcmp(&ctx,&production_context,sizeof(ctx)) && _mm_getcsr()==production_csr && GetLastError()==production_error && !replay,
+            "ORIGINAL derived Mickey handler delivers opposite peer movement with complete caller/FP/LastError restoration"))return false;
+        if(!check(deliver(a,second)==Result::InvalidTick && update(a) && update(b) &&
+            basis_value(0x35000)==peer_a.forward && basis_value(0x36000)==peer_b.forward,
+            "one native input claim per peer precedes independent original-controller motion and cannot be overwritten"))return false;
+        NativeActorAction neutral{first.event,action,0,0};
+        if(!check(stage(a,peer_a) && deliver(a,neutral)==Result::Applied && value(a.listener+168)==0 && value(a.listener+172)==0,
+            "explicit agreed neutral uses original derived callback to stop held input on the next tick"))return false;
+        NativeActorAction other=first;other.action=0x8100;PPC_STORE_U32(other.action,0x8207F5B0);
+        if(!check(stage(a,peer_a) && deliver(a,other)==Result::UnsupportedAction && deliver(a,first)==Result::Applied,
+            "unsupported action cannot consume the current Movement-only claim"))return false;
+        bool aliases_rejected=true;
+        for(unsigned offset:{280u,284u,288u,292u,296u,300u}){
+            if(!stage(a,peer_a))return false;const auto previous=PPC_LOAD_U32(a.listener+offset);PPC_STORE_U32(a.listener+offset,PPC_LOAD_U32(action));
+            aliases_rejected &= deliver(a,first)==Result::UnsupportedAction;PPC_STORE_U32(a.listener+offset,previous);
+        }
+        if(!check(aliases_rejected,"all six authored tool-action UID aliases reject before shared-resource branches"))return false;
+        if(!stage(a,peer_a))return false;
+        PPC_STORE_U8(0x26000+102,1);
+        const auto pause_result=deliver(a,first);PPC_STORE_U8(0x26000+102,0);
+        if(!check(pause_result==Result::InvalidContext && deliver(a,first)==Result::Applied,"paused world rejects production admission without consuming its pending input"))return false;
+        if(!stage(a,peer_a))return false;PPC_STORE_U8(a.controller+700,1);
+        const auto force_zero=deliver(a,first);PPC_STORE_U8(a.controller+700,0);
+        if(!check(force_zero==Result::Applied && value(a.listener+168)==0 && value(a.listener+172)==0,
+            "original Mickey-specific listener700 gate forces native Movement neutral"))return false;
+        if(!stage(a,peer_a))return false;PPC_STORE_U8(types[0]+5,2);PPC_STORE_U32(lists[0]+8,0x45008);
+        PPC_STORE_U32(0x45000+80,0);PPC_STORE_U8(0x45000+88,0);
+        const auto individual_block=deliver(a,first);PPC_STORE_U8(types[0]+5,255);
+        if(!check(individual_block==Result::Applied && value(a.listener+168)==0 && value(a.listener+172)==0,
+            "original per-entity input blocker preserves native cache instead of bypassing admission"))return false;
+        if(!stage(a,peer_a))return false;PPC_STORE_U32(0x43100+24,1);
+        const auto special=deliver(a,first);PPC_STORE_U32(0x43100+24,0);
+        if(!check(special==Result::Applied && value(a.listener+168)==-first.y && value(a.listener+172)==first.x,
+            "original special movement context retains native vertical-axis inversion"))return false;
+        if(!stage(a,peer_a))return false;PPC_STORE_U32(a.listener+112,0x44600);PPC_STORE_U32(a.listener+116,1);PPC_STORE_U32(0x44600,0x44200);PPC_STORE_U32(0x44200+16,1);
+        const auto consumed=deliver(a,first);PPC_STORE_U32(a.listener+116,0);
+        if(!check(consumed==Result::Applied && PPC_LOAD_U32(0x44200+20)==1 && PPC_LOAD_U32(0x44200+24)==action &&
+            value(a.listener+168)==0 && value(a.listener+172)==0,"original native task consumption zeros Movement and receives the original action payload"))return false;
+        if(!stage(a,peer_a))return false;PPC_STORE_U32(fsm_table+28,uint32_t(PPC_CODE_BASE)+28);
+        const auto forwarded=deliver(a,first);PPC_STORE_U32(fsm_table+28,uint32_t(PPC_CODE_BASE)+24);
+        if(!check(forwarded==Result::Applied && PPC_LOAD_U32(0x44000+20)==1 && PPC_LOAD_U32(0x44000+24)==action &&
+            value(0x44000+28)==first.x && value(0x44000+32)==first.y,"original full68 forwarding delivers movement to its native current FSM state unchanged"))return false;
+        if(!stage(a,peer_a))return false;PPC_STORE_U8(a.listener+176,1);
+        const auto locked=deliver(a,second);PPC_STORE_U8(a.listener+176,0);
+        if(!check(locked==Result::Applied && value(a.listener+168)==first.y && value(a.listener+172)==first.x,
+            "original native movement lock blocks new cache values"))return false;
+        if(!stage(a,peer_a))return false;PPC_STORE_U32(0x35000+384,9);PPC_STORE_U32(0x35000+100,0);
+        const auto denied_motion=deliver(a,second);PPC_STORE_U32(0x35000+384,0);
+        if(!check(denied_motion==Result::Applied && value(a.listener+168)==first.y && value(a.listener+172)==first.x,
+            "scoped entity query preserves the owned Motion mode9 permission denial"))return false;
+        if(!stage(a,peer_a))return false;PPC_STORE_U8(a.controller+68,0x80);
+        const auto inactive=deliver(a,first);PPC_STORE_U8(a.controller+68,0);
+        if(!check(inactive==Result::InvalidContext,"disabled native component rejects Movement delivery before native callbacks"))return false;
+        if(!stage(a,peer_a))return false;PPC_STORE_U32(a.controller+96,0);
+        const auto no_reference=deliver(a,first);PPC_STORE_U32(a.controller+96,reference);
+        if(!check(no_reference==Result::ReferenceRequired,"production input requires the actual retained native movement reference"))return false;
+        if(!stage(a,peer_a))return false;
+        if(!check(ReplayOwnedActorMovement(a.peer,first,input_tick-1,ctx,base)==Result::InvalidTick &&
+            deliver(a,first)==Result::Applied,"wrong tick cannot consume a current peer's native input claim"))return false;
+        if(!stage(a,peer_a))return false;PPC_STORE_U32(a.listener+112,0x44600);PPC_STORE_U32(a.listener+116,1);PPC_STORE_U32(0x44200+16,0);PPC_STORE_U32(0x44200+36,1);
+        const auto exception_context=ctx;bool input_thrown=false;
+        try{deliver(a,first);}catch(const std::runtime_error&){input_thrown=true;}
+        PPC_STORE_U32(0x44200+36,0);PPC_STORE_U32(a.listener+116,0);
+        if(!check(input_thrown && !replay && !std::memcmp(&exception_context,&ctx,sizeof(ctx)) && deliver(a,first)==Result::InvalidTick &&
+            update(a) && basis_value(0x35000)==std::array<float,3>{0,0,1},
+            "derived native input exception restores context/scope and retires both input and prepared motion admission"))return false;
+        // Restore initial per-peer cache values through ORIGINAL base callback
+        // for the following historical lifecycle assertions, not manual writes.
+        if(NativeCallbackFixture(a.peer,first,peer_a,ctx,base,FixtureBase)!=Result::Applied)return false;
+        basis_fixture_without_input=true;
+        SetOwnedActorInputEnabled(a.peer,false);
+        if(!check(PrepareOwnedActorBasis(a.peer,peer_a,ctx,base)==Result::Disabled && update(a) && basis_value(0x35000)==std::array<float,3>{0,0,1},
+            "disabling an actor retires its prepared basis and preserves native controller fallback"))return false;
+        SetOwnedActorInputEnabled(a.peer,true);
+    }
     if(!check(!std::memcmp(retail.data(),base+manager,retail.size()) && PPC_LOAD_U32(0x27000)==5 && PPC_LOAD_U32(0x27004)==5 && PPC_LOAD_U32(0x27008)==0x12340000,
         "retail player records/health/view sentinels remain untouched (no native physics/death/playthrough assertion)"))return false;
     SetOwnedActorInputEnabled(a.peer,false);invoke(a,second);
@@ -362,6 +785,6 @@ bool em2::net::TestOwnedActorInput(){
     if(!check(!std::memcmp(&native,&actual,sizeof(native)) && !std::memcmp(base+actual.r1.u32-4096,expected_stack.data(),expected_stack.size()) && _mm_getcsr()==native_csr,
         "unowned/retail derived listener retains exact native context/stack/FP behavior"))return false;
     ResetOwnedActorInputs();
-    REXLOG_INFO("Owned actor input passed {} native registry/controller/quarantine and original callback checks: opposite extra actor inputs, unchanged retail sentinels, stale handle/world rejection, disabled input, typed basis rejection, nesting/exception and untouched retail path; production replay BLOCKED until per-peer NativeMotion basis and individual death routing are audited; not sixteen-player gameplay",checks);
+    REXLOG_INFO("Owned actor input passed {} native registry/controller/quarantine, original action, camera projection and native motion/basis checks: independent actor samples/views, native world vectors/smoothing/permission flags, tick/generation/context guards, exact native callsite/stack restoration and retail fallback; exact Movement-only original derived dispatch available under staged tick contract; generic actions remain BLOCKED; not sixteen-player gameplay",checks);
     return true;
 }

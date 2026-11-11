@@ -31,9 +31,7 @@ at offset 72. That method selects these exact, live string constants:
 | AI Oswald, 2D | `8207879C` | `AI_Oswald_2D` |
 
 Source: `generated/ppc/ppc_recomp.134.cpp`, function `8276A828`. Its factory
-arguments include slot in r4, mode in r5, and a required Vector4 position
-pointer in r6. It accepts slot 0 or 1, mode 0..2, and returns zero for other slots. Do not pass slot 2
-and expect it to construct a third player.
+arguments include character in r4 (0=Mickey, 1=Oswald), mode in r5, and a required Vector4 position pointer in r6. The character selector is not a player slot: repeated calls construct fresh entities without growing or replacing the two retail records. Values other than 0/1 are not additional player indices.
 
 The selected string goes through `82743D18` to resolve a blueprint using
 `82742640`, then `82743AD8` to clone it with `827B9960`. The latter inserts
@@ -50,7 +48,7 @@ Source: `generated/ppc/ppc_recomp.135.cpp`.
 
 The capture resolves the existing two handles through the native registry,
 rather than treating them as pointers. Both actors have separate motion and
-input components. Their native motion state was ground (0), movement enabled,
+physical interfaces; this does not establish separate human input routes. Their native motion state was ground (0), movement enabled,
 and desired velocity zero. This is a snapshot, not a movement/playthrough test.
 
 The first private instantiation probe (`081657-9b3eab51`, build `A211002A`)
@@ -188,9 +186,23 @@ whole-frame snapshot.
 
 The base movement lookup is scoped to its audited native call site (`8276B968`, return `82783EB0`) and the explicitly replayed listener. It never allocates a third retail player slot. Native callback fixtures send opposite movement samples to two extra controller caches through the original base handler and verify that retail record/health/view sentinels remain untouched. Those sentinels are not a physics or death/respawn test.
 
-Production action replay currently rejects with `BasisRouteUnverified`. Native navigation consumes a camera-relative basis later than the input callback; substituting one of the two retail cameras would make additional actors move relative to somebody else's view. A typed per-peer basis alone cannot fix that consumer. This boundary is preparatory work, not working sixteen-player movement, and it is not wired to automatically spawn additional actors.
+`BeginOwnedActorBasisTick` and `PrepareOwnedActorBasis` stage a normalized ground-projected view direction for each peer. The native controller-to-motion boundary (`827874B0`, return `827837E8`, saved `r27` equals the verified owned component) uses that immutable direction only for the current actor and tick. It restores the original native stack argument afterward. Captured transition bases, alternate references, disabled actors and stale world/generation/tick state reject. Native movement, smoothing, permissions and physics continue through the original code.
 
-The next audited input dependency is the retained camera reference: native `8276C0C0` resolves a retail actor, looks up type `833DAE58` and invokes virtual `+108` with the camera entity returned by `82850FF0`; fallback `82761990` uses virtual `+120`. Setter `827DDD88` retains that reference at component `+80` through native `8308B3E8`. Because navigation consumes it after the action callback, a temporary callback-only camera override is insufficient. Per-extra-actor consumers and reference ownership still require verification; viewport normalization `8276BC90` is not the movement yaw basis.
+`ReplayOwnedActorMovement` now delivers the exact native Movement action through the original Mickey handler `82A3C930`, including its pause, per-entity, special-mode, task/FSM and lock gates. It requires a staged basis and claims input once per peer/tick separately from the motion-basis claim. Every admitted tick must deliver a native movement action, including neutral. Missing peer input must stop the world barrier, rather than advancing with a previous input cache. Other actions remain unsupported; this API is not wired to network gameplay or sixteen actors yet.
 
+## Native movement reference lifetime
 
-Native callback fixtures now cover transition-reference projection through original `82783208` and ordinary action-to-world movement through original `827874B0` followed by `8278A790`. The latter verifies cardinal camera directions, opposing actors, native lateral sign, movement permission and smoothing; its virtual movement sink captures the vector before physics, so it is not a contacts/playthrough test. The ordinary controller-to-motion boundary is `827874B0` at return `827837E8`, with the typed component in saved `r27`. A future adapter must preserve owned retained-reference lifetime and reject stale tick/generation, captured transition bases, alternate references and disabled modes. A null retained reference causes native `827835A8` to skip movement before reaching that boundary; substituting only the final basis cannot fix uninitialized extra actors.
+Live inspection confirmed Mickey's Basic controller at full-controller+16 has vtable `8211DE70`, with virtual108=`82A342E8`. This derived setter first assigns the reference through native NiPointer, then retargets a retail player camera. Extra actors must not steal that camera. `online_actor_reference.cpp` validates the actual derived layout and uses the original base reference operation `827DDD88` for the identical native ownership effect without the retail camera retarget. It rejects self-reference cycles, foreign pre-existing references, arbitrary non-camera entities and stale actor/world identities. Each component retains/releases its own reference, including when several actors share a real camera entity; the staged peer basis controls ordinary movement direction.
+
+Factory failure rollback occurs strictly before entering native admission. It holds the fresh entity with native NiPointer, invokes native owner RemoveAt `82747128`, then releases the hold. It never invokes component initialization/deactivation for an actor that was not admitted. `827CAE68` only propagates time-mode flags; admission `82742F70` first invokes entity virtual368, then virtual36 to activate components. The normal destroy queue `82744E90` invokes deactivation and is unsuitable for fresh unadmitted rollback. No guessed entity-initialized byte is used.
+
+## Current verification
+
+The same executable's fixtures cover original native action delivery, transition reference projection, controller update, property iteration, motion direction/smoothing, tick ownership, stale handles, native permission gates and exception restoration. Their captured motion sinks stop before contacts; they are not a complete physics/playthrough test.
+
+Two private, input-free live checks ran in `tcy_autotopia_visit1.sectiona_first`:
+
+- Forced registration rejection removed the fresh actor from its native owner (57 to 56 entries); its handle disappeared and the original players stayed at health 5. No actor was admitted.
+- Successful registration/admission retained a real movement reference. The extra Mickey had one scene root and animation graph, remained grounded at health 5 for the five-second hold, released the reference, and completed native removal with its handle gone. Both original players stayed at health 5 and their handles remained unchanged.
+
+Evidence: private capture `private-gpu-profile-20261111-071443-2d3eedbd`, `game.log` for forced rollback and `game-reference-fixed.log` for successful lifetime. Successful live executable SHA256: `8A260B821342604CAC67F18DFF102DF23EBDE698E91F2EF3174FD3489D357703`. No movement/camera input or screenshots were sent. These checks establish one idle owned actor's lifecycle, not online movement or sixteen-player synchronization.

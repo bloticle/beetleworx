@@ -79,6 +79,11 @@ def inspect(capture, include_components=False):
         if not 0 < count <= 1048576:
             raise RuntimeError('Invalid native entity registry size')
         wanted_handles = {int.from_bytes(record[:4], 'big') for record in before} - {0}
+        camera_handles = []
+        for record in before:
+            controller = int.from_bytes(record[8:12], 'big')
+            camera_handles.append(word(controller + 20) if controller else 0)
+        wanted_handles.update(set(camera_handles) - {0})
         entities = {}
         visited = set()
         # This mirrors the native registry's node layout; handles are not
@@ -106,6 +111,24 @@ def inspect(capture, include_components=False):
                              int_property_getter=f'{word(table + 204):08X}',
                              int_property_setter=f'{word(table + 268):08X}')
                 types, components = word(entity + 88), word(entity + 36)
+                actor['controller_views'] = {}
+                for label, global_type, adjustment in [('basic', 0x833DAE58, 8), ('mickey', 0x833E2188, 24)]:
+                    type_id = read(global_type, 1)[0]
+                    component_slot = read(types + type_id, 1)[0]
+                    view = dict(type_id=type_id, slot=component_slot)
+                    if component_slot != 255:
+                        face = word(components + component_slot * 4)
+                        obj = face - adjustment
+                        vt = word(obj)
+                        view.update(face=f'{face:08X}', object=f'{obj:08X}', vtable=f'{vt:08X}',
+                                    setter_108=f'{word(vt + 108):08X}')
+                        view['retained_reference' if label == 'basic' else 'listener_vtable'] = f'{word(obj + 80):08X}'
+                    actor['controller_views'][label] = view
+                camera = entities.get(camera_handles[slot], 0)
+                actor['camera_entity'] = f'{camera:08X}'
+                if camera:
+                    actor['camera_component_count'] = word(camera + 44)
+                    actor['camera_component_vtables'] = [f'{word(word(word(camera + 36) + i * 4)):08X}' for i in range(min(word(camera + 44), 8))]
                 # Same audited transformation lookup as native_entity_probe.
                 position_slot = read(types + read(0x833DBC3C, 1)[0], 1)[0]
                 if position_slot != 255:
@@ -130,11 +153,13 @@ def inspect(capture, include_components=False):
                     actor.update(motion=f'{motion:08X}', motion_vtable=f'{word(motion):08X}',
                                  motion_state=word(motion + 384), movement_enabled=read(motion + 640, 1)[0],
                                  desired_velocity=list(struct.unpack('>fff', read(motion + 240, 12))))
-                    input_component = word(motion + 80)
-                    actor['input_component'] = f'{input_component:08X}'
-                    if input_component:
-                        actor['input_enabled'] = read(input_component + 145, 1)[0]
-                        actor['input_route'] = f'{word(input_component + 176):08X}'
+                    # This is the physical-motion interface, not an input route.
+                    # Native82786BE8 reads virtual176 to reach the rigid body.
+                    physics_component = word(motion + 80)
+                    actor['physics_component'] = f'{physics_component:08X}'
+                    if physics_component:
+                        actor['physics_enabled'] = read(physics_component + 145, 1)[0]
+                        actor['physics_interface_at_176'] = f'{word(physics_component + 176):08X}'
             actors.append(actor)
         # Exact string addresses selected by retail 8276A828 (r4 slot, r5
         # human/3D-AI/2D-AI mode), recovered from its lis/addi instructions.
@@ -152,7 +177,7 @@ def inspect(capture, include_components=False):
                     exe_sha256=meta['exe_sha256'], created_utc=created.isoformat(),
                     mode='ReadProcessMemory only; no execution, writes, suspension or input',
                     manager=f'{manager:08X}', manager_vtable=f'{table:08X}', factory_method=f'{factory:08X}',
-                    factory_contract='8276A828 accepts slot 0/1 only; 82743D18 resolves prefab then 82743AD8 clones it',
+                    factory_contract='8276A828 selects character 0=Mickey/1=Oswald and human/AI mode; it clones a fresh entity without replacing a PlayerManager slot',
                     prefab_names=prefabs, actors=actors, stable=stable,
                     limitation='Two existing actors inspected. No additional actor creation, control, replication or 16-player support proven.')
     finally:
