@@ -57,7 +57,7 @@ def main():
     text=replace_once(text,'   function _itemSelected()\n   {','   function _itemSelected()\n   {\n      if(this._em2Online) { this._em2OnlineSelect(); return; }')
     text=replace_once(text,'this.b_5.label = "**LEVEL SELECT";','this.b_5.label = "Online Multiplayer";')
     text=replace_once(text,'      this.dispatchEvent({type:em2.Events.LEVEL_SELECT_LOAD});\n      this.b_5._rollout();','      this._em2OnlineOpen();\n      this.b_5._rollout();')
-    text=replace_once(text,'   function _goBack()\n   {','   function _goBack()\n   {\n      if(this._em2Online) { if(this._em2OnlineHostPage) { this._em2OnlineHostPage = false; this._em2OnlineRefresh(); } else if(this._em2OnlineState != 7) this._em2OnlineClose(); return; }')
+    text=replace_once(text,'   function _goBack()\n   {','   function _goBack()\n   {\n      if(this._em2Online) { if(this._em2OnlineEditingName) { this._em2OnlineEndName(false); return; } if(this._em2OnlineHostPage) { this._em2OnlineHostPage = false; this._em2OnlineRefresh(); } else if(this._em2OnlineState != 7) this._em2OnlineClose(); return; }')
     text=replace_once(text,'      _level0.APressed = this._itemSelectedListener;','''      _level0.APressed = this._itemSelectedListener;
       this._em2OnlineStartPump = this.createEmptyMovieClip("_em2OnlineStartPump",this.getNextHighestDepth());
       this._em2OnlineStartPump.onEnterFrame = function()
@@ -74,7 +74,7 @@ def main():
     modified=work/'modified.gfx';run('java','-jar',jar,'-importScript',source,modified,work/'import')
     run('java','-jar',jar,'-export','script',work/'roundtrip',modified)
     result=(work/'roundtrip/scripts'/relative).read_text(encoding='utf-8-sig')
-    for marker in ('Online Multiplayer','function _em2OnlineOpen()','_level0.SetOption(2700,2)','_level0.SetOption(2701,-1)', '_level0.SetOption(7203,-1) == 1', '_level0.SetOption(7203,-1) != 1', 'Auto Internet port: On', 'Copy Internet invite', '_level0.SetOption(2715,1)', 'Visibility: Invite only', '_level0.SetOption(2700,16)', '_level0.SetOption(2716,-1)'):
+    for marker in ('Online Multiplayer','function _em2OnlineOpen()','function _em2OnlineBeginName()','_level0.SetOption(2727,2)','_level0.SetOption(2727,-1)','_level0.SetOption(2725,0)','_level0.SetOption(2700,2)','_level0.SetOption(2701,-1)', '_level0.SetOption(7203,-1) == 1', '_level0.SetOption(7203,-1) != 1', 'Auto Internet port: On', 'Copy Internet invite', '_level0.SetOption(2715,1)', 'Visibility: Invite only', '_level0.SetOption(2700,16)', '_level0.SetOption(2716,-1)'):
         if marker not in result:raise RuntimeError('Native lobby bridge lost during ActionScript compilation: '+marker)
     before=work/'export/scripts';after=work/'roundtrip/scripts'
     changed=[p.relative_to(before).as_posix() for p in before.rglob('*.as')

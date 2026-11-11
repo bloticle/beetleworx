@@ -16,5 +16,9 @@ void CancelNativeOnlineMenu();
 // Explicit, validated, private-root/loopback-only diagnostic. Never enabled by
 // production menu choices or by ordinary automatic Continue.
 bool NativeOnlineMenuQaActive();
+bool NativeOnlineNameKey(unsigned key,bool down,bool shift=false,bool control=false);
+bool NativeOnlineNameCharacter(uint32_t utf16);
+void CancelNativeOnlineNameInput();
+void RestoreNativeOnlineNameFocus();
 bool TestNativeOnlineMenu();
 }

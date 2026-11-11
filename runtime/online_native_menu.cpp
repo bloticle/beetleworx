@@ -1,3 +1,5 @@
+#include "online_name_input.h"
+#include "controls.h"
 #include "online_native_menu.h"
 #include "online_runtime.h"
 #include "online_frontend.h"
@@ -136,7 +138,7 @@ struct Controller {
             start_requested=false;
         }
         if(status.state==BootState::Ready && handoff_available){
-            if(!host)boot->ArmLobbyStart();
+            if(!host && NativeOnlineMenuQaActive())boot->ArmLobbyStart();
             if(!start && boot->LobbyStartConfirmed()){
                 start=true;
                 REXLOG_INFO("Native online lobby start confirmed for {}",host?"host":"client");
@@ -215,7 +217,11 @@ struct Controller {
         case 6:
             if(!handoff_available)return "Connected. Starting online gameplay is temporarily unavailable. Cancel to return.";
             if(start_requested)return "Waiting for the other player to confirm the start...";
-            if(!host)return "Connected. The host will start the game.";
+            if(!host){
+                const auto roster=boot->lobby();
+                const auto player=LocalPlayer(roster);
+                return player && player->ready?"Ready. Waiting for the host to start.":"Select Ready when you want the host to start.";
+            }
             if(boot->CanRequestLobbyStart())return "Both players are ready. Select Start online game.";
             return "Connected. Waiting for the other player to be ready...";
         case 7:return "Preparing the shared game...";
@@ -241,6 +247,7 @@ struct Controller {
     }
     void Begin(bool hosting,std::string invitation={},std::optional<std::filesystem::path> retained={}){
         if(Busy())return;
+        name_input.End();name_input_state=0;
         router.reset();
         error.clear();feedback.clear();start=false;start_requested=false;
         const auto level=em2::CurrentNativeLoadLevel();auto* runtime=rex::Runtime::instance();
@@ -269,12 +276,36 @@ struct Controller {
             }else if(!boot->Join(paths,std::move(invitation)))error="Paste the host's current invitation, or use Find LAN games.";
         }catch(const std::exception&){error="Could not prepare the online session folder. Check disk space and permissions.";}
     }
-    void Cancel(){campaign_cancel.request_stop();if(boot)boot->Cancel();router.reset();start=false;start_requested=false;error.clear();feedback.clear();advertiser.Stop();browser.Stop();advertised.clear();}
+    LobbyNameInput name_input;int name_input_state=0;
+    std::array<bool,256> name_keys{};
+    std::string name_readback;unsigned cursor_readback=0,anchor_readback=0;
+    void FinishNameInput(bool commit){
+        if(!name_input.active())return;
+        const auto name=name_input.text();name_input.End();name_input_state=commit?2:3;
+        if(commit && (!ProfileEditable() || !boot->RenameLobbyPlayer(name)))feedback="Name could not be saved. Try again.";
+    }
+    const LobbyPlayer* LocalPlayer(const LobbySnapshot& roster)const{
+        const auto peer=host?1u:2u;
+        for(const auto& player:roster.players)if(player.peer==peer)return &player;
+        return nullptr;
+    }
+    bool ProfileEditable()const{return boot && State()==6 && !boot->lobby().locked && !boot->lobby_request_pending();}
+    std::string RosterText()const{
+        if(!boot)return {};
+        const auto roster=boot->lobby();std::string text;
+        for(const auto& player:roster.players){
+            if(!text.empty())text+='\n';
+            text+=player.name; text+=player.peer==(host?1u:2u)?" (you)":"";
+            text+=player.peer==1?" - Host":(player.ready?" - Ready":" - Not ready");
+        }
+        return text;
+    }
+    void Cancel(){name_input.End();name_input_state=0;campaign_cancel.request_stop();if(boot)boot->Cancel();router.reset();start=false;start_requested=false;error.clear();feedback.clear();advertiser.Stop();browser.Stop();advertised.clear();}
 };
 Controller& Menu(){static Controller controller;return controller;}
 }
 bool NativeOnlineMenuOption(int id,int choice,int& result){
-    if(id<2700 || id>2716)return false;
+    if(id<2700 || id>2730 || (id>2716 && id<2720))return false;
     struct Restore{unsigned csr=_mm_getcsr();DWORD error=GetLastError();~Restore(){_mm_setcsr(csr);SetLastError(error);}}restore;
     if(PublicDemoBuild()) {
         // Stale authored pages and diagnostic auto-open flags cannot create a
@@ -344,8 +375,80 @@ bool NativeOnlineMenuOption(int id,int choice,int& result){
     else if(id==2714)result=menu.campaign_scan.valid();
     else if(id==2715)result=choice==0?int(menu.try_router):int(menu.MappedInvite().has_value());
     else if(id==2716)result=menu.lan_discovery;
+    else if(id==2720)result=menu.ProfileEditable();
+    else if(id==2721){if(menu.boot){const auto roster=menu.boot->lobby();if(const auto player=menu.LocalPlayer(roster))result=player->ready;}}
+    else if(id==2722){if(menu.boot){const auto roster=menu.boot->lobby();if(const auto player=menu.LocalPlayer(roster))result=ByteAt(player->name,choice);}}
+    else if(id==2723)result=ByteAt(menu.RosterText(),choice);
+    else if(id==2724)result=0; // Reserved; text comes through the window character path.
+    else if(id==2725){
+        if(menu.ProfileEditable() && !menu.host){
+            const auto roster=menu.boot->lobby();if(const auto player=menu.LocalPlayer(roster))
+                result=player->ready?menu.boot->SetLobbyReady(false):menu.boot->ArmLobbyStart();
+        }
+    }
+    else if(id==2726){
+        std::string text;
+        if(menu.boot && menu.boot->lobby_request_pending())text="Updating lobby profile...";
+        else if(menu.boot && menu.boot->last_lobby_result()==LobbyResult::InvalidName)text="Use 1-24 characters for your name, without control characters.";
+        else if(menu.boot && menu.boot->last_lobby_result()==LobbyResult::Locked)text="The host has started the game. Your profile is locked.";
+        result=ByteAt(text,choice);
+    }
+    else if(id==2727){
+        if(choice==1 && menu.ProfileEditable()){
+            const auto roster=menu.boot->lobby();if(const auto player=menu.LocalPlayer(roster)){
+                if(menu.name_input.Begin(player->name)){menu.name_input_state=1;em2::ClearControlKeys();}
+            }
+        }else if(choice==2)menu.FinishNameInput(true);
+        else if(choice==0){menu.name_input.End();menu.name_input_state=0;}
+        result=menu.name_input_state;
+    }
+    else if(id==2728){
+        if(choice==0){menu.name_readback=menu.name_input.text();menu.cursor_readback=menu.name_input.cursor_utf16();menu.anchor_readback=menu.name_input.anchor_utf16();}
+        result=ByteAt(menu.name_readback,choice);
+    }
+    else if(id==2729)result=int(menu.cursor_readback);
+    else if(id==2730)result=int(menu.anchor_readback);
     return true;
 }
+bool NativeOnlineNameKey(unsigned key,bool down,bool shift,bool control){
+    if(PublicDemoBuild())return false;
+    auto& menu=Menu();std::lock_guard lock(menu.mutex);
+    if(key<menu.name_keys.size() && menu.name_keys[key]){
+        if(!down)menu.name_keys[key]=false;
+        // Repeated downs still edit while active, but cannot escape ownership
+        // when Return/Escape has already ended the editor.
+        if(!down || !menu.name_input.active())return true;
+    }
+    if(!menu.name_input.active())return false;
+    if(down){
+        if(key<menu.name_keys.size())menu.name_keys[key]=true;
+        if(key==VK_RETURN)menu.FinishNameInput(true);
+        else if(key==VK_ESCAPE)menu.FinishNameInput(false);
+        else if(control && key=='V'){
+            if(OpenClipboard(nullptr)){
+                if(auto data=GetClipboardData(CF_UNICODETEXT)){
+                    const auto bytes=GlobalSize(data);
+                    if(bytes && bytes<=8192)if(const auto text=static_cast<const wchar_t*>(GlobalLock(data))){
+                        for(size_t i=0;i<bytes/sizeof(wchar_t) && text[i];++i)menu.name_input.Character(uint16_t(text[i]));
+                        GlobalUnlock(data);
+                    }
+                }
+                CloseClipboard();
+            }
+        }else menu.name_input.Key(key,shift,control);
+    }
+    return true;
+}
+bool NativeOnlineNameCharacter(uint32_t unit){
+    if(PublicDemoBuild())return false;
+    auto& menu=Menu();std::lock_guard lock(menu.mutex);return menu.name_input.Character(unit);
+}
+void RestoreNativeOnlineNameFocus(){
+    auto& menu=Menu();std::lock_guard lock(menu.mutex);
+    for(unsigned key=0;key<menu.name_keys.size();++key)
+        if(menu.name_keys[key] && !(GetAsyncKeyState(int(key))&0x8000))menu.name_keys[key]=false;
+}
+void CancelNativeOnlineNameInput(){auto& menu=Menu();std::lock_guard lock(menu.mutex);menu.FinishNameInput(false);}
 std::optional<BootResult> TakeNativeOnlineMenuReady(){
     if(PublicDemoBuild())return {};
     auto& menu=Menu();std::lock_guard lock(menu.mutex);
@@ -389,7 +492,8 @@ bool TestNativeOnlineMenu(){
         const bool previous=REXCVAR_GET(em2_demo_build);
         struct RestoreDemo {bool value;~RestoreDemo(){REXCVAR_SET(em2_demo_build,value);}} restore{previous};
         REXCVAR_SET(em2_demo_build,true);
-        for(int id=2700;id<=2716;++id)for(int choice=-1;choice<=16;++choice) {
+        for(int id=2700;id<=2730;++id)for(int choice=-3;choice<=255;++choice) {
+            if(id>2716 && id<2720)continue;
             int result=-99;
             ok=NativeOnlineMenuOption(id,choice,result) &&
                 result==((id==2710 || id==2713)?ByteAt("Online multiplayer is unavailable in this demo.",choice):0) && ok;
@@ -397,6 +501,25 @@ bool TestNativeOnlineMenu(){
         int result=99;ok=!NativeOnlineMenuOption(2699,0,result) && !TakeNativeOnlineMenuReady() && !NativeOnlineMenuQaActive() && ok;
         ok=!ShowOnlineFrontend({},{},{}) && ok;
         REXCVAR_SET(em2_demo_build,false);
+        ok=!NativeOnlineMenuOption(2719,0,result) && ok;
+        for(unsigned key:{unsigned(VK_ESCAPE),unsigned(VK_RETURN)}){
+            auto& menu=Menu();menu.name_input.Begin("Name");
+            ok=NativeOnlineNameKey(key,true) && !menu.name_input.active() &&
+                NativeOnlineNameKey(key,true) && NativeOnlineNameKey(key,false) &&
+                !NativeOnlineNameKey(key,true) && ok;
+            menu.name_input_state=0;menu.feedback.clear();
+        }
+        {
+            auto& menu=Menu();menu.name_input.Begin("Name");
+            ok=NativeOnlineNameKey(VK_LBUTTON,true) && menu.name_input.active() && ok;
+            menu.FinishNameInput(false);
+            ok=NativeOnlineNameKey(VK_LBUTTON,true) && NativeOnlineNameKey(VK_LBUTTON,false) &&
+                !NativeOnlineNameKey(VK_LBUTTON,true) && ok;
+            menu.name_input_state=0;
+        }
+        for(int choice:{-1,65,-2})ok=NativeOnlineMenuOption(2724,choice,result) && result==0 && ok;
+        ok=NativeOnlineMenuOption(2724,-3,result) && result==0 && ok;
+        ok=NativeOnlineMenuOption(2725,0,result) && result==0 && ok;
         ok=NativeOnlineMenuOption(2716,-1,result) && result==0 && ok;
         ok=NativeOnlineMenuOption(2700,16,result) && NativeOnlineMenuOption(2716,-1,result) && result==1 && ok;
         ok=NativeOnlineMenuOption(2700,16,result) && NativeOnlineMenuOption(2716,-1,result) && result==0 && ok;

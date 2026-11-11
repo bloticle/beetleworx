@@ -478,3 +478,5 @@ target_sources(EM2Recomp PRIVATE debug_level_browser.cpp)
 set_property(SOURCE em1_audio_output.cpp PROPERTY INCLUDE_DIRECTORIES "${REXSDK}/include/SDL2")
 
 target_sources(EM2Recomp PRIVATE online_actor_input.cpp)
+
+target_sources(EM2Recomp PRIVATE online_name_input.cpp)

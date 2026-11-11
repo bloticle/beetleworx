@@ -20,6 +20,9 @@ PPC_EXTERN_FUNC(__imp__sub_8276B968);
 PPC_EXTERN_FUNC(__imp__sub_82732A18);
 PPC_EXTERN_FUNC(__imp__sub_827B58D0);
 PPC_EXTERN_FUNC(__imp__sub_82A69948);
+PPC_EXTERN_FUNC(__imp__sub_82783208);
+PPC_EXTERN_FUNC(__imp__sub_827874B0);
+PPC_EXTERN_FUNC(__imp__sub_8278A790);
 
 namespace {
 using Actor=em2::net::OwnedActorInput;
@@ -137,6 +140,30 @@ namespace {
 void FixtureBase(PPCContext& ctx,uint8_t* base){if(!em2::net::SuppressOwnedActorInput(ctx,base))__imp__sub_82783CE8(ctx,base);}
 void FixtureMickey(PPCContext& ctx,uint8_t* base){if(!em2::net::SuppressOwnedActorInput(ctx,base))__imp__sub_82A3C930(ctx,base);}
 void ThrowAfterBase(PPCContext& ctx,uint8_t* base){FixtureBase(ctx,base);throw std::runtime_error("owned actor fixture unwind");}
+// Fixture boundary only: a NiEntity property source supplying its authored
+// 3x3 transform. The projection, flattening, normalization and capture gate
+// are executed by the ORIGINAL BasicPlayerController method below.
+void FixtureCameraTransform(PPCContext& ctx,uint8_t* base){
+    const auto entity=ctx.r3.u32,output=ctx.r5.u32;
+    if(ctx.lr!=0x82783284 || ctx.r4.u32!=0x833DA808 || ctx.r6.u32!=0)
+        throw std::runtime_error("unexpected retained-camera property ABI");
+    PPC_STORE_U32(entity+52,PPC_LOAD_U32(entity+52)+1);
+    std::memcpy(base+output,base+entity+256,48);
+    ctx.r3.u64=1;
+}
+struct WorldVectorCaptured {};
+struct WorldVectorProbe {uint32_t motion=0;std::array<float,3> vector{};bool reached=false;};
+thread_local WorldVectorProbe* world_vector_probe=nullptr;
+void FixtureMotionWorldVector(PPCContext& ctx,uint8_t* base){
+    auto* probe=world_vector_probe;
+    if(!probe || ctx.lr!=0x8278A8C0 || ctx.r3.u32!=probe->motion)
+        throw std::runtime_error("unexpected native movement-vector ABI");
+    for(unsigned i=0;i<3;++i)probe->vector[i]=std::bit_cast<float>(PPC_LOAD_U32(ctx.r4.u32+i*4));
+    probe->reached=true;
+    // Stop at the real virtual motion sink: do not pretend to exercise a
+    // Havok body, contacts, animation or the remaining turn/steering update.
+    throw WorldVectorCaptured{};
+}
 }
 bool em2::net::TestOwnedActorInput(){
     auto* base=static_cast<uint8_t*>(VirtualAlloc(nullptr,0x100000000ull,MEM_RESERVE,PAGE_NOACCESS));
@@ -195,6 +222,115 @@ bool em2::net::TestOwnedActorInput(){
     auto value=[&](uint32_t at){return std::bit_cast<float>(PPC_LOAD_U32(at));};
     if(!check(value(a.listener+168)==first.y && value(a.listener+172)==first.x && value(b.listener+168)==second.y && value(b.listener+172)==second.x,
         "opposite native movement samples reach only their own controller caches without manual cache writes"))return false;
+    {
+    // The projection probe intentionally snapshots different action samples.
+    // Restore the complete fixture controllers before testing subsequent
+    // input lifecycle behavior against the earlier native callback results.
+    struct ControllerFixtureScope {
+        uint8_t* base;std::array<uint32_t,2> addresses;std::array<std::array<uint8_t,800>,2> saved;
+        ControllerFixtureScope(uint8_t* memory,std::array<uint32_t,2> values):base(memory),addresses(values){
+            for(unsigned i=0;i<2;++i)std::memcpy(saved[i].data(),base+addresses[i],saved[i].size());}
+        ~ControllerFixtureScope(){for(unsigned i=0;i<2;++i)std::memcpy(base+addresses[i],saved[i].data(),saved[i].size());}
+    }controller_fixture_scope{base,controllers};
+    // Native camera transition code82A14018/82A15210 resolves the target's
+    // BasicPlayerController through type833DAE58 face-8, then calls82783208.
+    // On Mickey that subobject is full controller+16, NOT listener+0.
+    // This capture is latched by byte241 until native code clears it; it is
+    // deliberately not described as a once-per-world-tick movement route.
+    PPC_LOOKUP_FUNC(base,uint32_t(PPC_CODE_BASE)+8)=FixtureCameraTransform;
+    constexpr uint32_t camera_table=0x32000;
+    PPC_STORE_U32(camera_table+172,uint32_t(PPC_CODE_BASE)+8);
+    auto capture=[&](const Actor& actor){auto call=context();call.r3.u64=actor.controller+16;__imp__sub_82783208(call,base);
+        return call.r1.u32==0x4F000 && call.lr==0x12345678;};
+    auto vector_at=[&](uint32_t at){return std::array<float,3>{value(at),value(at+4),value(at+8)};};
+    auto close=[](const std::array<float,3>& actual,const std::array<float,3>& expected){
+        for(unsigned i=0;i<3;++i)if(std::abs(actual[i]-expected[i])>1e-6f)return false;return true;};
+    for(unsigned i=0;i<2;++i){
+        const auto controller=controllers[i],camera=0x30000u+i*0x1000;
+        // Same typed face shared by the derived and Basic controller views.
+        PPC_STORE_U8(0x833DAE58,6);PPC_STORE_U8(types[i]+6,0);
+        if(!check(PPC_LOAD_U32(lists[i])-8==controller+16,"typed BasicPlayerController face resolves to the verified Mickey subobject"))return false;
+        PPC_STORE_U32(camera,camera_table);PPC_STORE_U32(controller+16+80,camera);
+        PPC_STORE_U32(controller+16+232,std::bit_cast<uint32_t>(.25f+i));
+        PPC_STORE_U32(controller+16+236,std::bit_cast<uint32_t>(-.5f-i));
+        // Distinct native reference entities: both transform matrices are
+        // fixture data; neither is a retail camera/PlayerManager record.
+        for(unsigned j=0;j<12;++j)PPC_STORE_U32(camera+256+j*4,std::bit_cast<uint32_t>(j%5==0?1.f:0.f));
+        const std::array<float,3> pitched=i?std::array<float,3>{-3,12,-4}:std::array<float,3>{3,-12,4};
+        for(unsigned j=0;j<3;++j)PPC_STORE_U32(camera+256+32+j*4,std::bit_cast<uint32_t>(pitched[j]));
+        PPC_STORE_U8(controller+16+241,0);
+    }
+    if(!check(capture(a) && close(vector_at(a.controller+16+256),{.6f,0,.8f}) &&
+        PPC_LOAD_U32(b.controller+16+256)==0 && capture(b) && close(vector_at(b.controller+16+256),{-.6f,0,-.8f}),
+        "original retained-camera transform projection independently flattens and normalizes two opposite actor bases"))return false;
+    if(!check(value(a.controller+16+244)==.25f && value(a.controller+16+248)==-.5f &&
+        value(b.controller+16+244)==1.25f && value(b.controller+16+248)==-1.5f,
+        "native transition capture snapshots each actor's own movement samples"))return false;
+    const auto captured=vector_at(a.controller+16+256);
+    PPC_STORE_U32(0x30000+256+32,std::bit_cast<uint32_t>(-1.f));
+    PPC_STORE_U32(0x30000+256+40,0);
+    if(!check(capture(a) && vector_at(a.controller+16+256)==captured && PPC_LOAD_U32(0x30000+52)==1 && PPC_LOAD_U32(0x31000+52)==1,
+        "native byte241 retains captured orientation across repeated calls instead of resampling or sharing a peer's camera"))return false;
+    PPC_STORE_U8(a.controller+16+241,0);
+    if(!check(capture(a) && close(vector_at(a.controller+16+256),{-1,0,0}) && PPC_LOAD_U32(0x30000+52)==2 &&
+        close(vector_at(b.controller+16+256),{-.6f,0,-.8f}),"only the actor whose native capture latch is cleared refreshes its basis"))return false;
+    PPC_STORE_U32(a.controller+16+80,0);PPC_STORE_U8(a.controller+16+241,0);
+    if(!check(capture(a) && close(vector_at(a.controller+16+256),{-1,0,0}) && PPC_LOAD_U32(0x30000+52)==2 && PPC_LOAD_U8(a.controller+16+241)==1,
+        "original null retained-camera fallback preserves prior basis and latches without a property query"))return false;
+    }
+    {
+        PPC_LOOKUP_FUNC(base,uint32_t(PPC_CODE_BASE)+12)=FixtureMotionWorldVector;
+        constexpr uint32_t motion_table=0x37000,basis_at=0x38000,owner_at=0x39000;
+        PPC_STORE_U32(motion_table+144,uint32_t(PPC_CODE_BASE)+12);
+        auto put_float=[&](uint32_t at,float input){PPC_STORE_U32(at,std::bit_cast<uint32_t>(input));};
+        auto prepare=[&](uint32_t motion){std::memset(base+motion,0,1024);PPC_STORE_U32(motion,motion_table);
+            PPC_STORE_U32(motion+48,owner_at);PPC_STORE_U32(motion+568,0x1e);put_float(motion+876,1);};
+        auto input=[&](uint32_t motion,float forward,float lateral,const std::array<float,3>& basis){
+            for(unsigned i=0;i<3;++i)put_float(basis_at+i*4,basis[i]);
+            auto call=context();call.r3.u64=motion;call.r6.u64=basis_at;call.f1.f64=forward;call.f2.f64=lateral;
+            __imp__sub_827874B0(call,base);
+            return call.r1.u32==0x4f000 && call.lr==0x12345678;
+        };
+        auto world=[&](uint32_t motion,WorldVectorProbe& probe){
+            auto call=context();ContextScope restore_context(call);
+            struct Scope {WorldVectorProbe* prior=world_vector_probe;explicit Scope(WorldVectorProbe& p){world_vector_probe=&p;}~Scope(){world_vector_probe=prior;}}scope{probe};
+            probe.motion=motion;call.r3.u64=motion;call.r6.u64=1;
+            try{__imp__sub_8278A790(call,base);}catch(const WorldVectorCaptured&){return probe.reached;}
+            return false;
+        };
+        auto vector_matches=[](const std::array<float,3>& actual,const std::array<float,3>& expected){
+            for(unsigned i=0;i<3;++i)if(!std::isfinite(actual[i]) || std::abs(actual[i]-expected[i])>2e-5f)return false;return true;};
+        constexpr uint32_t first_motion=0x35000,second_motion=0x36000;
+        prepare(first_motion);prepare(second_motion);
+        const std::array<std::array<float,3>,4> bases{{{0,0,1},{1,0,0},{0,0,-1},{-1,0,0}}};
+        // Native input sign and rotation, established through ORIGINAL
+        // 827874B0 -> 8278A790 -> atan2/axis-angle math -> virtual144.
+        // The positive f1 sample starts on -X for the +Z reference and turns
+        // through +Z,+X,-Z. Positive f2 starts on -Z, then -X,+Z,+X.
+        const std::array<std::array<float,3>,4> forward_world{{{-1,0,0},{0,0,1},{1,0,0},{0,0,-1}}};
+        const std::array<std::array<float,3>,4> lateral_world{{{0,0,-1},{-1,0,0},{0,0,1},{1,0,0}}};
+        for(unsigned i=0;i<bases.size();++i){
+            WorldVectorProbe positive,opposite,lateral;
+            if(!check(input(first_motion,1,0,bases[i]) && input(second_motion,-1,0,bases[i]) &&
+                world(first_motion,positive) && world(second_motion,opposite) && vector_matches(positive.vector,forward_world[i]) &&
+                vector_matches(opposite.vector,{-forward_world[i][0],0,-forward_world[i][2]}),
+                "original native motion computes cardinal/quarter-turn/opposite world vectors independently for two actors"))return false;
+            if(!check(input(first_motion,0,1,bases[i]) && world(first_motion,lateral) && vector_matches(lateral.vector,lateral_world[i]),
+                "original native lateral sign follows the camera basis without a guessed cross-product convention"))return false;
+        }
+        prepare(first_motion);PPC_STORE_U32(first_motion+568,0);WorldVectorProbe disabled;
+        if(!check(input(first_motion,1,1,bases[0]) && world(first_motion,disabled) && vector_matches(disabled.vector,{0,0,0}) &&
+            value(first_motion+132)==-1 && value(first_motion+136)==1,
+            "native movement permission mask zeros effective motion while preserving raw action records"))return false;
+        prepare(first_motion);PPC_STORE_U32(first_motion+872,1);put_float(first_motion+608,6);
+        const auto prior_delta=PPC_LOAD_U32(0x833FCA54);put_float(0x833FCA54,1.f/60.f);
+        struct RestoreDelta {uint8_t* base;uint32_t bits;~RestoreDelta(){PPC_STORE_U32(0x833FCA54,bits);}}restore_delta{base,prior_delta};
+        WorldVectorProbe smoothed;
+        if(!check(input(first_motion,.6f,.8f,bases[0]) && world(first_motion,smoothed) && vector_matches(smoothed.vector,{-.06f,0,-.08f}),
+            "original linear native acceleration/smoothing remains active before basis rotation"))return false;
+        if(!check(!world_vector_probe && !std::memcmp(retail.data(),base+manager,retail.size()),
+            "native vector interception restores its private scope and never writes the retail camera/player array"))return false;
+    }
     if(!check(!std::memcmp(retail.data(),base+manager,retail.size()) && PPC_LOAD_U32(0x27000)==5 && PPC_LOAD_U32(0x27004)==5 && PPC_LOAD_U32(0x27008)==0x12340000,
         "retail player records/health/view sentinels remain untouched (no native physics/death/playthrough assertion)"))return false;
     SetOwnedActorInputEnabled(a.peer,false);invoke(a,second);

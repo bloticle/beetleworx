@@ -37,6 +37,10 @@ public:
     void Cancel();
     BootStatus status() const;
     LobbySnapshot lobby() const;
+    bool RenameLobbyPlayer(std::string_view);
+    bool SetLobbyReady(bool);
+    bool lobby_request_pending() const;
+    LobbyResult last_lobby_result() const;
     bool ArmLobbyStart();
     bool CanRequestLobbyStart() const;
     bool RequestLobbyStart();

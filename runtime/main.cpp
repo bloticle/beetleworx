@@ -81,6 +81,8 @@
 #include "demo_setup.h"
 #include "online.h"
 #include "online_actor_input.h"
+#include "online_name_input.h"
+#include "online_native_menu.h"
 #include "online_identity.h"
 #include "online_invite.h"
 #include "online_checkpoint.h"
@@ -483,7 +485,7 @@ public:
             std::string em1_collision_error;
             const auto em1_collision_ok=em2::em1::TestLevelPartitionClassification(em1_collision_error) && em2::em1::TestKeyframeColorEvaluator(em1_collision_error) && em2::em1::TestNifContainerCompatibility(em1_collision_error) && em2::em1::TestEm1HavokCollision(em1_collision_error) && em2::em1::TestNifFixedPointUvPromotion(em1_collision_error) && em2::em1::TestPortableBcPixels(em1_collision_error) && em2::em1::TestPreviewDiffusePeState(em1_collision_error) && em2::em1::TestLevelOriginalScriptLibrary() && em2::em1::TestLevelOriginalAudioOwnership();
             if(!em1_collision_ok)REXLOG_ERROR("EM1 compatibility regression: {}",em1_collision_error);
-            const auto success=em1_collision_ok && em2::net::TestOnlineSession() && em2::net::TestOwnedActorInput() && em2::net::TestOnlineGameplay() && em2::TestNativePlayerActions() && em2::TestCanonicalNativeJoin() && em2::TestNativePlayerSpawn() && em2::TestRenderOptions() && em2::TestRenderLogFilter() && em2::TestNativeRenderSampler(test_dir/"native-samples.tsv") && em2::TestNativePropertyLookup() && em2::TestNativeBindingCache() && em2::TestNativeVisibilityScan() && em2::TestNativeRegisterBank() && em2::TestNativeShaderUpload() && em2::TestNativeMemoryCopy() && em2::TestNativeVideoBlocks() && em2::TestNativeSkinning() && em2::TestNativeCameraTiming() && em2::TestNativeCameraProjection() && em2::TestSceneDrawInputs() && em2::TestSimulation() && em2::TestGpuCommandProfiling() && em2::TestTransferScissors() && em2::TestStencilZeroProof() && em2::TestFencedScratchCache() && settings_ok && controls_ok && lowering_ok;
+            const auto success=em1_collision_ok && em2::net::TestLobbyNameInput() && em2::net::TestOnlineSession() && em2::net::TestOwnedActorInput() && em2::net::TestOnlineGameplay() && em2::TestNativePlayerActions() && em2::TestCanonicalNativeJoin() && em2::TestNativePlayerSpawn() && em2::TestRenderOptions() && em2::TestRenderLogFilter() && em2::TestNativeRenderSampler(test_dir/"native-samples.tsv") && em2::TestNativePropertyLookup() && em2::TestNativeBindingCache() && em2::TestNativeVisibilityScan() && em2::TestNativeRegisterBank() && em2::TestNativeShaderUpload() && em2::TestNativeMemoryCopy() && em2::TestNativeVideoBlocks() && em2::TestNativeSkinning() && em2::TestNativeCameraTiming() && em2::TestNativeCameraProjection() && em2::TestSceneDrawInputs() && em2::TestSimulation() && em2::TestGpuCommandProfiling() && em2::TestTransferScissors() && em2::TestStencilZeroProof() && em2::TestFencedScratchCache() && settings_ok && controls_ok && lowering_ok;
             spdlog::shutdown();
             ExitProcess(success?0:1);
         }
@@ -907,19 +909,21 @@ public:
         return true;
     }
 
-    void OnKeyDown(rex::ui::KeyEvent& e) override { if(!em2::EngineWorkbenchKey(unsigned(e.virtual_key()),true))em2::ControlKey(unsigned(e.virtual_key()),true); }
-    void OnKeyUp(rex::ui::KeyEvent& e) override { if(!em2::EngineWorkbenchKey(unsigned(e.virtual_key()),false))em2::ControlKey(unsigned(e.virtual_key()),false); }
+    void OnKeyDown(rex::ui::KeyEvent& e) override { if(em2::net::NativeOnlineNameKey(unsigned(e.virtual_key()),true,e.is_shift_pressed(),e.is_ctrl_pressed())){e.set_handled(true);return;} if(!em2::EngineWorkbenchKey(unsigned(e.virtual_key()),true))em2::ControlKey(unsigned(e.virtual_key()),true); }
+    void OnKeyChar(rex::ui::KeyEvent& e) override {if(em2::net::NativeOnlineNameCharacter(unsigned(e.virtual_key())))e.set_handled(true);}
+    void OnKeyUp(rex::ui::KeyEvent& e) override { if(em2::net::NativeOnlineNameKey(unsigned(e.virtual_key()),false,e.is_shift_pressed(),e.is_ctrl_pressed())){e.set_handled(true);return;} if(!em2::EngineWorkbenchKey(unsigned(e.virtual_key()),false))em2::ControlKey(unsigned(e.virtual_key()),false); }
     void OnMouseDown(rex::ui::MouseEvent& e) override { MouseKey(e,true); }
     void OnMouseUp(rex::ui::MouseEvent& e) override { MouseKey(e,false); }
     void OnMouseWheel(rex::ui::MouseEvent& e) override {
         if(window_ && window_->HasFocus())em2::ControlWheel(e.scroll_x(),e.scroll_y());
     }
-    void OnGotFocus(rex::ui::UISetupEvent&) override {em2::SetEngineWorkbenchFocused(true);}
-    void OnLostFocus(rex::ui::UISetupEvent&) override { em2::ClearControlKeys();em2::SetEngineWorkbenchFocused(false); }
+    void OnGotFocus(rex::ui::UISetupEvent&) override {em2::net::RestoreNativeOnlineNameFocus();em2::SetEngineWorkbenchFocused(true);}
+    void OnLostFocus(rex::ui::UISetupEvent&) override { em2::net::CancelNativeOnlineNameInput();em2::ClearControlKeys();em2::SetEngineWorkbenchFocused(false); }
     void MouseKey(rex::ui::MouseEvent& e,bool down) {
         using Button=rex::ui::MouseEvent::Button;
         const auto key=e.button()==Button::kLeft?VK_LBUTTON:e.button()==Button::kRight?VK_RBUTTON:
             e.button()==Button::kMiddle?VK_MBUTTON:e.button()==Button::kX1?VK_XBUTTON1:e.button()==Button::kX2?VK_XBUTTON2:0;
+        if(key && em2::net::NativeOnlineNameKey(unsigned(key),down)){e.set_handled(true);return;}
         if(key) em2::ControlKey(key,down);
     }
     void OnClosing(rex::ui::UIEvent& e) override {

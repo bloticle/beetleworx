@@ -188,6 +188,10 @@ void OnlineBoot::Poll() {
     }catch(const std::exception& error){p.Fail(error.what());p.DrainCancellation();}
 }
 LobbySnapshot OnlineBoot::lobby()const{return impl_->session?impl_->session->lobby():LobbySnapshot{};}
+bool OnlineBoot::RenameLobbyPlayer(std::string_view name){return impl_->session && impl_->session->RenameLobbyPlayer(name);}
+bool OnlineBoot::SetLobbyReady(bool ready){return impl_->session && impl_->session->SetLobbyReady(ready);}
+bool OnlineBoot::lobby_request_pending()const{return impl_->session && impl_->session->lobby_request_pending();}
+LobbyResult OnlineBoot::last_lobby_result()const{return impl_->session?impl_->session->last_lobby_result():LobbyResult::Ok;}
 bool OnlineBoot::ArmLobbyStart(){return impl_->session && impl_->session->ArmLobbyStart();}
 bool OnlineBoot::CanRequestLobbyStart()const{return impl_->session && impl_->session->CanRequestLobbyStart();}
 bool OnlineBoot::RequestLobbyStart(){return impl_->session && impl_->session->RequestLobbyStart();}
@@ -280,7 +284,17 @@ bool TestOnlineBoot(const fs::path& root) {
             if(!check(!host.TakeReady() && !client.TakeReady() && !host.RequestLobbyStart() &&
                 !client.RequestLobbyStart() && !host.ArmLobbyStart(),"native lobby cannot start before the client is ready"))return false;
             if(!check(client.ArmLobbyStart() && client.ArmLobbyStart() &&
-                pump(host,&client,[&]{return host.CanRequestLobbyStart();}),"client readiness reaches the host once"))return false;
+                pump(host,&client,[&]{return host.CanRequestLobbyStart() && !client.lobby_request_pending();}),"client readiness reaches the host and is acknowledged once"))return false;
+            if(!check(client.SetLobbyReady(false) && pump(host,&client,[&]{return !client.lobby_request_pending() && !host.CanRequestLobbyStart();}),
+                "guest can revoke readiness without being automatically rearmed"))return false;
+            if(!check(client.RenameLobbyPlayer("  Guest name  ") && pump(host,&client,[&]{return !client.lobby_request_pending() && host.lobby()==client.lobby();}) &&
+                host.lobby().players[1].name=="Guest name" && !host.CanRequestLobbyStart(),
+                "boot profile edit reaches host while guest remains unready"))return false;
+            if(!check(client.RenameLobbyPlayer("bad\nname") && pump(host,&client,[&]{return !client.lobby_request_pending();}) &&
+                client.last_lobby_result()==LobbyResult::InvalidName && host.lobby().players[1].name=="Guest name",
+                "boot reports rejected name without corrupting accepted profile"))return false;
+            if(!check(client.ArmLobbyStart() && pump(host,&client,[&]{return host.CanRequestLobbyStart();}),
+                "guest can explicitly ready again after profile editing"))return false;
             if(!check(!host.LobbyStartConfirmed() && !client.LobbyStartConfirmed() &&
                 host.RequestLobbyStart() && !host.RequestLobbyStart() && !host.TakeReady(),
                 "only the host can request start and host waits for acknowledgement"))return false;
