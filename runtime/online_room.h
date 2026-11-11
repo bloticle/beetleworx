@@ -2,19 +2,23 @@
 #include "online_movement_frame.h"
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <vector>
 
 namespace em2::net {
+struct CheckpointBundle;
+struct RoomCheckpointPeer {uint64_t peer=0;std::size_t total=0,received=0;bool installed=false;};
 // Native movement values, not raw stick axes. Ground-plane basis is captured
 // with the command; no receiving peer consults its local camera for this input.
 using RoomCommand=RoomMovement;
-enum class RoomState {Idle,Listening,Connecting,Lobby,Loading,Running,Disconnected,Error};
+enum class RoomState {Idle,Listening,Connecting,Transferring,Installing,Lobby,Loading,Running,Disconnected,Error};
 // Single-thread-owned direct TCP transport. Up to 16 peers is a transport
 // capability only; Host capacity MUST come from the actual gameplay adapter.
-// Caller supplies a verified, already-installed common checkpoint identity.
-// No checkpoint transfer, relay, NAT traversal or native actor creation here.
+// Host/Join require a common installed checkpoint. Explicit WithCheckpoint
+// bootstrap transports a shared bundle; only caller workers install it.
+// No relay, NAT traversal or native actor creation here.
 class Room {
 public:
     Room();
@@ -24,6 +28,19 @@ public:
     bool Host(const Identity&,std::string_view numeric_address,uint16_t port,
         uint8_t gameplay_capacity,std::string_view name="Player 1");
     bool Join(const Identity&,std::string_view numeric_address,uint16_t port,std::string_view name);
+    // Explicit bootstrap mode. Caller prepares one immutable verified bundle
+    // on a worker. Only this Join permits missing/different local checkpoint;
+    // all other identity fields still match exactly. No filesystem I/O here.
+    bool HostWithCheckpoint(const Identity&,std::string_view numeric_address,uint16_t port,
+        uint8_t gameplay_capacity,std::string_view name,std::shared_ptr<const CheckpointBundle>);
+    bool JoinWithCheckpoint(const Identity&,std::string_view numeric_address,uint16_t port,std::string_view name);
+    // Worker must run InstallCheckpoint(bytes, identity().checkpoint, NEW path)
+    // and then report the result on this room's owning thread. A successful
+    // installation is mutually acknowledged before Ready/Start is permitted.
+    std::shared_ptr<const std::vector<uint8_t>> DownloadedCheckpoint()const;
+    bool ConfirmCheckpointInstalled(bool success);
+    bool checkpoint_ready()const;
+    std::vector<RoomCheckpointPeer> checkpoint_peers()const;
     void Poll(std::chrono::steady_clock::time_point now=std::chrono::steady_clock::now());
     bool Rename(std::string_view);
     bool SetAppearance(LobbyCharacter,uint8_t color);
@@ -57,6 +74,7 @@ private:
     friend bool TestOnlineRoom();
     struct Impl;
     std::unique_ptr<Impl> impl_;
+    bool JoinInternal(const Identity&,std::string_view,uint16_t,std::string_view,bool checkpoint);
 };
 bool TestOnlineRoom();
 }

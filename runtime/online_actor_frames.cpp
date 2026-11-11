@@ -1,5 +1,6 @@
 #include "online_actor_frames.h"
 #include "online_room.h"
+#include "online_actor_jump.h"
 #include "guest_read_batch.h"
 #include "ppc_context.h"
 #include <windows.h>
@@ -17,6 +18,14 @@ ActorLookBasis Basis(uint64_t peer,uint64_t generation,uint64_t tick,const RoomM
     return {peer,generation,tick,{movement.forward_z,0,-movement.forward_x},{movement.forward_x,0,movement.forward_z}};
 }
 NativeActorAction Action(const RoomMovement& movement){return {0,0x833DAEB8,movement.x,movement.y};}
+std::array<NativeActorJump,kMaxRoomJumpEvents> JumpCommands(uint64_t generation,uint64_t tick,const RoomMovement& movement){
+    std::array<NativeActorJump,kMaxRoomJumpEvents> commands{};
+    for(unsigned i=0;i<movement.jump_count;++i){const auto& event=movement.jump_events[i];
+        const bool down=event.edge==RoomJumpEdge::Pressed;
+        commands[i]={generation,tick,event.sequence,down?OwnedJumpEdge::Pressed:OwnedJumpEdge::Released,{0,down?0x833DAEBCu:0x833DAEC0u,1,0}};
+    }
+    return commands;
+}
 }
 bool OwnedMovementFrames::Configure(uint16_t roster,uint16_t retail,const std::array<uint64_t,kOnlineRoomCapacity>& epochs,uint64_t first,uint32_t registry){
     if(configured_ || !registry || !(roster&1) || (retail&~uint16_t(3)) || (retail&~roster))return false;
@@ -47,16 +56,24 @@ OwnedFrameResult OwnedMovementFrames::Preflight(const RoomFrame& frame,PPCContex
         if(!(roster_&(1u<<i))){if(movement!=RoomMovement{})return OwnedFrameResult::InvalidRoster;continue;}
         if(movement.actor_epoch!=epochs_[i])return OwnedFrameResult::EpochMismatch;
         if(!ValidRoomMovement(movement))return OwnedFrameResult::InvalidMovement;
-        if(retail_&(1u<<i))continue;
-        // Extra actors currently support proved native locomotion only.
-        // Never silently discard jump/brush/tool intent and claim full controls.
-        if(movement.pad.buttons || movement.pad.left_trigger || movement.pad.right_trigger)return OwnedFrameResult::UnsupportedIntent;
+        // Retail input is still published through its existing raw gate; that
+        // adapter does not yet consume V2 interpreted edges. Never drop them.
+        if(retail_&(1u<<i)){
+            if(movement.source==RoomMovementSource::NativeActionV2)return OwnedFrameResult::UnsupportedIntent;
+            continue;
+        }
+        const uint16_t allowed=movement.source==RoomMovementSource::NativeActionV2?movement.jump_button_mask:0;
+        if((movement.pad.buttons&~allowed) || movement.pad.left_trigger || movement.pad.right_trigger)return OwnedFrameResult::UnsupportedIntent;
+        auto stream=jumps_[i];if(!AdvanceRoomJumpStream(stream,movement))return OwnedFrameResult::InvalidMovement;
         const auto& binding=bindings_[i];if(!binding.native_peer)return OwnedFrameResult::UnboundActor;
         OwnedActorInput actor;
         if(!OwnedActorInputFor(binding.native_peer,ctx,base,actor) || actor.registry!=registry_ ||
            actor.generation!=binding.generation || actor.entity!=binding.entity || actor.controller!=binding.controller)return OwnedFrameResult::StaleActor;
         const auto result=ValidateOwnedActorMovement(binding.native_peer,Action(movement),ctx,base);
         if(result!=ActorInputResult::Applied)return OwnedFrameResult::NativeNotReady;
+        const auto commands=JumpCommands(binding.generation,frame.tick,movement);
+        if(ValidateOwnedActorJumpBatch(binding.native_peer,std::span<const NativeActorJump>(commands.data(),movement.jump_count),ctx,base)!=ActorInputResult::Applied)
+            return OwnedFrameResult::NativeNotReady;
     }
     return OwnedFrameResult::Ready;
 }
@@ -78,7 +95,18 @@ OwnedFrameResult OwnedMovementFrames::Deliver(const RoomFrame& frame,PPCContext&
             if(ReplayOwnedActorMovement(bindings_[i].native_peer,Action(frame.players[i]),frame.tick,ctx,base)!=ActorInputResult::Applied){
                 faulted_=true;return OwnedFrameResult::NativeFailure;
             }
+        // Movement claims for ALL peers precede the first edge. The complete
+        // edge batches were checked before any native delivery; an exception
+        // after entering native code is terminal, never retried as a rollback.
+        for(unsigned i=0;i<kOnlineRoomCapacity;++i)if(extras&(1u<<i)){
+            const auto commands=JumpCommands(bindings_[i].generation,frame.tick,frame.players[i]);
+            for(unsigned n=0;n<frame.players[i].jump_count;++n)
+                if(ReplayOwnedActorJump(bindings_[i].native_peer,commands[n],ctx,base)!=ActorInputResult::Applied){
+                    faulted_=true;return OwnedFrameResult::NativeFailure;
+                }
+        }
     }catch(...){faulted_=true;throw;}
+    for(unsigned i=0;i<kOnlineRoomCapacity;++i)if(extras&(1u<<i))AdvanceRoomJumpStream(jumps_[i],frame.players[i]);
     delivered_=frame;return OwnedFrameResult::Ready;
 }
 OwnedFrameResult OwnedMovementFrames::Finish(uint64_t tick,uint8_t* base){
@@ -168,4 +196,64 @@ bool TestOwnedMovementFrames(PPCContext& ctx,uint8_t* base,uint64_t first_peer,u
     REXLOG_INFO("Owned network frame passed {} checks: actual TCP room/authoritative frames into original native action/controller callbacks, distinct peers/views, preflight failure isolation, explicit neutral, epochs and tick ownership; fixture motion sink excludes contacts/full multiplayer",checks);
     return true;
 }
+bool TestOwnedJumpMovementFrames(PPCContext& ctx,uint8_t* base,uint64_t first_peer,uint64_t second_peer){
+    Environment environment;OwnedActorInput a,b;
+    if(!OwnedActorInputFor(first_peer,ctx,base,a) || !OwnedActorInputFor(second_peer,ctx,base,b))return false;
+    Identity identity;identity.build[0]=11;identity.content[0]=12;identity.checkpoint[0]=13;identity.session[0]=14;
+    identity.first_tick=3000000;identity.input_delay=0;
+    Room host,client;unsigned checks=0;auto check=[&](bool value,const char* why){++checks;if(!value)REXLOG_ERROR("Owned Jump network frame: {}",why);return value;};
+    auto pump=[&](auto ready){const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(3);
+        do{host.Poll();client.Poll();if(ready())return true;std::this_thread::sleep_for(std::chrono::milliseconds(1));}while(std::chrono::steady_clock::now()<until);return false;};
+    if(!check(host.Host(identity,"127.0.0.1",0,2,"JumpHost") && client.Join(identity,"127.0.0.1",host.port(),"JumpGuest") &&
+        pump([&]{return host.lobby().players.size()==2 && client.lobby().players.size()==2;}) && host.SetReady(true) && client.SetReady(true) &&
+        pump([&]{return !client.profile_pending() && host.lobby().players[1].ready;}) && host.Start() &&
+        pump([&]{return host.state()==RoomState::Loading && client.state()==RoomState::Loading;}) &&
+        host.WorldReady(identity.checkpoint) && client.WorldReady(identity.checkpoint) &&
+        pump([&]{return host.state()==RoomState::Running && client.state()==RoomState::Running;}),"actual TCP room admits matching native fixture world"))return false;
+    OwnedMovementFrames coordinator;std::array<uint64_t,kOnlineRoomCapacity> epochs{};epochs[0]=epochs[1]=1;
+    if(!coordinator.Configure(3,0,epochs,identity.first_tick,a.registry) || !coordinator.Bind(1,a.peer,ctx,base) || !coordinator.Bind(2,b.peer,ctx,base))return false;
+    for(unsigned n=0;n<4;++n){
+        RoomMovement first,second;first.source=second.source=RoomMovementSource::NativeActionV2;
+        first.actor_epoch=second.actor_epoch=1;first.jump_button_mask=second.jump_button_mask=0x1000;
+        first.x=.5f;second.x=-.5f;second.forward_x=1;second.forward_z=0;
+        if(n==0){first.jump_count=1;first.jump_events[0]={1,RoomJumpEdge::Pressed};}
+        if(n==1){second.jump_count=1;second.jump_events[0]={1,RoomJumpEdge::Pressed};}
+        if(n==2){first.jump_count=2;first.jump_events[0]={2,RoomJumpEdge::Released};first.jump_events[1]={3,RoomJumpEdge::Pressed};
+            second.jump_count=1;second.jump_events[0]={2,RoomJumpEdge::Released};}
+        if(n==3){first.jump_count=1;first.jump_events[0]={4,RoomJumpEdge::Released};}
+        first.pad.buttons=n<3?0x1000:0;second.pad.buttons=n==1?0x1000:0;
+        const auto tick=identity.first_tick+n;RoomFrame authoritative,received;bool taken=false,got=false;
+        if(!check(host.SubmitLocal(tick,first) && client.SubmitLocal(tick,second) &&
+            pump([&]{if(!taken)taken=host.TakeFrame(authoritative);if(!got)got=client.PeekFrame(received);return taken && got;}) && authoritative==received,
+            "explicit native edges and held no-event ticks survive actual TCP authoritative echo"))return false;
+        std::array<std::array<uint8_t,800>,2> before;std::memcpy(before[0].data(),base+a.controller,800);std::memcpy(before[1].data(),base+b.controller,800);
+        auto unchanged=[&]{return !std::memcmp(before[0].data(),base+a.controller,800) && !std::memcmp(before[1].data(),base+b.controller,800);};
+        auto bad=received;bad.players[1].pad.buttons|=0x2000;
+        if(!check(coordinator.Deliver(bad,ctx,base)==OwnedFrameResult::UnsupportedIntent && unchanged(),"unsupported extra controls reject before either actor receives Movement"))return false;
+        if(n==0){
+            OwnedMovementFrames retail_adapter;
+            if(!check(retail_adapter.Configure(3,1,epochs,tick,a.registry) && retail_adapter.Bind(2,b.peer,ctx,base) &&
+                retail_adapter.Preflight(received,ctx,base)==OwnedFrameResult::UnsupportedIntent && unchanged(),
+                "retail raw-pad adapter cannot silently discard V2 interpreted edges"))return false;
+            bad=received;bad.players[1].jump_count=2;bad.players[1].jump_events[0]={1,RoomJumpEdge::Pressed};bad.players[1].jump_events[1]={3,RoomJumpEdge::Released};
+            if(!check(coordinator.Deliver(bad,ctx,base)==OwnedFrameResult::InvalidMovement && unchanged(),"invalid later edge rejects whole frame without first-peer native effects"))return false;
+            bad=received;bad.players[1].actor_epoch=8;
+            if(!check(coordinator.Deliver(bad,ctx,base)==OwnedFrameResult::EpochMismatch && unchanged(),"wire actor incarnation cannot retarget current native generation"))return false;
+        }
+        if(n==1){
+            const auto kinds=PPC_LOAD_U32(b.entity+88),list=PPC_LOAD_U32(b.entity+36);
+            const auto slot=PPC_LOAD_U8(kinds+PPC_LOAD_U8(0x833DDF94));const auto body=PPC_LOAD_U32(list+unsigned(slot)*4)-8;
+            const auto owner=PPC_LOAD_U32(body+48);PPC_STORE_U32(body+48,a.entity-8);
+            const auto rejected=coordinator.Deliver(received,ctx,base);PPC_STORE_U32(body+48,owner);
+            if(!check(rejected==OwnedFrameResult::NativeNotReady && unchanged(),"stale physics ownership preflight rejects all peers before delivery"))return false;
+        }
+        RoomFrame committed;
+        if(!check(coordinator.Preflight(received,ctx,base)==OwnedFrameResult::Ready && client.TakeFrame(committed) && committed==received &&
+            coordinator.Deliver(committed,ctx,base)==OwnedFrameResult::Ready && coordinator.Deliver(committed,ctx,base)==OwnedFrameResult::IncompleteTick &&
+            coordinator.Finish(tick,base)==OwnedFrameResult::Ready,"one agreed frame delivers Movement for all actors before ordered original Jump callbacks"))return false;
+    }
+    REXLOG_INFO("Owned Jump network frame passed {} actual TCP/native delivery checks; native fixture observes Jump stimuli separately, no contact trajectory claim",checks);
+    return true;
+}
+
 }

@@ -1,10 +1,14 @@
 #include "online_address.h"
 #include "online_room.h"
+#include "online_checkpoint.h"
 #include <rex/logging.h>
 #include <algorithm>
 #include <bit>
 #include <cmath>
 #include <deque>
+#include <filesystem>
+#include <fstream>
+#include <future>
 #include <limits>
 #include <map>
 #include <optional>
@@ -18,7 +22,9 @@ using Bytes=std::vector<uint8_t>;
 constexpr size_t Window=64,MaxPacket=8192,MaxQueued=256*1024;
 constexpr auto Timeout=std::chrono::seconds(15);
 constexpr auto StartupTimeout=std::chrono::seconds(180);
-enum class Wire:uint8_t {Hello=1,Welcome,Profile,Snapshot,Start,Input,Frame,Ping,Pong,ProfileReply,WorldReady,Activate};
+constexpr auto TransferTimeout=std::chrono::seconds(120);
+enum class Wire:uint8_t {Hello=1,Welcome,Profile,Snapshot,Start,Input,Frame,Ping,Pong,ProfileReply,WorldReady,Activate,
+    CheckpointBegin,CheckpointChunk,CheckpointEnd,CheckpointProgress,CheckpointInstalled,CheckpointReady,CheckpointAck};
 bool Winsock(){
     struct Startup {bool ok=false;Startup(){WSADATA data{};ok=WSAStartup(MAKEWORD(2,2),&data)==0;}~Startup(){if(ok)WSACleanup();}};
     static Startup startup;return startup.ok;
@@ -34,7 +40,7 @@ struct Reader {
     std::string String(){const auto n=Byte();if(!good || n>bytes.size()-at){good=false;return {};}std::string s(reinterpret_cast<const char*>(bytes.data()+at),n);at+=n;return s;}
     bool Done()const{return good && at==bytes.size();}
 };
-Bytes Packet(Wire kind){return {'B','W','R','M',1,uint8_t(kind)};}
+Bytes Packet(Wire kind){return {'B','W','R','M',3,uint8_t(kind)};}
 void WriteIdentity(Bytes& b,const Identity& id){
     for(const auto* p:{&id.build,&id.content,&id.checkpoint})b.insert(b.end(),p->begin(),p->end());
     b.insert(b.end(),id.session.begin(),id.session.end());U64(b,id.first_tick);U8(b,id.input_delay);
@@ -50,6 +56,13 @@ bool ValidIdentity(const Identity& id){
     return id.input_delay<=12 && id.first_tick<=UINT64_MAX-Window && uint8_t(id.startup_policy)<=1 &&
         uint8_t(id.initialization_policy)<=1 && nonzero(id.session) && nonzero(id.build) && nonzero(id.content) && nonzero(id.checkpoint);
 }
+bool CompatibleCheckpoint(Identity a,Identity b){a.checkpoint={};b.checkpoint={};return a==b;}
+bool BundleHeader(std::span<const uint8_t> bytes,const std::array<uint8_t,32>& digest){
+    if(bytes.size()<52 || bytes.size()>kMaxCheckpointBundle)return false;
+    Reader r{bytes};if(r.Number(4)!=0x454D3243 || r.Number(2)!=1 || r.Number(2)!=0)return false;
+    const auto count=r.Number(4),total=r.Number(8);if(!count || count>128 || total>32*1024*1024)return false;
+    for(auto n:digest)if(r.Byte()!=n)return false;return r.good;
+}
 bool Name(std::string_view text,std::string& normalized){
     LobbyRoster check(2);if(check.Join(1,text)!=LobbyResult::Ok)return false;normalized=check.players()[0].name;return true;
 }
@@ -63,13 +76,19 @@ void WriteCommand(Bytes& b,const RoomCommand& c){
     U64(b,c.actor_epoch);U8(b,uint8_t(c.source));
     const auto& p=c.pad;U64(b,p.buttons,2);U8(b,p.left_trigger);U8(b,p.right_trigger);
     for(auto n:{p.left_x,p.left_y,p.right_x,p.right_y})U64(b,uint16_t(n),2);
+    U64(b,c.jump_button_mask,2);U8(b,c.jump_count);
+    for(unsigned i=0;i<c.jump_count && i<kMaxRoomJumpEvents;++i){U64(b,c.jump_events[i].sequence);U8(b,uint8_t(c.jump_events[i].edge));}
 }
 RoomCommand ReadCommand(Reader& r){
     RoomCommand c;c.x=std::bit_cast<float>(uint32_t(r.Number(4)));c.y=std::bit_cast<float>(uint32_t(r.Number(4)));
     c.forward_x=std::bit_cast<float>(uint32_t(r.Number(4)));c.forward_z=std::bit_cast<float>(uint32_t(r.Number(4)));
     c.actor_epoch=r.Number(8);c.source=RoomMovementSource(r.Byte());
     auto& p=c.pad;p.buttons=uint16_t(r.Number(2));p.left_trigger=r.Byte();p.right_trigger=r.Byte();
-    for(auto* n:{&p.left_x,&p.left_y,&p.right_x,&p.right_y})*n=std::bit_cast<int16_t>(uint16_t(r.Number(2)));return c;
+    for(auto* n:{&p.left_x,&p.left_y,&p.right_x,&p.right_y})*n=std::bit_cast<int16_t>(uint16_t(r.Number(2)));
+    c.jump_button_mask=uint16_t(r.Number(2));c.jump_count=r.Byte();
+    if(c.jump_count>kMaxRoomJumpEvents){r.good=false;return c;}
+    for(unsigned i=0;i<c.jump_count;++i){c.jump_events[i].sequence=r.Number(8);c.jump_events[i].edge=RoomJumpEdge(r.Byte());}
+    return c;
 }
 LobbySnapshot Snapshot(const LobbyRoster& roster){
     LobbySnapshot result{roster.revision(),roster.capacity(),roster.locked(),roster.players()};
@@ -96,6 +115,9 @@ struct Connection {
     SOCKET socket=INVALID_SOCKET;bool connecting=false,welcomed=false,wire_exhausted=false;
     uint64_t peer=0,wire_next=0;uint32_t profile_next=1;
     Clock::time_point received=Clock::now(),pinged=received;
+    enum class Transfer {None,Sending,AwaitInstalled,AwaitAck,Complete};
+    Transfer transfer=Transfer::None;size_t transfer_sent=0,transfer_acked=0;
+    Clock::time_point transfer_progress=received;
     Bytes incoming,outgoing;size_t sent=0;
     ~Connection(){Close(socket);}
     bool Queue(const Bytes& body){
@@ -126,18 +148,39 @@ struct Room::Impl {
     std::map<uint64_t,std::map<uint64_t,RoomCommand>> inputs;
     std::map<uint64_t,RoomCommand> echoes;
     std::deque<RoomFrame> frames;
+    std::array<RoomJumpStream,kOnlineRoomCapacity> submitted_jumps{},received_jumps{};
     Clock::time_point progress=Clock::now();
     Clock::time_point loading_started{};
+    bool checkpoint_mode=false,checkpoint_end=false,install_reported=false,checkpoint_confirmed=false;
+    size_t checkpoint_size=0;
+    std::shared_ptr<const CheckpointBundle> offered;
+    std::shared_ptr<Bytes> downloaded;
     std::optional<std::array<uint8_t,32>> local_world;
     std::array<std::optional<std::array<uint8_t,32>>,kOnlineRoomCapacity> worlds;
     ~Impl(){Close(listener);}
-    bool Active()const{return state==RoomState::Listening || state==RoomState::Connecting || state==RoomState::Lobby || state==RoomState::Loading || state==RoomState::Running;}
+    bool Active()const{return state==RoomState::Listening || state==RoomState::Connecting || state==RoomState::Transferring || state==RoomState::Installing || state==RoomState::Lobby || state==RoomState::Loading || state==RoomState::Running;}
     void Fail(std::string why){error=std::move(why);state=RoomState::Error;Close(listener);connections.clear();inputs.clear();echoes.clear();frames.clear();}
     bool Queue(Connection& c,const Bytes& p){if(c.Queue(p))return true;Fail("Room send queue exceeded its bounded capacity");return false;}
     bool Broadcast(const Bytes& p){for(auto& c:connections)if(c->welcomed && !c->Queue(p)){Fail("Room broadcast queue full");return false;}return true;}
     bool Publish(){
         lobby=Snapshot(roster);auto p=Packet(Wire::Snapshot);U64(p,0,4);U8(p,0);WriteRoster(p,lobby);
         return Broadcast(p);
+    }
+    bool PumpCheckpoint(Connection& c){
+        if(!host || !checkpoint_mode || c.transfer!=Connection::Transfer::Sending)return true;
+        if(!offered)return false;
+        for(unsigned i=0;i<16 && c.transfer_sent<offered->bytes.size();++i){
+            const auto count=std::min<size_t>(1024,offered->bytes.size()-c.transfer_sent);
+            if(c.outgoing.size()-c.sent+count+32>MaxQueued)break;
+            auto packet=Packet(Wire::CheckpointChunk);U64(packet,c.transfer_sent,4);U64(packet,count,2);
+            packet.insert(packet.end(),offered->bytes.begin()+c.transfer_sent,offered->bytes.begin()+c.transfer_sent+count);
+            if(!c.Queue(packet))return false;c.transfer_sent+=count;
+        }
+        if(c.transfer_sent==offered->bytes.size() && c.outgoing.size()-c.sent+16<MaxQueued){
+            auto packet=Packet(Wire::CheckpointEnd);U64(packet,c.transfer_sent,4);
+            if(!c.Queue(packet))return false;c.transfer=Connection::Transfer::AwaitInstalled;
+        }
+        return true;
     }
     void BeginLoading(Clock::time_point now){state=RoomState::Loading;loading_started=now;Close(listener);}
     void BeginRunning(Clock::time_point now){
@@ -190,26 +233,77 @@ struct Room::Impl {
     // False means a protocol violation. Unadmitted connections are rejected
     // individually; a violation by an admitted participant stops every peer.
     bool Message(Connection& c,std::span<const uint8_t> bytes,Clock::time_point now){
-        Reader r{bytes};if(r.Number(4)!=0x4257524D || r.Byte()!=1)return false;const auto kind=Wire(r.Byte());
+        Reader r{bytes};if(r.Number(4)!=0x4257524D || r.Byte()!=3)return false;const auto kind=Wire(r.Byte());
         if(kind==Wire::Hello){
             if(!host || c.welcomed || (state!=RoomState::Listening && state!=RoomState::Lobby))return false;
-            const auto identity=ReadIdentity(r);auto name=r.String();std::string normalized;
-            if(!r.Done() || identity!=id || !Name(name,normalized) || !UniqueName(Snapshot(roster),0,normalized) || roster.players().size()>=roster.capacity())return false;
+            const auto identity=ReadIdentity(r);const auto mode=r.Byte();auto name=r.String();std::string normalized;
+            if(!r.Done() || mode!=uint8_t(checkpoint_mode) || (checkpoint_mode?!CompatibleCheckpoint(identity,id):identity!=id) || !Name(name,normalized) || !UniqueName(Snapshot(roster),0,normalized) || roster.players().size()>=roster.capacity())return false;
             uint64_t assigned=2;while(assigned<=roster.capacity() && roster.Find(assigned))++assigned;
             if(assigned>roster.capacity() || roster.Join(assigned,normalized)!=LobbyResult::Ok)return false;
             c.peer=assigned;c.welcomed=true;state=RoomState::Lobby;
-            auto welcome=Packet(Wire::Welcome);WriteIdentity(welcome,id);U64(welcome,assigned);
-            if(!c.Queue(welcome)){Fail("Room welcome queue full");return true;}return Publish();
+            auto welcome=Packet(Wire::Welcome);WriteIdentity(welcome,id);U64(welcome,assigned);U8(welcome,uint8_t(checkpoint_mode));
+            if(!c.Queue(welcome)){Fail("Room welcome queue full");return true;}
+            if(!Publish())return true;
+            if(checkpoint_mode){
+                if(!offered)return false;
+                auto begin=Packet(Wire::CheckpointBegin);U64(begin,offered->bytes.size(),4);begin.insert(begin.end(),id.checkpoint.begin(),id.checkpoint.end());
+                if(!c.Queue(begin))return false;c.transfer=Connection::Transfer::Sending;c.transfer_progress=now;
+            }
+            return true;
         }
         if(kind==Wire::Welcome){
             if(host || c.welcomed || state!=RoomState::Connecting)return false;
-            const auto identity=ReadIdentity(r);const auto assigned=r.Number(8);
-            if(!r.Done() || identity!=id || assigned<2 || assigned>kOnlineRoomCapacity)return false;
-            peer=assigned;c.peer=1;c.welcomed=true;state=RoomState::Lobby;return true;
+            const auto identity=ReadIdentity(r);const auto assigned=r.Number(8);const auto mode=r.Byte();
+            if(!r.Done() || mode!=uint8_t(checkpoint_mode) || !ValidIdentity(identity) || (checkpoint_mode?!CompatibleCheckpoint(identity,id):identity!=id) || assigned<2 || assigned>kOnlineRoomCapacity)return false;
+            id=identity;peer=assigned;c.peer=1;c.welcomed=true;
+            state=checkpoint_mode?RoomState::Transferring:RoomState::Lobby;
+            if(checkpoint_mode){c.transfer=Connection::Transfer::Sending;c.transfer_progress=now;}return true;
         }
         if(!c.welcomed)return false;
         if(kind==Wire::Ping || kind==Wire::Pong){
             if(!r.Done())return false;if(kind==Wire::Ping){auto p=Packet(Wire::Pong);return c.Queue(p);}return true;
+        }
+        if(kind>=Wire::CheckpointBegin && kind<=Wire::CheckpointAck){
+            if(!checkpoint_mode || state==RoomState::Loading || state==RoomState::Running)return false;
+            if(kind==Wire::CheckpointBegin){
+                if(host || state!=RoomState::Transferring || checkpoint_size || c.transfer!=Connection::Transfer::Sending)return false;
+                const auto size=r.Number(4);std::array<uint8_t,32> digest{};for(auto& b:digest)b=r.Byte();
+                if(!r.Done() || size<52 || size>kMaxCheckpointBundle || digest!=id.checkpoint)return false;
+                checkpoint_size=size;downloaded=std::make_shared<Bytes>();downloaded->reserve(size);c.transfer_progress=now;return true;
+            }
+            if(kind==Wire::CheckpointChunk){
+                const auto offset=r.Number(4),count=r.Number(2);
+                if(host || !downloaded || checkpoint_end || c.transfer!=Connection::Transfer::Sending || !count || count>1024 ||
+                    offset!=downloaded->size() || count>checkpoint_size-downloaded->size() || !r.good || r.bytes.size()-r.at!=count)return false;
+                downloaded->insert(downloaded->end(),r.bytes.begin()+r.at,r.bytes.end());c.transfer_progress=now;
+                auto progress=Packet(Wire::CheckpointProgress);U64(progress,downloaded->size(),4);return c.Queue(progress);
+            }
+            if(kind==Wire::CheckpointEnd){
+                const auto size=r.Number(4);
+                if(host || !r.Done() || !downloaded || checkpoint_end || size!=checkpoint_size || downloaded->size()!=size || !BundleHeader(*downloaded,id.checkpoint))return false;
+                checkpoint_end=true;state=RoomState::Installing;c.transfer=Connection::Transfer::AwaitInstalled;c.transfer_progress=now;return true;
+            }
+            if(kind==Wire::CheckpointProgress){
+                const auto count=r.Number(4);
+                if(!host || !r.Done() || (c.transfer!=Connection::Transfer::Sending && c.transfer!=Connection::Transfer::AwaitInstalled) || count<c.transfer_acked || count>c.transfer_sent)return false;
+                if(count>c.transfer_acked){c.transfer_acked=count;c.transfer_progress=now;}return true;
+            }
+            std::array<uint8_t,32> digest{};for(auto& b:digest)b=r.Byte();if(!r.Done() || digest!=id.checkpoint)return false;
+            if(kind==Wire::CheckpointInstalled){
+                if(!host || c.transfer!=Connection::Transfer::AwaitInstalled || !offered || c.transfer_acked!=offered->bytes.size())return false;
+                auto ready=Packet(Wire::CheckpointReady);ready.insert(ready.end(),digest.begin(),digest.end());
+                if(!c.Queue(ready))return false;c.transfer=Connection::Transfer::AwaitAck;c.transfer_progress=now;return true;
+            }
+            if(kind==Wire::CheckpointReady){
+                if(host || state!=RoomState::Installing || !install_reported || c.transfer!=Connection::Transfer::AwaitAck)return false;
+                auto ack=Packet(Wire::CheckpointAck);ack.insert(ack.end(),digest.begin(),digest.end());if(!c.Queue(ack))return false;
+                c.transfer=Connection::Transfer::Complete;checkpoint_confirmed=true;state=RoomState::Lobby;downloaded.reset();return true;
+            }
+            if(kind==Wire::CheckpointAck){
+                if(!host || c.transfer!=Connection::Transfer::AwaitAck)return false;
+                c.transfer=Connection::Transfer::Complete;c.transfer_progress=now;return true;
+            }
+            return false;
         }
         if(kind==Wire::Profile){
             if(!host || (state!=RoomState::Lobby && state!=RoomState::Loading && state!=RoomState::Running))return false;
@@ -220,7 +314,8 @@ struct Room::Impl {
             // Requests already in flight when Start freezes the roster receive
             // a normal rejection. They cannot mutate the running room or turn
             // a legitimate Ready/Start race into a protocol disconnect.
-            const auto result=state!=RoomState::Lobby?LobbyResult::Locked:Apply(c.peer,action,name,character,color,ready!=0);
+            const auto result=state!=RoomState::Lobby?LobbyResult::Locked:
+                (checkpoint_mode && action==3 && ready && c.transfer!=Connection::Transfer::Complete)?LobbyResult::NotReady:Apply(c.peer,action,name,character,color,ready!=0);
             if(state==RoomState::Lobby && !Publish())return true;
             auto reply=Packet(Wire::ProfileReply);U64(reply,sequence,4);U8(reply,uint8_t(result));U64(reply,lobby.revision);
             return c.Queue(reply);
@@ -232,7 +327,7 @@ struct Room::Impl {
             pending_profile=0;profile_result=LobbyResult(result);return true;
         }
         if(kind==Wire::Snapshot){
-            if(host || (state!=RoomState::Lobby && state!=RoomState::Connecting))return false;
+            if(host || (state!=RoomState::Lobby && state!=RoomState::Connecting && state!=RoomState::Transferring && state!=RoomState::Installing))return false;
             const auto ack=uint32_t(r.Number(4));const auto result=r.Byte();auto snapshot=ReadRoster(r);
             if(!r.Done() || !snapshot || snapshot->locked || ack || result ||
                 snapshot->revision<lobby.revision || (snapshot->revision==lobby.revision && *snapshot!=lobby) ||
@@ -265,6 +360,8 @@ struct Room::Impl {
             if(!host || state!=RoomState::Running)return false;
             const auto tick=r.Number(8);const auto command=ReadCommand(r);
             if(!r.Done() || !ValidCommand(command) || c.wire_exhausted || tick!=c.wire_next || tick<consume_next || tick-consume_next>=Window || inputs[tick].contains(c.peer))return false;
+            auto jump_state=submitted_jumps[c.peer-1];if(!AdvanceRoomJumpStream(jump_state,command))return false;
+            submitted_jumps[c.peer-1]=jump_state;
             inputs[tick][c.peer]=command;if(c.wire_next==UINT64_MAX)c.wire_exhausted=true;else ++c.wire_next;return true;
         }
         if(kind==Wire::Frame){
@@ -276,6 +373,9 @@ struct Room::Impl {
                 frame.players_mask|=uint16_t(1u<<(entry_peer-1));frame.players[entry_peer-1]=command;}
             const auto echo=echoes.find(frame.tick);
             if(!r.Done() || echo==echoes.end() || !(frame.players_mask&(1u<<(peer-1))) || frame.players[peer-1]!=echo->second)return false;
+            auto jump_states=received_jumps;
+            for(const auto& player:lobby.players)if(!AdvanceRoomJumpStream(jump_states[player.peer-1],frame.players[player.peer-1]))return false;
+            received_jumps=jump_states;
             echoes.erase(echo);frames.push_back(std::move(frame));if(frame_next==UINT64_MAX)frame_exhausted=true;else ++frame_next;progress=now;return true;
         }
         return false;
@@ -294,15 +394,53 @@ bool Room::Host(const Identity& id,std::string_view address,uint16_t port,uint8_
     p.id=id;p.host=true;p.peer=1;p.bound_port=bound.Port();p.roster=LobbyRoster(capacity);p.roster.Join(1,normalized);p.lobby=Snapshot(p.roster);p.state=RoomState::Listening;return true;
 }
 bool Room::Join(const Identity& id,std::string_view address,uint16_t port,std::string_view name){
+    return JoinInternal(id,address,port,name,false);
+}
+bool Room::HostWithCheckpoint(const Identity& id,std::string_view address,uint16_t port,uint8_t capacity,std::string_view name,std::shared_ptr<const CheckpointBundle> bundle){
+    if(!bundle || bundle->identity!=id.checkpoint || !BundleHeader(bundle->bytes,id.checkpoint))return false;
+    if(!Host(id,address,port,capacity,name))return false;
+    impl_->checkpoint_mode=true;impl_->offered=std::move(bundle);return true;
+}
+bool Room::JoinWithCheckpoint(const Identity& id,std::string_view address,uint16_t port,std::string_view name){
+    return JoinInternal(id,address,port,name,true);
+}
+bool Room::JoinInternal(const Identity& id,std::string_view address,uint16_t port,std::string_view name,bool checkpoint){
     auto& p=*impl_;std::string normalized;auto endpoint=ParseNumericAddress(address);
-    if(p.state!=RoomState::Idle || !Winsock() || !endpoint || !port || !ValidIdentity(id) || !Name(name,normalized))return false;
+    auto check=id;if(checkpoint)check.checkpoint[0]=1;
+    if(p.state!=RoomState::Idle || !Winsock() || !endpoint || !port || !ValidIdentity(check) || !Name(name,normalized))return false;
     endpoint->Port(port);auto c=std::make_unique<Connection>();c->socket=socket(endpoint->storage.ss_family,SOCK_STREAM,IPPROTO_TCP);
     if(c->socket==INVALID_SOCKET || !Nonblocking(c->socket))return false;
     const auto result=connect(c->socket,reinterpret_cast<const sockaddr*>(&endpoint->storage),endpoint->size);
     if(result==SOCKET_ERROR && WSAGetLastError()!=WSAEWOULDBLOCK)return false;
-    c->connecting=result!=0;p.id=id;p.join_name=normalized;p.state=RoomState::Connecting;
-    auto hello=Packet(Wire::Hello);WriteIdentity(hello,id);Text(hello,normalized);if(!c->Queue(hello))return false;
+    c->connecting=result!=0;p.id=id;p.join_name=normalized;p.state=RoomState::Connecting;p.checkpoint_mode=checkpoint;
+    auto hello=Packet(Wire::Hello);WriteIdentity(hello,id);U8(hello,uint8_t(checkpoint));Text(hello,normalized);if(!c->Queue(hello))return false;
     p.connections.push_back(std::move(c));return true;
+}
+std::shared_ptr<const std::vector<uint8_t>> Room::DownloadedCheckpoint()const{
+    const auto& p=*impl_;return !p.host && p.state==RoomState::Installing && p.checkpoint_end && !p.install_reported?p.downloaded:nullptr;
+}
+bool Room::ConfirmCheckpointInstalled(bool success){
+    auto& p=*impl_;if(!DownloadedCheckpoint() || p.connections.size()!=1)return false;
+    if(!success){p.Fail("The shared checkpoint could not be installed or verified; normal saves were not selected");return true;}
+    auto& c=*p.connections.front();auto packet=Packet(Wire::CheckpointInstalled);packet.insert(packet.end(),p.id.checkpoint.begin(),p.id.checkpoint.end());
+    if(!p.Queue(c,packet))return false;p.install_reported=true;c.transfer=Connection::Transfer::AwaitAck;c.transfer_progress=Clock::now();return true;
+}
+bool Room::checkpoint_ready()const{
+    const auto& p=*impl_;return p.checkpoint_mode?(p.host || p.checkpoint_confirmed):(p.state==RoomState::Lobby || p.state==RoomState::Loading || p.state==RoomState::Running);
+}
+std::vector<RoomCheckpointPeer> Room::checkpoint_peers()const{
+    const auto& p=*impl_;std::vector<RoomCheckpointPeer> result;
+    for(const auto& player:p.lobby.players){
+        RoomCheckpointPeer info;info.peer=player.peer;
+        if(!p.checkpoint_mode)info.installed=true;
+        else if(p.host){
+            info.total=p.offered?p.offered->bytes.size():0;
+            if(player.peer==1){info.installed=true;info.received=info.total;}
+            else for(const auto& c:p.connections)if(c->peer==player.peer){info.received=c->transfer_acked;info.installed=c->transfer==Connection::Transfer::Complete;}
+        }else if(player.peer==p.peer){info.total=p.checkpoint_size;info.received=p.downloaded?p.downloaded->size():p.checkpoint_confirmed?p.checkpoint_size:0;info.installed=p.checkpoint_confirmed;}
+        result.push_back(info);
+    }
+    return result;
 }
 void Room::Poll(Clock::time_point now){
     auto& p=*impl_;if(!p.Active())return;
@@ -325,7 +463,9 @@ void Room::Poll(Clock::time_point now){
             alive=c.Flush();
             for(unsigned reads=0;alive && reads<16;++reads){
                 std::array<char,4096> buffer{};const auto n=recv(c.socket,buffer.data(),int(buffer.size()),0);
-                if(n>0){if(c.incoming.size()+size_t(n)>MaxPacket*8){alive=false;break;}c.incoming.insert(c.incoming.end(),buffer.begin(),buffer.begin()+n);}
+                // A legal 64-frame sixteen-player V2 burst is larger than
+                // eight 8 KiB packets. Keep it bounded by the queue budget.
+                if(n>0){if(c.incoming.size()+size_t(n)>MaxQueued){alive=false;break;}c.incoming.insert(c.incoming.end(),buffer.begin(),buffer.begin()+n);}
                 else {if(n==0 || WSAGetLastError()!=WSAEWOULDBLOCK)alive=false;break;}
             }
             unsigned packets=0;
@@ -336,9 +476,12 @@ void Room::Poll(Clock::time_point now){
                 const bool valid=p.Message(c,message,now);if(!p.Active())return;if(!valid){alive=false;break;}c.received=now;
             }
             if(alive && c.welcomed && now-c.pinged>=std::chrono::seconds(2)){auto ping=Packet(Wire::Ping);alive=c.Queue(ping);c.pinged=now;}
+            if(alive && p.host && p.checkpoint_mode)alive=p.PumpCheckpoint(c);
             if(alive)alive=c.Flush();
         }
-        if(now-c.received>(p.state==RoomState::Loading?StartupTimeout:Timeout))alive=false;
+        const bool transferring=p.checkpoint_mode && c.welcomed && c.transfer!=Connection::Transfer::Complete;
+        if(transferring && now-c.transfer_progress>TransferTimeout)alive=false;
+        if(now-c.received>(p.state==RoomState::Loading?StartupTimeout:transferring?TransferTimeout:Timeout))alive=false;
         if(!alive){
             if(!p.host || (c.welcomed && (p.state==RoomState::Loading || p.state==RoomState::Running))){p.Fail("Online room participant disconnected, timed out, or sent invalid data; simulation stopped");return;}
             const auto departed=c.welcomed?c.peer:0;
@@ -362,6 +505,7 @@ bool Room::SetAppearance(LobbyCharacter c,uint8_t color){return impl_->Profile(2
 bool Room::SetReady(bool ready){return impl_->Profile(3,{},LobbyCharacter::Mickey,0,ready);}
 bool Room::Start(){
     auto& p=*impl_;if(!p.host || p.state!=RoomState::Lobby || p.roster.players().size()<2)return false;
+    if(p.checkpoint_mode && std::any_of(p.connections.begin(),p.connections.end(),[](const auto& c){return c->welcomed && c->transfer!=Connection::Transfer::Complete;}))return false;
     if(p.roster.Start()!=LobbyResult::Ok)return false;p.lobby=Snapshot(p.roster);
     // Pending unadmitted TCP sockets do not become gameplay participants.
     for(size_t i=0;i<p.connections.size();)if(!p.connections[i]->welcomed)p.connections.erase(p.connections.begin()+i);else ++i;
@@ -379,8 +523,10 @@ bool Room::WorldReady(const std::array<uint8_t,32>& token){
 }
 bool Room::SubmitLocal(uint64_t tick,const RoomCommand& command){
     auto& p=*impl_;if(p.state!=RoomState::Running || p.submit_exhausted || tick!=p.submit_next || tick<p.consume_next || tick-p.consume_next>=Window || !ValidCommand(command))return false;
+    auto jump_state=p.submitted_jumps[p.peer-1];if(!AdvanceRoomJumpStream(jump_state,command))return false;
     if(p.host)p.inputs[tick][p.peer]=command;
     else {auto packet=Packet(Wire::Input);U64(packet,tick);WriteCommand(packet,command);if(!p.Queue(*p.connections.front(),packet))return false;p.echoes[tick]=command;}
+    p.submitted_jumps[p.peer-1]=jump_state;
     if(p.submit_next==UINT64_MAX)p.submit_exhausted=true;else ++p.submit_next;return true;
 }
 bool Room::PeekFrame(RoomFrame& frame)const{
@@ -458,6 +604,28 @@ bool TestOnlineRoom(){
     check(pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& r){return r->impl_->frames.size()==4;});}),"four complete queued ticks arrive without gaps");
     for(uint64_t tick=103;tick<107;++tick){RoomFrame expected;check(rooms[0]->TakeFrame(expected) && expected.tick==tick,"host consumes pipelined ticks in order");
         for(unsigned i=1;i<16;++i){RoomFrame actual;check(rooms[i]->TakeFrame(actual) && actual==expected,"every client consumes the same contiguous pipelined sequence");}}
+    // All sixteen independent semantic edge streams survive the real TCP
+    // codec and own-input echo; raw held state must not invent repeat presses.
+    for(uint64_t tick=107;tick<111;++tick){
+        for(unsigned i=0;i<16;++i){auto& command=commands[i];command.source=RoomMovementSource::NativeActionV2;
+            command.pad={};command.jump_button_mask=uint16_t(1u<<i);command.jump_events={};command.jump_count=0;
+            if(tick==107){command.jump_count=1;command.jump_events[0]={1,RoomJumpEdge::Pressed};}
+            else if(tick==109){command.jump_count=2;command.jump_events={RoomJumpEvent{2,RoomJumpEdge::Released},RoomJumpEvent{3,RoomJumpEdge::Pressed}};}
+            else if(tick==110){command.jump_count=1;command.jump_events[0]={4,RoomJumpEdge::Released};}
+            if(tick!=110)command.pad.buttons=command.jump_button_mask;
+            check(rooms[i]->SubmitLocal(tick,command),"sixteen V2 peers submit native press/held/release-press/release without pad inference");
+        }
+        check(pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& r){return !r->impl_->frames.empty();});}),"all-peer native edge frame completes");
+        RoomFrame expected;check(rooms[0]->TakeFrame(expected) && expected.tick==tick,"host consumes V2 frame in order");
+        for(unsigned i=0;i<16;++i)check(expected.players[i]==commands[i],"native event order/sequence and distinct button masks retain peer association");
+        for(unsigned i=1;i<16;++i){RoomFrame actual;check(rooms[i]->TakeFrame(actual) && actual==expected,"V2 fields echo bit-exactly to all clients");}
+    }
+    for(uint64_t tick=111;tick<111+Window;++tick)for(unsigned i=0;i<16;++i){auto command=commands[i];command.jump_count=2;
+        command.jump_events={RoomJumpEvent{5+(tick-111)*2,RoomJumpEdge::Pressed},RoomJumpEvent{6+(tick-111)*2,RoomJumpEdge::Released}};
+        check(rooms[i]->SubmitLocal(tick,command),"full legal V2 frame window queues bounded two-edge native batches");}
+    check(pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& r){return r->impl_->frames.size()==Window;});}),"sixteen-peer maximum V2 burst fits the bounded receive budget");
+    for(uint64_t tick=111;tick<111+Window;++tick){RoomFrame expected;check(rooms[0]->TakeFrame(expected) && expected.tick==tick,"host drains full V2 window contiguously");
+        for(unsigned i=1;i<16;++i){RoomFrame actual;check(rooms[i]->TakeFrame(actual) && actual==expected,"maximum native edge payload remains identical across all sixteen peers");}}
     Room late;const auto late_connect=late.Join(id,"127.0.0.1",rooms[0]->port(),"Late guest");
     if(late_connect)late.Poll(Clock::now()+Timeout+std::chrono::seconds(1));
     check(!late_connect || late.state()==RoomState::Error,"closed listener cannot admit late participants");
@@ -591,6 +759,60 @@ bool TestOnlineRoom(){
         auto packet=Packet(Wire::Input);U64(packet,102);WriteCommand(packet,command);rooms[1]->impl_->connections.front()->Queue(packet);
         check(pump([&]{return rooms[0]->state()==RoomState::Error;}),"host independently rejects remote changed epoch, raw source, invalid and near-unit basis");
     }
+    auto native_jump=[](uint64_t sequence=0,RoomJumpEdge edge=RoomJumpEdge::None){auto command=Neutral();
+        command.source=RoomMovementSource::NativeActionV2;command.jump_button_mask=0x1000;
+        if(sequence){command.jump_count=1;command.jump_events[0]={sequence,edge};}return command;};
+    {
+        auto command=native_jump(1,RoomJumpEdge::Pressed);command.jump_count=2;command.jump_events[1]={2,RoomJumpEdge::Released};
+        Bytes encoded;WriteCommand(encoded,command);Reader decoded{encoded};
+        check(ReadCommand(decoded)==command && decoded.Done(),"V2 native edge payload round trips without native addresses");
+        for(size_t length=0;length<encoded.size();++length){Reader truncated{std::span(encoded).first(length)};ReadCommand(truncated);
+            check(!truncated.Done(),"every truncated native edge payload rejects");}
+        RoomJumpStream state;check(AdvanceRoomJumpStream(state,command) && state.sequence==2 && !state.held,"ordered two-edge batch updates semantic history once");
+        const auto before=state;auto bad=native_jump(3,RoomJumpEdge::Pressed);bad.jump_count=2;bad.jump_events[1]={4,RoomJumpEdge::Pressed};
+        check(!AdvanceRoomJumpStream(state,bad) && state==before,"invalid later edge leaves entire stream unchanged");
+    }
+    for(unsigned malformed=0;malformed<7;++malformed){
+        if(!check(running(),"remote native edge validation fixture connects"))return false;
+        auto bad=native_jump(1,RoomJumpEdge::Pressed);
+        if(malformed==0)bad.jump_events[0].edge=RoomJumpEdge::Released;
+        if(malformed==1)bad.jump_events[0].sequence=2;
+        if(malformed==2)bad.jump_count=3;
+        if(malformed==3)bad.jump_events[0].edge=RoomJumpEdge(255);
+        if(malformed==4)bad.jump_button_mask=0;
+        if(malformed==5)bad.source=RoomMovementSource::NativeActionV1;
+        if(malformed==6)bad.jump_button_mask=0x3000;
+        auto packet=Packet(Wire::Input);U64(packet,102);WriteCommand(packet,bad);rooms[1]->impl_->connections.front()->Queue(packet);
+        check(pump([&]{return rooms[0]->state()==RoomState::Error;}),"host rejects release-without-press, gaps, oversized/unknown edges, missing/multiple button masks and false V1 provenance");
+    }
+    auto pressed_room=[&]{if(!running())return false;const auto command=native_jump(1,RoomJumpEdge::Pressed);
+        if(!rooms[0]->SubmitLocal(102,command) || !rooms[1]->SubmitLocal(102,command) ||
+            !pump([&]{return rooms[0]->impl_->frames.size()==3 && rooms[1]->impl_->frames.size()==3;}))return false;
+        for(unsigned i=0;i<3;++i){RoomFrame a,b;if(!rooms[0]->TakeFrame(a) || !rooms[1]->TakeFrame(b) || a!=b)return false;}return true;};
+    if(!check(pressed_room(),"held native edge streams agree over real TCP"))return false;
+    {
+        const auto next=rooms[1]->next_submit_tick();auto bad=native_jump(2,RoomJumpEdge::Pressed);
+        bool rejected=!rooms[1]->SubmitLocal(next,bad);bad=native_jump(3,RoomJumpEdge::Released);rejected &= !rooms[1]->SubmitLocal(next,bad);
+        bad=native_jump(2,RoomJumpEdge::Released);bad.jump_button_mask=0x2000;rejected &= !rooms[1]->SubmitLocal(next,bad);
+        rejected &= !rooms[1]->SubmitLocal(next,Neutral());bad=native_jump();bad.jump_events[1]={2,RoomJumpEdge::Released};rejected &= !rooms[1]->SubmitLocal(next,bad);
+        const auto release=native_jump(2,RoomJumpEdge::Released);
+        check(rejected && rooms[1]->next_submit_tick()==next && rooms[1]->SubmitLocal(next,release) && rooms[0]->SubmitLocal(next,release) &&
+            pump([&]{return !rooms[0]->impl_->frames.empty() && !rooms[1]->impl_->frames.empty();}),"local failed native batches cannot consume tick/sequence or silently downgrade/change binding mask");
+    }
+    for(unsigned malformed=0;malformed<4;++malformed){
+        if(!check(pressed_room(),"remote held native stream fixture connects"))return false;
+        auto bad=native_jump(2,RoomJumpEdge::Released);if(malformed==0)bad.jump_events[0].edge=RoomJumpEdge::Pressed;
+        if(malformed==1)bad.jump_events[0].sequence=3;if(malformed==2)bad.jump_button_mask=0x2000;if(malformed==3)bad=Neutral();
+        auto packet=Packet(Wire::Input);U64(packet,103);WriteCommand(packet,bad);rooms[1]->impl_->connections.front()->Queue(packet);
+        check(pump([&]{return rooms[0]->state()==RoomState::Error;}),"authority rejects repeated held press, later gap, mask replacement and V2 downgrade on the socket too");
+    }
+    if(!check(pressed_room(),"remote frame edge validation fixture connects"))return false;
+    {
+        const auto release=native_jump(2,RoomJumpEdge::Released);check(rooms[1]->SubmitLocal(103,release),"client records exact local native echo");
+        auto forged=Packet(Wire::Frame);U64(forged,103);U8(forged,2);U64(forged,1);WriteCommand(forged,native_jump(3,RoomJumpEdge::Released));
+        U64(forged,2);WriteCommand(forged,release);rooms[0]->impl_->connections.front()->Queue(forged);
+        check(pump([&]{return rooms[1]->state()==RoomState::Error;}),"client validates another peer's semantic edge history even when its own input echo matches");
+    }
     for(unsigned missing=0;missing<3;++missing){
         auto unverified=id;if(missing==0)unverified.build={};else if(missing==1)unverified.content={};else unverified.checkpoint={};
         Room rejected;check(!rejected.Host(unverified,"127.0.0.1",0,2,"Host") &&
@@ -608,6 +830,95 @@ bool TestOnlineRoom(){
         RoomFrame a,b;check(rooms[0]->TakeFrame(a) && rooms[1]->TakeFrame(b) && a==b && a.tick==0 && a.players_mask==3,"shared fixed frame preserves both active bits and absent slots");
     }
     id=saved;
+    // Real checkpoint format and worker installation, using an exclusively
+    // created temporary fixture root. No production save/content paths enter.
+    namespace fs=std::filesystem;
+    const auto fixture=fs::temp_directory_path()/("beetleworx-room-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(GetTickCount64()));
+    if(!check(CreateDirectoryW(fixture.c_str(),nullptr)!=0,"exclusive private checkpoint fixture root"))return false;
+    struct Cleanup {fs::path root;~Cleanup(){std::error_code error;fs::remove_all(root,error);}} cleanup{fixture};
+    try{
+        fs::create_directory(fixture/"source");
+        const std::string payload(512*1024,'Q');
+        {std::ofstream file(fixture/"source"/"save.dat",std::ios::binary);file.write(payload.data(),payload.size());}
+        {std::ofstream file(fixture/"normal-save.dat",std::ios::binary);file<<"original normal save";}
+        auto packed=std::async(std::launch::async,[&]{return PackCheckpoint(fixture/"source");}).get();
+        if(!check(bool(packed.value),"worker packs real bounded checkpoint bundle"))return false;
+        auto bundle=std::make_shared<const CheckpointBundle>(std::move(*packed.value));auto transfer_id=id;transfer_id.checkpoint=bundle->identity;
+        auto bootstrap=[&](unsigned count,std::shared_ptr<const CheckpointBundle> source){
+            rooms.clear();rooms.push_back(std::make_unique<Room>());
+            if(!rooms[0]->HostWithCheckpoint(transfer_id,"127.0.0.1",0,uint8_t(count),"Host",std::move(source)))return false;
+            for(unsigned i=1;i<count;++i){
+                rooms.push_back(std::make_unique<Room>());auto local=transfer_id;if(i&1)local.checkpoint={};else ++local.checkpoint[0];
+                if(!rooms.back()->JoinWithCheckpoint(local,"127.0.0.1",rooms[0]->port(),"Guest "+std::to_string(i)))return false;
+            }
+            return pump([&]{return rooms[0]->lobby().players.size()==count && std::all_of(rooms.begin()+1,rooms.end(),[](const auto& r){return r->impl_->checkpoint_size>0;});});
+        };
+        auto install=[&](unsigned i,unsigned path){
+            auto bytes=rooms[i]->DownloadedCheckpoint();if(!bytes)return false;
+            const auto expected=rooms[i]->identity().checkpoint;const auto destination=fixture/("installed-"+std::to_string(path));
+            auto installed=std::async(std::launch::async,[=]{return InstallCheckpoint(*bytes,expected,destination);}).get();
+            return installed.installed && rooms[i]->ConfirmCheckpointInstalled(true);
+        };
+        if(!check(bootstrap(4,bundle),"four real peers negotiate host checkpoint with missing/different local saves"))return false;
+        const auto fast_deadline=Clock::now()+std::chrono::seconds(3);
+        while((!rooms[1]->DownloadedCheckpoint() || !rooms[2]->DownloadedCheckpoint()) && Clock::now()<fast_deadline){
+            for(unsigned i=0;i<3;++i)rooms[i]->Poll();std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        check(rooms[1]->DownloadedCheckpoint() && rooms[2]->DownloadedCheckpoint() && !rooms[3]->DownloadedCheckpoint(),"one unpolled slow guest cannot starve two other checkpoint downloads");
+        check(rooms[0]->impl_->offered.get()==bundle.get() && !rooms[0]->impl_->downloaded &&
+            std::all_of(rooms[0]->impl_->connections.begin(),rooms[0]->impl_->connections.end(),[](const auto& c){return c->outgoing.size()-c->sent<=MaxQueued;}),"host shares one bundle, no per-guest bundle copies, all send queues bounded");
+        check(!rooms[1]->SetReady(true) && !rooms[3]->ConfirmCheckpointInstalled(true),"download does not enable lobby Ready; incomplete download cannot report installation");
+        if(!check(pump([&]{return bool(rooms[3]->DownloadedCheckpoint());}),"slow guest completes its exact ordered download when polled"))return false;
+        check(install(1,1) && install(2,2) && pump([&]{return rooms[1]->checkpoint_ready() && rooms[2]->checkpoint_ready();}),"two independent workers install and mutually acknowledge host checkpoint");
+        for(const auto& player:rooms[0]->lobby().players)rooms[0]->impl_->roster.SetReady(player.peer,true);
+        check(!rooms[0]->Start() && rooms[0]->state()==RoomState::Lobby,"even a forged ready roster cannot bypass a third peer's installation barrier");
+        for(const auto& player:rooms[0]->lobby().players)rooms[0]->impl_->roster.SetReady(player.peer,false);rooms[0]->impl_->Publish();
+        check(install(3,3) && pump([&]{const auto peers=rooms[0]->checkpoint_peers();return rooms[3]->checkpoint_ready() && std::all_of(peers.begin(),peers.end(),[](const auto& p){return p.installed;});}),"every admitted peer must complete install acknowledgement");
+        // Depart/rejoin before Start gets a new private installation and reuses
+        // its logical slot, never an old participant's transfer state.
+        rooms[3]->Disconnect();check(pump([&]{return rooms[0]->lobby().players.size()==3;}),"checkpoint-ready lobby guest may leave without closing host");rooms.pop_back();
+        rooms.push_back(std::make_unique<Room>());auto missing=transfer_id;missing.checkpoint={};
+        check(rooms[3]->JoinWithCheckpoint(missing,"127.0.0.1",rooms[0]->port(),"Rejoined") && pump([&]{return bool(rooms[3]->DownloadedCheckpoint());}) &&
+            rooms[3]->local_peer()==4 && install(3,4) && pump([&]{return rooms[3]->checkpoint_ready();}),"rejoin slot performs its own complete transfer/install, no stale readiness inheritance");
+        for(auto& r:rooms)check(r->SetReady(true),"installed bootstrap peers explicitly ready");
+        check(pump([&]{return std::all_of(rooms[0]->lobby().players.begin(),rooms[0]->lobby().players.end(),[](const auto& p){return p.ready;}) &&
+            std::none_of(rooms.begin(),rooms.end(),[](const auto& r){return r->profile_pending();});}) && rooms[0]->Start() &&
+            pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& r){return r->state()==RoomState::Loading;});}),"all installed and ready peers enter native Loading, not automatic gameplay");
+        for(auto& r:rooms)check(r->WorldReady(world),"installed peers separately assert real loaded-world readiness");
+        check(pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& r){return r->state()==RoomState::Running;});}),"checkpoint barrier composes with explicit all-world activation");
+        std::ifstream normal(fixture/"normal-save.dat",std::ios::binary);const std::string untouched((std::istreambuf_iterator<char>(normal)),std::istreambuf_iterator<char>());
+        check(untouched=="original normal save","worker bootstrap never changes original normal save fixture");
+        auto oversized=std::make_shared<CheckpointBundle>(*bundle);oversized->bytes.resize(kMaxCheckpointBundle+1);Room rejected;
+        check(!rejected.HostWithCheckpoint(transfer_id,"127.0.0.1",0,2,"Host",oversized),"oversized host bundle rejected before socket creation");
+        auto wrong=std::make_shared<CheckpointBundle>(*bundle);++wrong->identity[0];
+        check(!rejected.HostWithCheckpoint(transfer_id,"127.0.0.1",0,2,"Host",wrong),"host bundle digest must match authoritative checkpoint identity");
+        for(unsigned malformed=0;malformed<5;++malformed){
+            if(!check(bootstrap(2,bundle),"malformed checkpoint stream fixture establishes explicit bootstrap"))return false;
+            auto& sender=*rooms[0]->impl_->connections.front();sender.transfer=Connection::Transfer::AwaitInstalled;
+            Bytes packet;
+            if(malformed==0){packet=Packet(Wire::CheckpointChunk);U64(packet,UINT32_MAX,4);U64(packet,1,2);U8(packet,0);}
+            if(malformed==1){packet=Packet(Wire::CheckpointChunk);U64(packet,0,4);U64(packet,1025,2);packet.resize(packet.size()+1025);}
+            if(malformed==2){packet=Packet(Wire::CheckpointEnd);U64(packet,bundle->bytes.size(),4);}
+            if(malformed==3){packet=Packet(Wire::CheckpointBegin);U64(packet,kMaxCheckpointBundle+1,4);packet.insert(packet.end(),transfer_id.checkpoint.begin(),transfer_id.checkpoint.end());}
+            if(malformed==4){packet=Packet(Wire::CheckpointReady);packet.insert(packet.end(),transfer_id.checkpoint.begin(),transfer_id.checkpoint.end());}
+            sender.Queue(packet);check(pump([&]{return rooms[1]->state()==RoomState::Error;}),"bad offset/oversized chunk/early end/repeated oversized announcement/unsolicited install-ready rejected over TCP");
+        }
+        if(!check(bootstrap(2,bundle),"wrong-direction checkpoint fixture connects"))return false;
+        auto unexpected=Packet(Wire::CheckpointEnd);U64(unexpected,bundle->bytes.size(),4);rooms[1]->impl_->connections.front()->Queue(unexpected);
+        check(pump([&]{return rooms[0]->state()==RoomState::Listening && rooms[1]->state()==RoomState::Error;}),"guest cannot send host checkpoint messages; malformed lobby peer evicted without closing listener");
+        auto corrupt=std::make_shared<CheckpointBundle>(*bundle);corrupt->bytes.back()^=1;
+        if(!check(bootstrap(2,corrupt) && pump([&]{return bool(rooms[1]->DownloadedCheckpoint());}),"corrupt payload arrives only as untrusted complete download"))return false;
+        auto bytes=rooms[1]->DownloadedCheckpoint();auto failed=std::async(std::launch::async,[&]{return InstallCheckpoint(*bytes,transfer_id.checkpoint,fixture/"corrupt-install");}).get();
+        check(!failed.installed && rooms[1]->ConfirmCheckpointInstalled(false) && pump([&]{return rooms[0]->state()==RoomState::Listening;}) &&
+            !fs::exists(fixture/"corrupt-install"),"worker cryptographic validation failure closes guest, preserves host and publishes no installed save");
+        if(!check(bootstrap(2,bundle) && pump([&]{return bool(rooms[1]->DownloadedCheckpoint());}),"stalled installation fixture downloads complete checkpoint"))return false;
+        // Drain final real receipt acknowledgements before injecting a duplicate
+        // alongside a heartbeat at the progress deadline.
+        check(pump([&]{return rooms[0]->impl_->connections.front()->transfer_acked==bundle->bytes.size();}),"host observes actual received byte progress, not OS send buffering");
+        auto duplicate=Packet(Wire::CheckpointProgress);U64(duplicate,bundle->bytes.size(),4);rooms[1]->impl_->connections.front()->Queue(duplicate);rooms[1]->impl_->connections.front()->Queue(Packet(Wire::Ping));rooms[1]->impl_->connections.front()->Flush();
+        const auto stalled=rooms[0]->impl_->connections.front()->transfer_progress+TransferTimeout+std::chrono::seconds(1);rooms[0]->Poll(stalled);
+        check(rooms[0]->state()==RoomState::Listening && rooms[0]->lobby().players.size()==1,"duplicate receipt progress and live heartbeat cannot keep uninstalled checkpoint alive beyond120seconds");
+    }catch(const std::exception& exception){check(false,exception.what());}
     if(ok)REXLOG_INFO("Online room passed {} checks: real16-peer TCP, authoritative roster/ready, native movement basis, contiguous all-peer input, own echo, malformed/spoof/stale/window rejection and disconnect/timeout stop",checks);
     return ok;
 }

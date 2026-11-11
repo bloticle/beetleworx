@@ -29,6 +29,7 @@ public:
 private:
     struct Binding {uint64_t native_peer=0,generation=0;uint32_t entity=0,controller=0;};
     std::array<Binding,kOnlineRoomCapacity> bindings_{};
+    std::array<RoomJumpStream,kOnlineRoomCapacity> jumps_{};
     std::array<uint64_t,kOnlineRoomCapacity> epochs_{};
     std::optional<RoomFrame> delivered_;
     uint32_t registry_=0,owner_thread_=0;
@@ -36,6 +37,9 @@ private:
     uint64_t next_tick_=0;
     bool configured_=false,faulted_=false,exhausted_=false;
 };
+// Invoked only while the native Jump-task/physics-stimulus fixture owns its
+// private image. Exercises actual TCP authoritative frames before controllers.
+bool TestOwnedJumpMovementFrames(PPCContext&,uint8_t* base,uint64_t first_native_peer,uint64_t second_native_peer);
 using OwnedFrameUpdate=void(*)(PPCContext&,uint8_t*);
 bool TestOwnedMovementFrames(PPCContext&,uint8_t* base,uint64_t first_native_peer,
     uint64_t second_native_peer,OwnedFrameUpdate bounded_native_update);

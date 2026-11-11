@@ -70,8 +70,10 @@ def inspect(capture, include_components=False, include_input=False):
         def text(address):
             return read(address, 96).split(b'\0', 1)[0].decode('ascii')
 
-        def controller_tasks(controller, entity):
-            collection = controller + 156
+        def controller_tasks(basic, entity):
+            # ORIGINAL Basic constructor827863D8: action collection+140.
+            # Mickey's Basic subobject is full+16, hence older full+156.
+            collection = basic + 140
             buckets, bucket_count = word(collection + 16), word(collection + 20)
             dispatch, dispatch_count = word(collection + 36), word(collection + 40)
             if bucket_count > 4096 or dispatch_count > 128:
@@ -136,6 +138,9 @@ def inspect(capture, include_components=False, include_input=False):
             actor = dict(slot=slot, handle=f'{key:08X}', entity=f'{entity:08X}',
                          controller=f'{int.from_bytes(record[8:12], "big"):08X}',
                          mode=int.from_bytes(record[12:16], 'big'))
+            actor['observed_control_mode'] = {0: 'native human mode0', 1: 'native AI mode1',
+                                               2: 'native AI mode2'}.get(actor['mode'], 'other/unavailable native mode')
+            actor['identity_note'] = 'Retail record slot; control mode/type observations do not prove character identity'
             if entity:
                 table = word(entity)
                 actor.update(entity_vtable=f'{table:08X}',
@@ -154,12 +159,28 @@ def inspect(capture, include_components=False, include_input=False):
                         view.update(face=f'{face:08X}', face_vtable=f'{word(face):08X}', object=f'{obj:08X}', vtable=f'{vt:08X}',
                                     setter_108=f'{word(vt + 108):08X}')
                         view['retained_reference' if label == 'basic' else 'listener_vtable'] = f'{word(obj + 80):08X}'
+                        if label == 'basic':
+                            listener = obj + 64
+                            reference = word(obj + 80)
+                            view.update(listener=f'{listener:08X}', listener_vtable=f'{word(listener):08X}',
+                                listener_method=f'{word(word(listener)):08X}',
+                                raw_owner=f'{word(obj + 48):08X}', owner_matches_entity=word(obj + 48) == entity - 8,
+                                flags_52=read(obj + 52, 1)[0], captured_reference_241=read(obj + 241, 1)[0],
+                                alternate_reference_292=f'{word(obj + 292):08X}', scripted_reference_297=read(obj + 297, 1)[0])
+                            if reference:
+                                ref_count, ref_list = word(reference + 44), word(reference + 36)
+                                if ref_count > 128:
+                                    raise RuntimeError('Unbounded retained movement reference components')
+                                refs = struct.unpack('>' + str(ref_count) + 'I', read(ref_list, ref_count * 4)) if ref_count else []
+                                view['reference_snapshot'] = dict(entity=f'{reference:08X}', vtable=f'{word(reference):08X}',
+                                    guid=read(reference + 4, 16).hex(), components=[dict(face=f'{face:08X}',
+                                    vtable=f'{word(face):08X}', property_getter_172=f'{word(word(face) + 172):08X}') for face in refs])
                     actor['controller_views'][label] = view
                 camera = entities.get(camera_handles[slot], 0)
                 actor['camera_entity'] = f'{camera:08X}'
-                mickey_view = actor['controller_views']['mickey']
-                if include_input and mickey_view['slot'] != 255:
-                    actor['input_tasks'] = controller_tasks(int(mickey_view['object'], 16), entity)
+                basic_view = actor['controller_views']['basic']
+                if include_input and basic_view['slot'] != 255:
+                    actor['input_tasks'] = controller_tasks(int(basic_view['object'], 16), entity)
                 if camera:
                     actor['camera_component_count'] = word(camera + 44)
                     actor['camera_component_vtables'] = [f'{word(word(word(camera + 36) + i * 4)):08X}' for i in range(min(word(camera + 44), 8))]
@@ -205,6 +226,42 @@ def inspect(capture, include_components=False, include_input=False):
             events = list(struct.unpack('>' + str(event_count) + 'I', event_bytes))
             events.append(action_manager + 24)  # Original827C3D78 default event.
             movement_uid = word(0x833DAEB8)
+            wanted_uids = {word(address): name for name, address in
+                           [('Movement', 0x833DAEB8), ('Jump', 0x833DAEBC), ('ReleaseJump', 0x833DAEC0),
+                            ('Movement2', 0x833DAEC4), ('Jump2', 0x833DAEC8), ('ReleaseJump2', 0x833DAECC)]}
+            wanted_uids.pop(0, None)
+            profile = word(0x833DC87C)
+            routes = []
+            route_snapshots = [(0x833DC87C, read(0x833DC87C, 4))]
+            if profile:
+                route_snapshots.append((profile, read(profile, 16)))
+            for logical_user in range(2):
+                route = dict(logical_user=logical_user, profile=f'{profile:08X}', resolved=False)
+                if profile:
+                    user_slot, users = word(profile + 4 + logical_user * 4), word(profile + 12)
+                    route.update(user_slot=user_slot, users=f'{users:08X}')
+                    if user_slot < 4 and users:
+                        route_snapshots.append((users + user_slot * 4, read(users + user_slot * 4, 4)))
+                        obj = word(users + user_slot * 4)
+                        route['user_object'] = f'{obj:08X}'
+                        if obj:
+                            route_snapshots.append((obj, read(obj, 4)))
+                            getter = word(word(obj) + 8)
+                            route_snapshots.append((word(obj) + 8, read(word(obj) + 8, 4)))
+                            code = read(getter, 8)
+                            instruction, terminal = struct.unpack('>2I', code)
+                            route.update(getter_8=f'{getter:08X}', getter_code_hex=code.hex(), object_hex=read(obj, 32).hex())
+                            # ORIGINAL827C43C0 calls this virtual after profile slot
+                            # resolution. Recognize only exact native leaf getters.
+                            offset = c.c_int16(instruction & 65535).value
+                            if terminal == 0x4E800020 and instruction & 0xFFFF0000 == 0x80630000:
+                                route.update(native_device=word(obj + offset), method='native leaf lwz r3,offset(r3); blr')
+                                route_snapshots.append((obj + offset, read(obj + offset, 4)))
+                            elif terminal == 0x4E800020 and instruction & 0xFFFF0000 == 0x38600000:
+                                route.update(native_device=offset, method='native leaf li r3,index; blr')
+                            if 0 <= route.get('native_device', -1) < 4:
+                                route['resolved'] = True
+                routes.append(route)
             captured = []
             snapshots = []
             for event in dict.fromkeys(events):
@@ -216,32 +273,48 @@ def inspect(capture, include_components=False, include_input=False):
                 action_bytes = read(actions, action_count * 4) if action_count else b''
                 snapshots.append((event, header, listeners, listener_bytes, actions, action_bytes))
                 for action in struct.unpack('>' + str(action_count) + 'I', action_bytes):
-                    if word(action) != movement_uid:
+                    action_uid = word(action)
+                    if action_uid not in wanted_uids:
                         continue
                     shape = read(action, 436)
-                    native_user = word(action + 88)
-                    if native_user > 1:
-                        raise RuntimeError('Movement binding has an unsupported native device index')
+                    binding_count = word(action + 408)
+                    if binding_count > 10:
+                        raise RuntimeError('Unbounded native action binding records')
+                    logical_user = word(action + 88)
+                    if logical_user > 1:
+                        raise RuntimeError('Action binding has an unsupported logical user')
+                    route = routes[logical_user]
                     input_system = word(action_manager + 72)
-                    device = word(input_system + 72 + native_user * 4)
-                    history = word(device + 60)
+                    device_snapshot = None
+                    if route['resolved']:
+                        device = word(input_system + 72 + route['native_device'] * 4)
+                        if device:
+                            history = word(device + 60)
+                            button_count, buttons = word(device + 48), word(device + 52)
+                            if button_count > 32:
+                                raise RuntimeError('Unbounded native button history')
+                            device_snapshot = dict(input_system=f'{input_system:08X}', object=f'{device:08X}',
+                                native_user=route['native_device'], vtable=f'{word(device):08X}', axis_count=word(device + 56), history=f'{history:08X}',
+                                header_hex=read(device, 72).hex(), button_count=button_count, buttons=f'{buttons:08X}',
+                                button_records_hex=read(buttons, button_count * 20).hex() if button_count else '',
+                                ranges=[list(struct.unpack('>4i', read(history + i * 32 + 16, 16))) for i in range(min(2, word(device + 56)))])
                     captured.append(dict(event=f'{event:08X}', action=f'{action:08X}',
+                        action_name=wanted_uids[action_uid], native_uid_text=text(action_uid), shape_hex=shape.hex(),
                         event_uid=f'{word(event):08X}',
-                        uid=f'{movement_uid:08X}',
+                        uid=f'{action_uid:08X}',
                         listener_count=listener_count, action_count=action_count,
                         listeners=[f'{value:08X}' for value in struct.unpack('>' + str(listener_count) + 'I', listener_bytes)],
                         kind=int.from_bytes(shape[80:84], 'big'),
-                        binding_count=int.from_bytes(shape[408:412], 'big'),
+                        binding_count=binding_count,
                         modifier_count=int.from_bytes(shape[412:416], 'big'),
                         axis_records=[dict(user=word(action + offset), key=f'{word(action + offset + 4):08X}',
                             destination=word(action + offset + 8), inverted=read(action + offset + 16, 1)[0])
-                            for offset in (88, 120)],
+                            for offset in range(88, 88 + binding_count * 32, 32)],
                         response=list(struct.unpack('>4f', shape[416:432])),
                         curve=int.from_bytes(shape[432:436], 'big'),
-                        device=dict(input_system=f'{input_system:08X}', object=f'{device:08X}',
-                            vtable=f'{word(device):08X}', axis_count=word(device + 56), history=f'{history:08X}',
-                            ranges=[list(struct.unpack('>4i', read(history + i * 32 + 16, 16))) for i in range(2)])))
-            if (word(0x833DBAD8) != action_manager or word(action_manager + 4) != event_list
+                        profile_route=route, device=device_snapshot))
+            if (any(read(address, len(data)) != data for address, data in route_snapshots)
+                    or word(0x833DBAD8) != action_manager or word(action_manager + 4) != event_list
                     or word(action_manager + 8) != event_count
                     or (event_count and read(event_list, event_count * 4) != event_bytes)
                     or any(read(event, 24) != header or (lb and read(lp, len(lb)) != lb)
@@ -250,7 +323,8 @@ def inspect(capture, include_components=False, include_input=False):
                 raise RuntimeError('Input event ownership changed during snapshot')
             input_bindings = dict(manager=f'{action_manager:08X}', event_count=event_count,
                 current_event_uid=f'{word(action_manager + 16):08X}',
-                default_event_uid=f'{word(action_manager + 24):08X}', movement=captured)
+                default_event_uid=f'{word(action_manager + 24):08X}', profile_routes=routes, actions=captured,
+                movement=[action for action in captured if action['action_name'] == 'Movement'])
         # Exact string addresses selected by retail 8276A828 (r4 slot, r5
         # human/3D-AI/2D-AI mode), recovered from its lis/addi instructions.
         string_base = ((-32248 << 16) - 30820) & 0xFFFFFFFF

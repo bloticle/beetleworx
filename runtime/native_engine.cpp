@@ -1,6 +1,7 @@
 #include "online_actor_input.h"
 #include "online_actor_reference.h"
 #include "online_local_movement.h"
+#include "online_local_jump.h"
 #include "online_movement_frame.h"
 #include "guest_read_batch.h"
 #include "native_engine.h"
@@ -271,7 +272,7 @@ void ProbeOnlineLocalMovement(PPCContext& ctx,uint8_t* base,const std::array<em2
         REXLOG_ERROR("Private online Movement probe: pre-tick discovery failed after {} attempts at stage {}",probe.attempts,diagnostic.discovery_stage);return;
     }
     probe.done=true;
-    struct Disarm {~Disarm(){em2::net::DisarmNativeLocalMovement();}} disarm;
+    struct Disarm {~Disarm(){em2::net::DisarmNativeLocalJump();em2::net::DisarmNativeLocalMovement();}} disarm;
     if(binding.entity!=snapshot[0].entity || !Readable(binding.controller,800,base)){
         REXLOG_ERROR("Private online Movement probe: selected actor changed before evaluation");return;
     }
@@ -296,6 +297,43 @@ void ProbeOnlineLocalMovement(PPCContext& ctx,uint8_t* base,const std::array<em2
         if(!controller_unchanged)for(size_t i=0;i<before.size();++i)if(before[i]!=base[binding.controller+i]){
             REXLOG_WARN("Private Movement controller first difference byte {}: {} -> {}",i,before[i],base[binding.controller+i]);break;}
     }
+    em2::net::NativeLocalJumpBinding jump;
+    const bool jump_discovered=em2::net::DiscoverNativeLocalJumpBinding(binding,ctx,base,jump);
+    const bool jump_armed=jump_discovered && em2::net::ArmNativeLocalJump(jump,logical_actor_epoch,100,ctx,base);
+    bool jump_success=jump_armed;
+    if(jump_armed){
+        // Observe native digital math on private history only. These synthetic
+        // samples never enter the live device, actors or network transport.
+        std::array<uint8_t,640> button_before{};
+        std::memcpy(button_before.data(),base+jump.buttons,jump.button_count*20);
+        std::array<std::array<uint8_t,436>,2> action_before{};
+        for(unsigned i=0;i<2;++i)std::memcpy(action_before[i].data(),base+jump.actions[i].action,436);
+        em2::net::RoomJumpStream history;
+        const std::array<bool,6> levels{false,true,true,false,true,false};
+        const std::array<unsigned,6> expected_count{0,1,0,1,1,1};
+        uint64_t expected_sequence=0;
+        for(unsigned i=0;i<levels.size();++i){
+            em2::net::Pad pad{};if(levels[i])pad.buttons=jump.button_mask;
+            em2::net::NativeLocalJumpEvents events;em2::net::RoomMovement command;
+            const bool produced=em2::net::ProduceNativeLocalJump(jump,pad,logical_actor_epoch,100+i,ctx,base,events,0) &&
+                em2::net::ProduceNativeLocalRoomMovement(binding,pad,logical_actor_epoch,ctx,base,command,0);
+            command.source=em2::net::RoomMovementSource::NativeActionV2;
+            command.jump_button_mask=events.button_mask;command.jump_count=events.count;command.jump_events=events.events;
+            bool unchanged=!std::memcmp(&ctx,preserve.saved.data(),sizeof(ctx)) &&
+                !std::memcmp(before.data(),base+binding.controller,before.size()) &&
+                !std::memcmp(button_before.data(),base+jump.buttons,jump.button_count*20);
+            for(unsigned j=0;j<2;++j)unchanged &= !std::memcmp(action_before[j].data(),base+jump.actions[j].action,436);
+            const bool accepted=produced && em2::net::AdvanceRoomJumpStream(history,command);
+            const bool edge_ok=events.count==expected_count[i] && (!events.count ||
+                (events.events[0].sequence==++expected_sequence && events.events[0].edge==
+                    (levels[i]?em2::net::RoomJumpEdge::Pressed:em2::net::RoomJumpEdge::Released)));
+            jump_success &= accepted && edge_ok && unchanged;
+            REXLOG_INFO("Private online Jump command: source tick {}, mask {:04X}, held {}, count {}, sequence {}; produced {}, accepted {}, native state unchanged {}",
+                100+i,events.button_mask,levels[i],events.count,events.events[0].sequence,produced,accepted,unchanged);
+        }
+    }
+    success &= jump_success;
+    REXLOG_INFO("Private online Jump probe completed: discovered {}, armed {}, success {}; original digital interpreter and private history only; no live action dispatch or network submission",jump_discovered,jump_armed,jump_success);
     REXLOG_INFO("Private online Movement probe completed: success {}, registry {:08X}, actor {:08X}, listener {:08X}, event {:08X}, action {:08X}, prior observations {}, prior captures {}; pre-tick discovery and native math/reference only, no action dispatch, actor/control writes or network submission",
         success,binding.registry,binding.entity,binding.listener,binding.event,binding.action,diagnostic.observations,diagnostic.captured);
 }

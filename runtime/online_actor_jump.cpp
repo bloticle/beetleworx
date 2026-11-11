@@ -1,4 +1,5 @@
 #include "online_actor_jump.h"
+#include "online_actor_frames.h"
 #include "guest_read_batch.h"
 #include "ppc_context.h"
 #include <rex/logging.h>
@@ -103,10 +104,8 @@ Result TargetsFor(uint64_t peer,const Command& command,PPCContext& ctx,uint8_t* 
        PPC_LOAD_U32(0x820BC838+40)!=0x8287EA38 || PPC_LOAD_U32(0x820BC838+4)!=0x8287ECF8 || PPC_LOAD_U32(0x820BC838+8)!=0x8287D048)return Result::InvalidContext;
     out={actor,task,motion,physics,gravity,animation};return Result::Applied;
 }
-Result EdgeAdmission(const Targets& targets,const Command& command){
-    std::lock_guard lock(state_mutex);
-    const auto prior=std::find_if(states.begin(),states.end(),[&](const EdgeState& value){return value.targets.actor.peer==targets.actor.peer;});
-    const bool same=prior!=states.end() && prior->targets.actor.generation==targets.actor.generation;
+Result EdgeAgainst(const EdgeState* prior,const Targets& targets,const Command& command){
+    const bool same=prior && prior->targets.actor.generation==targets.actor.generation;
     if(!command.sequence)return Result::InvalidTick;
     if(same){
         if(!Identity(prior->targets,targets))return Result::Stale;
@@ -116,9 +115,14 @@ Result EdgeAdmission(const Targets& targets,const Command& command){
     }else{
         if(command.sequence!=1)return Result::InvalidTick;
         if(command.edge!=Edge::Pressed)return Result::InvalidInput;
-        if(prior==states.end() && std::none_of(states.begin(),states.end(),[](const EdgeState& value){return !value.targets.actor.peer;}))return Result::InvalidContext;
     }
     return Result::Applied;
+}
+Result EdgeAdmission(const Targets& targets,const Command& command){
+    std::lock_guard lock(state_mutex);
+    const auto prior=std::find_if(states.begin(),states.end(),[&](const EdgeState& value){return value.targets.actor.peer==targets.actor.peer;});
+    if(prior==states.end() && std::none_of(states.begin(),states.end(),[](const EdgeState& value){return !value.targets.actor.peer;}))return Result::InvalidContext;
+    return EdgeAgainst(prior==states.end()?nullptr:&*prior,targets,command);
 }
 // Only a same-executable native fixture can replace the physics boundary. It
 // observes a real original Jump-task stimulus; it is not a production body API.
@@ -135,6 +139,25 @@ Result em2::net::detail::ValidateOwnedJumpTargets(uint64_t peer,const Command& c
 Result em2::net::ValidateOwnedActorJump(uint64_t peer,const Command& command,PPCContext& ctx,uint8_t* base){
     Context preserve(ctx);Targets targets;const auto result=TargetsFor(peer,command,ctx,base,targets);
     return result==Result::Applied?EdgeAdmission(targets,command):result;
+}
+Result em2::net::ValidateOwnedActorJumpBatch(uint64_t peer,std::span<const Command> commands,PPCContext& ctx,uint8_t* base){
+    Context preserve(ctx);
+    if(commands.size()>2)return Result::InvalidInput;
+    if(commands.empty())return Result::Applied;
+    std::optional<EdgeState> prior;
+    {std::lock_guard lock(state_mutex);
+        const auto slot=std::find_if(states.begin(),states.end(),[&](const EdgeState& value){return value.targets.actor.peer==peer;});
+        if(slot!=states.end())prior=*slot;
+        else if(std::none_of(states.begin(),states.end(),[](const EdgeState& value){return !value.targets.actor.peer;}))return Result::InvalidContext;
+    }
+    for(const auto& command:commands){
+        if(command.tick!=commands.front().tick)return Result::InvalidTick;
+        Targets targets;auto result=TargetsFor(peer,command,ctx,base,targets);
+        if(result!=Result::Applied)return result;
+        result=EdgeAgainst(prior?&*prior:nullptr,targets,command);if(result!=Result::Applied)return result;
+        prior=EdgeState{targets,command.sequence,command.tick,command.edge==Edge::Pressed,false};
+    }
+    return Result::Applied;
 }
 Result em2::net::ReplayOwnedActorJump(uint64_t peer,const Command& command,PPCContext& ctx,uint8_t* base){
     Context preserve(ctx);Targets targets;auto result=TargetsFor(peer,command,ctx,base,targets);if(result!=Result::Applied)return result;
@@ -244,6 +267,17 @@ bool em2::net::TestOwnedActorJumps(PPCContext& ctx,uint8_t* base,uint64_t first_
     auto first=command(a,Edge::Pressed,1),second=command(b,Edge::Pressed,1);
     if(!check(ReplayOwnedActorJump(a.peer,first,ctx,base)==Result::InvalidTick && observed.first_count==0,
         "Jump requires an admitted current Movement/basis stage before native input delivery"))return false;
+    std::array<Command,2> batch{first,command(a,Edge::Released,2)};
+    auto invalid_batch=batch;invalid_batch[1].sequence=3;
+    if(!check(ValidateOwnedActorJumpBatch(a.peer,batch,ctx,base)==Result::Applied &&
+        ValidateOwnedActorJumpBatch(a.peer,invalid_batch,ctx,base)==Result::InvalidTick &&
+        ValidateOwnedActorJump(a.peer,first,ctx,base)==Result::Applied && observed.first_count==0 &&
+        !(PPC_LOAD_U32(0x50000+8)&16),
+        "whole ordered edge batch preflight rejects a later sequence gap without claiming its valid first edge"))return false;
+    invalid_batch=batch;invalid_batch[1].edge=Edge::Pressed;invalid_batch[1].action.action=press;
+    if(!check(ValidateOwnedActorJumpBatch(a.peer,invalid_batch,ctx,base)==Result::InvalidInput &&
+        ValidateOwnedActorJumpBatch(a.peer,batch,ctx,base)==Result::Applied,
+        "batch preflight enforces alternating edges using private history without mutating real history"))return false;
     if(!prepare(a) || !prepare(b))return false;
     constexpr auto padding_begin=offsetof(PPCContext,vscr_sat)+sizeof(ctx.vscr_sat),padding_end=offsetof(PPCContext,f0);
     static_assert(padding_end>padding_begin);
@@ -291,6 +325,13 @@ bool em2::net::TestOwnedActorJumps(PPCContext& ctx,uint8_t* base,uint64_t first_
     if(!check(!ForgetOwnedActorJump(0,0,ctx,base) && !ForgetOwnedActorJump(a.peer,0,ctx,base) &&
         !ForgetOwnedActorJump(a.peer,a.generation,ctx,base) && !std::memcmp(retail.data(),base+manager,640),
         "unassigned/live ownership cannot discard held-edge history and original retail records remain unchanged"))return false;
+    // Reuse the exact original native task fixture for actual TCP delivery.
+    // The outer input suite owns/restores the basis clock; advance monotonically.
+    states={};PPC_STORE_U32(0x50000+8,0);PPC_STORE_U32(0x51000+8,0);
+    const auto before_first=observed.first_count,before_second=observed.second_count;
+    if(!check(TestOwnedJumpMovementFrames(ctx,base,a.peer,b.peer) && observed.first_count==before_first+2 &&
+        observed.second_count==before_second+1 && !(PPC_LOAD_U32(0x50000+8)&16) && !(PPC_LOAD_U32(0x51000+8)&16),
+        "actual TCP frames trigger only two/one original per-peer Jump physics stimuli, held input does not repeat, releases clear native task flags"))return false;
     REXLOG_INFO("Owned actor Jump passed {} original input/task/physics-stimulus and edge lifecycle checks; no body trajectory/animation/live-control assertion",checks);
     return true;
 }
