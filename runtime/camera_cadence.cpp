@@ -1,6 +1,7 @@
 #include "camera_cadence.h"
 #include "camera_projection.h"
 #include "camera_targets.h"
+#include "camera_look.h"
 #include "controls.h"
 #include "guest_read_batch.h"
 #include "native_engine.h"
@@ -30,7 +31,9 @@ PPC_EXTERN_FUNC(sub_82732A18);
 PPC_EXTERN_FUNC(__imp__sub_827B58D0);
 PPC_EXTERN_FUNC(__imp__sub_82A69948);
 PPC_EXTERN_FUNC(sub_8275C160);
-REXCVAR_DEFINE_BOOL(em2_present_camera,false,"Debug","Experimental offline normal camera at presentation rate; analog input admission remains under native-path verification");
+PPC_EXTERN_FUNC(__imp__sub_82A5D278);
+PPC_EXTERN_FUNC(__imp__sub_82769490);
+REXCVAR_DEFINE_BOOL(em2_present_camera,false,"Debug","Experimental offline normal camera at presentation rate with native stick action processing");
 REXCVAR_DEFINE_BOOL(em2_trace_camera_background,false,"Debug","Trace-only neutral background native camera cadence; requires present_camera and trace_camera and never samples or consumes input");
 REXCVAR_DECLARE(bool,em2_trace_camera);
 
@@ -120,15 +123,48 @@ Admission AdmitCamera(uint32_t mode,uint8_t* base){
     return TraceBackgroundAllowed(REXCVAR_GET(em2_trace_camera_background),REXCVAR_GET(em2_trace_camera),REXCVAR_GET(em2_present_camera),
         em2::MouseLookHasPendingMotion(),cached)?Admission::BackgroundTrace:Admission::None;
 }
-bool FreshNeutralLook(){
+constexpr std::array<unsigned,14> discrete_look_ids{368,372,384,388,392,396,400,404,2352,2356,2360,2364,2368,2372};
+bool GenericLookAction(uint32_t mode,uint32_t action,uint8_t* base){
+    if(!Readable(mode,2376,base) || !Readable(action,4,base))return false;
+    const auto controller=PPC_LOAD_U32(mode+20),manager=PPC_LOAD_U32(0x833DAB60);
+    if(!Readable(controller,20,base) || PPC_LOAD_U32(controller+16)!=0 || !Readable(manager,712,base))return false;
+    PPCContext selected{};selected.r3.u64=manager;selected.r4.u64=0;
+    __imp__sub_82769490(selected,base);
+    const auto id=PPC_LOAD_U32(action);
+    if(!Readable(selected.r3.u32,4,base) || id!=PPC_LOAD_U32(selected.r3.u32))return false;
+    // These named button actions have discrete mode changes and authored
+    // per-dispatch pitch steps. Only the continuous look action may run here.
+    for(unsigned offset:discrete_look_ids)
+        if(id==PPC_LOAD_U32(mode+offset))return false;
+    return true;
+}
+struct FreshLook {
+    em2::LiveLookInput input;
+    std::optional<em2::NativeCameraLookBinding> binding;
+};
+bool SampleFreshLook(uint32_t mode,uint8_t* base,FreshLook& result){
+    result={};
     if(test_admission)return test_admission->neutral;
     auto* kernel=rex::kernel::kernel_state();auto* input=kernel?kernel->input_system():nullptr;
-    em2::LiveLookInput look;
-    if(!input || !em2::SampleLiveLook(*input,0,look))return false;
-    // Raw mapped sticks still require the original action-to-listener float
-    // normalization audit. Fall back to the normal native update on analog
-    // intent rather than injecting an unverified gain or sign.
-    return look.x==0 && look.y==0;
+    if(!input || !em2::SampleLiveLook(*input,0,result.input))return false;
+    em2::NativeCameraLookBinding binding;
+    if(em2::NativeCameraLookBindingFor(mode,base,binding) && GenericLookAction(mode,binding.action,base)){
+        result.binding=binding;return true;
+    }
+    if(result.input.x || result.input.y)return false;
+    // Without a verified continuous action, retain any native D-pad or other
+    // cached intent through the normal simulation path instead of erasing it.
+    for(unsigned offset:{268u,272u,280u,284u})if(PPC_LOAD_U32(mode+offset))return false;
+    return true;
+}
+void DispatchFreshLook(PPCContext& ctx,uint8_t* base,uint32_t mode,const em2::NativeCameraLookResult& look,
+                       PPCFunc* listener=__imp__sub_82A5D278){
+    RestoreContext restore(ctx);
+    ctx.r3.u64=mode;ctx.r4.u64=look.event;ctx.r5.u64=look.action;
+    ctx.f1.f64=double(look.x);ctx.f2.f64=double(look.y);
+    // Keep native user selection, scripted restrictions and activity handling.
+    // The continuous-action guard excludes the handler's discrete pitch steps.
+    listener(ctx,base);
 }
 struct Cadence {
     bool allowed=false,ready=false,replaying=false;
@@ -172,7 +208,9 @@ bool ReadTarget(PPCContext& ctx,uint8_t* base,em2::CameraTargetPose& target){
     if(entry<8 || !Readable(entry-8,184,base))return false;
     target={cadence.owner.registry,handle,entity,entry-8,{}};
     for(unsigned axis=0;axis<3;++axis){target.position[axis]=Float(target.component+172+axis*4,base);if(!std::isfinite(target.position[axis]))return false;}
-    return true;
+    // Physical integration completes after the actor's scenegraph update.
+    // Follow the owned visible root's actual endpoints, not next-tick physics.
+    return em2::ReadCameraVisualTarget(target,base);
 }
 class CameraClockScope {
     uint8_t* base_;uint32_t delta_;
@@ -193,13 +231,14 @@ void BeginFrame(bool requested,bool fixed,int cap,double elapsed){
 void em2::BeginCameraPresentationFrame(bool fixed,double elapsed_seconds){
     BeginFrame(REXCVAR_GET(em2_present_camera),fixed,FrameLimit(),elapsed_seconds);
 }
-void em2::ResetCameraPresentation(){cadence={};}
+void em2::ResetCameraPresentation(){cadence={};ResetNativeCameraLookBindings();}
 bool em2::HandleCameraPresentationUpdate(PPCContext& ctx,uint8_t* base,PPCFunc* native_update){
     if(cadence.replaying || !cadence.allowed || ctx.lr!=0x82A14CE0)return false;
     RestoreEnvironment environment;
     const auto inspected=InspectOwnership(ctx.r3.u32,base);
     const auto admission=inspected?AdmitCamera(inspected->mode,base):Admission::None;
-    if(!inspected || admission==Admission::None || (admission==Admission::Focused && !FreshNeutralLook())){
+    FreshLook look;
+    if(!inspected || admission==Admission::None || (admission==Admission::Focused && !SampleFreshLook(inspected->mode,base,look))){
         if(cadence.ready && cadence.owner.controller==ctx.r3.u32)ClearOwnership();
         return false;
     }
@@ -219,7 +258,16 @@ bool em2::HandleCameraPresentationUpdate(PPCContext& ctx,uint8_t* base,PPCFunc* 
     if(!CurrentOwnership(ctx,base)){ClearOwnership();return true;}
     cadence.ready=true;cadence.seed_frame=cadence.frame;
     cadence.last_absolute=Float(0x833FCA4C,base);
-    REXLOG_INFO("Experimental native camera seeded: controller {:08X}, mode {:08X}, camera {:08X}, node {:08X}; exact two-component roster, analog normalization pending",owner.controller,owner.mode,owner.camera_entity,owner.camera_node);
+    em2::NativeCameraLookBinding binding;
+    const bool bound=em2::NativeCameraLookBindingFor(owner.mode,base,binding);
+    const bool continuous=bound && GenericLookAction(owner.mode,binding.action,base);
+    PPCContext selected{};selected.r3.u64=owner.manager;selected.r4.u64=0;__imp__sub_82769490(selected,base);
+    const auto selected_id=PPC_LOAD_U32(selected.r3.u32),action_id=bound?PPC_LOAD_U32(binding.action):0;
+    const auto slot=PPC_LOAD_U32(owner.controller+16);
+    uint32_t actual_selected=0;
+    if(slot<=1 || slot==UINT32_MAX){selected.r3.u64=owner.manager;selected.r4.u64=slot;__imp__sub_82769490(selected,base);actual_selected=PPC_LOAD_U32(selected.r3.u32);}
+    unsigned discrete=0;for(auto offset:discrete_look_ids)if(bound && action_id==PPC_LOAD_U32(owner.mode+offset)){discrete=offset;break;}
+    REXLOG_INFO("Experimental native camera seeded: controller {:08X}, mode {:08X}, camera {:08X}, node {:08X}; native input bound {}, continuous {}, action {:08X} UID {:08X}, selected UID {:08X}, discrete offset {}, native slot {}, actual selected UID {:08X}",owner.controller,owner.mode,owner.camera_entity,owner.camera_node,bound,continuous,binding.action,action_id,selected_id,discrete,int32_t(slot),actual_selected);
     return true;
 }
 void em2::CaptureCameraPresentationTarget(PPCContext& ctx,uint8_t* base,uint64_t tick){
@@ -244,7 +292,8 @@ void em2::RenderPresentationCamera(PPCContext& ctx,uint8_t* base,double alpha){
     RestoreContext restore(ctx);
     if(!CurrentOwnership(ctx,base)){ClearOwnership();return;}
     const auto admission=AdmitCamera(cadence.owner.mode,base);
-    if(admission==Admission::None || (admission==Admission::Focused && !FreshNeutralLook()) ||
+    FreshLook look;
+    if(admission==Admission::None || (admission==Admission::Focused && !SampleFreshLook(cadence.owner.mode,base,look)) ||
         !cadence.targets.Sample(cadence.target,cadence.target_tick,alpha)){
         ClearOwnership();return;
     }
@@ -260,13 +309,21 @@ void em2::RenderPresentationCamera(PPCContext& ctx,uint8_t* base,double alpha){
         explicit ReplayScope(bool allow_input){cadence.replaying=true;camera_input_allowed=allow_input;}
         ~ReplayScope(){cadence.replaying=false;camera_input_allowed=previous;}
     }replay(admission==Admission::Focused);
+    if(look.binding){
+        em2::NativeCameraLookResult action;
+        try{
+            if(!ReplayNativeCameraLookAction(*look.binding,look.input,ctx,base,action)){ClearOwnership();return;}
+            DispatchFreshLook(ctx,base,cadence.owner.mode,action);
+        }catch(...){ClearOwnership();throw;}
+        // A native input gate can change modes or detach a camera. Never run
+        // the saved controller on that replaced ownership after dispatch.
+        if(!CurrentOwnership(ctx,base)){ClearOwnership();return;}
+    }
     // All current native physics and script state stays in the live render
     // context. In particular, never resurrect the simulation call's stack/TLS.
     ctx.r3.u64=cadence.owner.controller;ctx.r5.u64=cadence.arguments[0];ctx.r6.u64=cadence.arguments[1];ctx.f1.f64=absolute;
-    // A fresh neutral sample releases stale cached stick input. Mouse counts
-    // continue through the native timing wrapper once during this real update.
-    if(admission==Admission::Focused)
-        for(unsigned offset:{268u,272u,280u,284u})PPC_STORE_U32(cadence.owner.mode+offset,0);
+    // Native OnLook owns its caches; mouse counts continue through the timing
+    // wrapper once during this real controller update.
     try{cadence.update(ctx,base);}catch(...){ClearOwnership();throw;}
     cadence.last_absolute=absolute;
 }
@@ -337,6 +394,36 @@ bool em2::TestCameraPresentation(){
     PPCContext update{};update.fpscr.InitHost();update.r1.u64=0x3E000;update.r13.u64=0x2345;
     update.r3.u64=controller;update.r5.u64=0x18000;update.r6.u64=0x19000;update.f1.f64=1;update.lr=0x82A14CE0;
     const auto original=update;
+    PPC_STORE_U32(0xB000,0x12345678);
+    PPC_STORE_U32(manager+704,0x12345678);
+    if(!check(GenericLookAction(mode,0xB000,base),"continuous look identity is distinct from discrete camera buttons"))return false;
+    PPC_STORE_U32(manager+44,2);PPC_STORE_U32(manager+708,0x87654321);
+    if(!check(!GenericLookAction(mode,0xB000,base),"native alternate input selection rejects an inactive continuous action"))return false;
+    PPC_STORE_U32(manager+708,0x12345678);
+    if(!check(GenericLookAction(mode,0xB000,base),"continuous look follows the original engine's alternate input selector"))return false;
+    PPC_STORE_U32(manager+44,0);PPC_STORE_U32(controller+16,1);
+    if(!check(!GenericLookAction(mode,0xB000,base),"unverified secondary-user action remapping retains native cadence"))return false;
+    PPC_STORE_U32(controller+16,0);
+    for(unsigned offset:discrete_look_ids){
+        PPC_STORE_U32(mode+offset,0x12345678);
+        if(!check(!GenericLookAction(mode,0xB000,base),"discrete pitch/mode actions cannot run at presentation rate"))return false;
+        PPC_STORE_U32(mode+offset,0);
+    }
+    {
+        const auto saved=update;const auto csr=_mm_getcsr();const auto error=GetLastError();
+        em2::NativeCameraLookResult look{.25f,-.75f,0xB100,0xB000};
+        DispatchFreshLook(update,base,mode,look,+[](PPCContext& call,uint8_t* base){
+            PPC_STORE_U32(0xB200,call.r3.u32);PPC_STORE_U32(0xB204,call.r4.u32);PPC_STORE_U32(0xB208,call.r5.u32);
+            PPC_STORE_U32(0xB20C,std::bit_cast<uint32_t>(float(call.f1.f64)));PPC_STORE_U32(0xB210,std::bit_cast<uint32_t>(float(call.f2.f64)));
+            call.r3.u64=0xDEADBEEF;call.f1.f64=99;SetLastError(123);_mm_setcsr(_mm_getcsr()^0x2000);
+        });
+        if(!check(PPC_LOAD_U32(0xB200)==mode && PPC_LOAD_U32(0xB204)==look.event && PPC_LOAD_U32(0xB208)==look.action &&
+            Float(0xB20C,base)==look.x && Float(0xB210,base)==look.y && !std::memcmp(&update,&saved,sizeof(update)) &&
+            _mm_getcsr()==csr && GetLastError()==error,"normal look handler receives current mode/event/action and native axes without leaking caller/FP/environment changes"))return false;
+        try{DispatchFreshLook(update,base,mode,look,+[](PPCContext& call,uint8_t*){call.r3.u64=99;SetLastError(123);throw std::runtime_error("look dispatch unwind");});return false;}
+        catch(const std::runtime_error&){}
+        if(!check(!std::memcmp(&update,&saved,sizeof(update)) && _mm_getcsr()==csr && GetLastError()==error,"normal input handler exceptions restore the complete render caller"))return false;
+    }
     constexpr std::array<unsigned,5> parent_overrides{452,568,576,578,952};
     for(unsigned guard=0;guard<11;++guard){
         setup();
@@ -427,6 +514,6 @@ bool em2::TestCameraPresentation(){
         if(guard==6){admission.neutral=false;BeginFrame(true,true,60,1./60);RenderPresentationCamera(update,base,.5);admission.neutral=true;}
         if(!check(!cadence.ready && !PresentationOwnsCameraNode(0x8000),"disable, native timing, cap, stall, pause, focus and unverified analog intent release camera ownership"))return false;
     }
-    REXLOG_INFO("Native presentation camera passed {} ownership/roster, actual registry, 40/60/90/120/144/240-Hz cadence, target-phase, timestamp, caller/clock, nesting and unwind checks; analog float injection remains disabled pending native-action audit",checks);
+    REXLOG_INFO("Native presentation camera passed {} ownership/roster, actual registry, 40/60/90/120/144/240-Hz cadence, target-phase, timestamp, native look dispatch, discrete-action exclusion, caller/clock, nesting and unwind checks; focused input feel still requires gameplay validation",checks);
     return true;
 }

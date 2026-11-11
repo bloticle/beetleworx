@@ -6,6 +6,7 @@
 #include <algorithm>
 #include "camera_projection.h"
 #include "camera_cadence.h"
+#include "camera_look.h"
 #include "pc_settings.h"
 #include "online.h"
 #include "online_runtime.h"
@@ -474,6 +475,8 @@ void em2::ObserveNativeCameraEntity(const PPCContext& ctx,uint8_t* base) noexcep
 }
 
 PPC_FUNC_IMPL(sub_82A5D278) {
+    if(ctx.lr==0x827C439C)
+        em2::ObserveNativeCameraLookBinding(ctx.r3.u32,ctx.r4.u32,ctx.r5.u32,base);
     // Identify the engine action dispatcher without synthesizing input or
     // changing the native listener's arguments, side effects or ABI clobbers.
     if(REXCVAR_GET(em2_trace_camera)) {
@@ -496,8 +499,8 @@ PPC_FUNC_IMPL(sub_82A5D278) {
                     if(ctx.lr==0x827C439C && action>=4096 && uint64_t(action)+436<=0x100000000ull &&
                         em2::GuestReadBatch::Readable(base+action,436)) {
                         const auto count=PPC_LOAD_U32(action+408);
-                        REXLOG_INFO("Native camera action {:08X}: kind {}, curve mode {}, bindings {}, deadzone {:.9f}, saturation {:.9f}, exponent {:.9f}, gain {:.9f}",
-                            action,PPC_LOAD_U32(action+80),PPC_LOAD_U32(action+432),count,
+                        REXLOG_INFO("Native camera action {:08X}: UID {:08X}, kind {}, curve mode {}, bindings {}, deadzone {:.9f}, saturation {:.9f}, exponent {:.9f}, gain {:.9f}",
+                            action,PPC_LOAD_U32(action),PPC_LOAD_U32(action+80),PPC_LOAD_U32(action+432),count,
                             ReadFloat(action+416,base),ReadFloat(action+420,base),ReadFloat(action+424,base),ReadFloat(action+428,base));
                         if(count<=10)for(unsigned i=0;i<count;++i) {
                             const auto binding=action+88+i*32;

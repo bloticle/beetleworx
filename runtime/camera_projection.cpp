@@ -2,6 +2,7 @@
 #include "camera_projection.h"
 #include "camera_timing.h"
 #include "camera_cadence.h"
+#include "guest_read_batch.h"
 #include "pc_settings.h"
 #include "online.h"
 #include "online_runtime.h"
@@ -23,6 +24,34 @@ PPC_EXTERN_FUNC(sub_8290E320);
 namespace {
 struct ProjectionScope {uint32_t controller=0;float width=1;};
 thread_local ProjectionScope projection_scope;
+struct ViewCamera {uint32_t manager=0,registry=0,controller=0,handle=0,entity=0,component=0,node=0;};
+thread_local std::array<ViewCamera,2> view_cameras{};
+thread_local uint32_t active_view_controller=0;
+struct ViewHostState {DWORD error=GetLastError();unsigned csr=_mm_getcsr();~ViewHostState(){_mm_setcsr(csr);SetLastError(error);}};
+bool ViewReadable(uint32_t address,size_t size,uint8_t* base){
+    return address>=4096 && uint64_t(address)+size<=0x100000000ull && em2::GuestReadBatch::Readable(base+address,size);
+}
+int ViewControllerSlot(uint32_t controller,uint32_t manager,uint8_t* base){
+    if(!ViewReadable(manager,352,base) || !ViewReadable(controller,28,base) || PPC_LOAD_U32(controller)!=0x82112778)return -1;
+    if(PPC_LOAD_U32(manager+28)==controller)return 0;
+    if(PPC_LOAD_U32(manager+348)==controller)return 1;
+    return -1;
+}
+void ObserveViewEntity(uint32_t controller,uint32_t entity,uint8_t* base){
+    ViewHostState preserve;
+    em2::GuestReadBatch reads;
+    const auto manager=PPC_LOAD_U32(0x833DAB60),registry=PPC_LOAD_U32(0x833DA7E4);
+    const int slot=ViewControllerSlot(controller,manager,base);
+    if(slot<0 || !registry || !PPC_LOAD_U32(controller+20) || !ViewReadable(entity,48,base) ||
+        PPC_LOAD_U32(entity)!=0x8208D908 || PPC_LOAD_U32(entity+44)!=2)return;
+    const auto table=PPC_LOAD_U32(entity+36);
+    if(!ViewReadable(table,8,base))return;
+    const auto component=PPC_LOAD_U32(table+4);
+    if(!ViewReadable(component,84,base) || PPC_LOAD_U32(component)!=0x820D8970)return;
+    const auto node=PPC_LOAD_U32(component+80);
+    if(!ViewReadable(node,512,base))return;
+    view_cameras[slot]={manager,registry,controller,PPC_LOAD_U32(controller+20),entity,component,node};
+}
 bool NormalOwnedCamera(uint32_t controller,uint8_t* base) {
     const auto manager=PPC_LOAD_U32(0x833DAB60);
     if(!controller || !manager)return false;
@@ -54,8 +83,27 @@ void CameraUpdate(PPCContext& ctx,uint8_t* base,float width,PPCFunc* update,bool
 bool em2::IsNormalGameplayCamera(uint32_t controller,uint8_t* base) {
     return NormalOwnedCamera(controller,base);
 }
+void em2::ResetGameplayViewCameras() noexcept {view_cameras={};}
+bool em2::IsGameplayViewCameraNode(uint32_t node,uint8_t* base) noexcept {
+    ViewHostState preserve;
+    em2::GuestReadBatch reads;
+    for(unsigned slot=0;slot<view_cameras.size();++slot){
+        const auto& view=view_cameras[slot];
+        if(view.node!=node || !node || PPC_LOAD_U32(0x833DAB60)!=view.manager || PPC_LOAD_U32(0x833DA7E4)!=view.registry ||
+            ViewControllerSlot(view.controller,view.manager,base)!=int(slot) || PPC_LOAD_U32(view.controller+20)!=view.handle ||
+            !ViewReadable(view.entity,48,base) || PPC_LOAD_U32(view.entity)!=0x8208D908 || PPC_LOAD_U32(view.entity+44)!=2 ||
+            !ViewReadable(view.component,84,base) || PPC_LOAD_U32(view.component)!=0x820D8970 ||
+            PPC_LOAD_U32(view.component+80)!=node)continue;
+        const auto table=PPC_LOAD_U32(view.entity+36);
+        if(!ViewReadable(table,8,base) || PPC_LOAD_U32(table+4)!=view.component)continue;
+        return true;
+    }
+    return false;
+}
 namespace {
 void ProjectedCamera(PPCContext& ctx,uint8_t* base){
+    struct ViewScope {uint32_t saved=active_view_controller;~ViewScope(){active_view_controller=saved;}}view_scope;
+    active_view_controller=ctx.r3.u32;
     em2::ObserveNativeCameraUpdate(ctx,base);
     const auto width=em2::GameplayViewWidth();
     bool synchronized=false;
@@ -72,6 +120,8 @@ PPC_FUNC_IMPL(sub_828510C8) {
 PPC_FUNC_IMPL(sub_8290E320) {
     __imp__sub_8290E320(ctx,base);
     em2::ObserveNativeCameraEntity(ctx,base);
+    if(ctx.lr==0x828515A8 && active_view_controller)
+        ObserveViewEntity(active_view_controller,ctx.r30.u32,base);
     // This call feeds the camera entity's native FOV attribute setter (virtual
     // +276), which then updates the camera projection. Leave authored/cached
     // pose data untouched so widening cannot accumulate on subsequent ticks.
@@ -91,7 +141,8 @@ void ThrowProjectionFixture(PPCContext&,uint8_t*) {throw std::runtime_error("pro
 bool em2::TestNativeCameraProjection() {
     auto* base=static_cast<uint8_t*>(VirtualAlloc(nullptr,0x100000000ull,MEM_RESERVE,PAGE_NOACCESS));
     struct Restore {uint8_t* base;unsigned csr=_mm_getcsr();ProjectionScope previous=projection_scope;
-        ~Restore(){projection_scope=previous;_mm_setcsr(csr);if(base)VirtualFree(base,0,MEM_RELEASE);}} restore{base};
+        decltype(view_cameras) views=view_cameras;uint32_t active=active_view_controller;
+        ~Restore(){projection_scope=previous;view_cameras=views;active_view_controller=active;_mm_setcsr(csr);if(base)VirtualFree(base,0,MEM_RELEASE);}} restore{base};
     if(!base || !VirtualAlloc(base,0x20000,MEM_COMMIT,PAGE_READWRITE) ||
        !VirtualAlloc(base+0x833D0000,0x10000,MEM_COMMIT,PAGE_READWRITE))return false;
     constexpr uint32_t controller=0x2000,mode=0x4000,manager=0x6000,second=0x8000,second_mode=0xA000;
@@ -177,6 +228,26 @@ bool em2::TestNativeCameraProjection() {
     projection_scope={second,1.25f};PPCContext ctx{};ctx.r3.u64=controller;
     try{CameraUpdate(ctx,base,1.5f,ThrowProjectionFixture);return false;}catch(const std::runtime_error&){}
     if(!check(projection_scope.controller==second && projection_scope.width==1.25f,"unwinding restores the previous camera scope"))return false;
+    setup();ResetGameplayViewCameras();
+    const auto bind_view=[&](uint32_t owner,uint32_t entity,uint32_t component,uint32_t node){
+        PPC_STORE_U32(0x833DA7E4,0x1234);PPC_STORE_U32(owner+20,entity);
+        PPC_STORE_U32(entity,0x8208D908);PPC_STORE_U32(entity+44,2);PPC_STORE_U32(entity+36,entity+128);
+        PPC_STORE_U32(entity+132,component);PPC_STORE_U32(component,0x820D8970);PPC_STORE_U32(component+80,node);
+        ObserveViewEntity(owner,entity,base);
+    };
+    bind_view(controller,0xC000,0xD000,0xE000);bind_view(second,0x12000,0x13000,0x14000);
+    if(!check(IsGameplayViewCameraNode(0xE000,base) && IsGameplayViewCameraNode(0x14000,base) &&
+        !IsGameplayViewCameraNode(0xF000,base),"both exact owned display views interpolate while unrelated shadow/reflection cameras remain native"))return false;
+    for(unsigned guard=0;guard<6;++guard){
+        setup();ResetGameplayViewCameras();bind_view(controller,0xC000,0xD000,0xE000);
+        if(guard==0)PPC_STORE_U32(0x833DA7E4,0x5678);
+        if(guard==1)PPC_STORE_U32(manager+28,second);
+        if(guard==2)PPC_STORE_U32(controller+20,0xC100);
+        if(guard==3)PPC_STORE_U32(0xD000+80,0xF000);
+        if(guard==4)PPC_STORE_U32(0xC000+132,0xD100);
+        if(guard==5)ResetGameplayViewCameras();
+        if(!check(!IsGameplayViewCameraNode(0xE000,base),"load, controller, handle, native component/node replacement and reset invalidate view ownership"))return false;
+    }
     REXLOG_INFO("Native offline gameplay projection passed {} normal FOV/control-mode comparisons, 13 ownership/script/callsite gates, invalid authored values, independent nested players, synchronized-session bypass and scope unwinding; actual rendered framing still needs gameplay acceptance",comparisons);
     return true;
 }

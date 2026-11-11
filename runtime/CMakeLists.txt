@@ -221,7 +221,7 @@ add_dependencies(EM2Recomp em2_kernel_library)
 target_sources(EM2Recomp PRIVATE native_random.cpp)
 target_sources(EM2Recomp PRIVATE physics_timing.cpp)
 target_sources(EM2Recomp PRIVATE character_timing.cpp)
-target_sources(EM2Recomp PRIVATE camera_projection.cpp camera_targets.cpp camera_cadence.cpp)
+target_sources(EM2Recomp PRIVATE camera_projection.cpp camera_targets.cpp camera_cadence.cpp camera_look.cpp)
 target_sources(EM2Recomp PRIVATE register_bank.cpp)
 
 set(EM2_NATIVE_TYPE_CHECK_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/native_type_check_generated.cpp")

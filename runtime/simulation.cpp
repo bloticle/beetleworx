@@ -6,6 +6,8 @@
 #include "simulation.h"
 #include "camera_targets.h"
 #include "camera_cadence.h"
+#include "camera_projection.h"
+#include "camera_look.h"
 #include "pc_settings.h"
 #include "shadow_resize.h"
 #include "render_options.h"
@@ -1398,6 +1400,7 @@ void StartTick(uint8_t* base,bool agreed=false,uint64_t input_tick=0) {
 
 void ResetSimulationHistory(PPCContext& ctx,uint8_t* base) {
     em2::ResetCameraPresentation();
+    em2::ResetGameplayViewCameras();
     recording_epoch.store(0,std::memory_order_release);
     em2::interpolated_nodes.store(0,std::memory_order_relaxed);
     in_tick=false;
@@ -1518,6 +1521,11 @@ void ApplyTransforms(PPCContext& ctx,uint8_t* base,bool restore) {
                 WriteTransform(object,h.saved,base); h.applied=false;
             } else {
                 if(!h.moving) continue;
+                // Shadow/reflection views have native projector constants and
+                // resource updates on the simulation clock. Blending only
+                // their NiCamera pose makes the depth map disagree with its
+                // receiver matrix. Interpolate owned display cameras only.
+                if(h.camera && !em2::IsGameplayViewCameraNode(object,base))continue;
                 if(em2::PresentationOwnsCameraNode(object))continue;
                 h.saved=ReadTransform(object,base);
                 WriteTransform(object,InterpolateScene(h,cached?alpha:float(RenderAlpha())),base);
@@ -2203,6 +2211,7 @@ static bool TestNativeClockIntervals() {
 bool TestSimulation() {
     if(!TestCameraTargetHistory())return false;
     if(!TestCameraPresentation())return false;
+    if(!TestNativeCameraLookAction())return false;
     if(!TestRandomFailureHistory())return false;
     if(!TestRenderProfiling() || !TestNativeClockIntervals() || !TestPreparedSkinInterpolation())return false;
     bool ok=true;
@@ -2436,6 +2445,11 @@ bool TestSimulation() {
         check(ReadTransform(256,base)==recorded,"reference and cached render entries both restore simulation pose");
     }
     REXCVAR_SET(em2_cache_scene_render_entries,saved_render_cache);_mm_setcsr(before_parity_flags);
+    history.at(256).camera=true;
+    ApplyTransforms(context,base,false);
+    check(ReadTransform(256,base)==recorded && !history.at(256).applied,
+        "offscreen shadow/reflection camera poses stay native instead of disagreeing with cached projector constants");
+    ApplyTransforms(context,base,true);history.at(256).camera=false;
     {std::lock_guard lock(history_mutex);auto [entry,inserted]=history.emplace(1024,TransformHistory{});entry->second.moving=true;moving_objects.push_back({1024,&entry->second});ForgetTransform(1024);}
     check(!history.contains(1024) && moving_objects.size()==1 && moving_objects.front().object==256,"native detach removes cached pointer before history destruction");
     history.at(256).previous=next;

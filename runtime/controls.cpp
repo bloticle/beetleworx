@@ -571,6 +571,12 @@ void EndSynchronizedControls() {
     for(auto& pending:pending_keys) pending.fill(false);
     for(auto& valid:latched_valid) valid.fill(false);
 }
+bool ConvertNativeDeviceLook(const LiveLookInput& look,float deadzone,std::array<float,2>& output) {
+    output={};
+    if(!std::isfinite(deadzone) || deadzone<0 || deadzone>=1)return false;
+    output={NativeDeviceLookAxis(look.x,false,deadzone),NativeDeviceLookAxis(look.y,true,deadzone)};
+    return true;
+}
 bool SampleLiveLook(rex::input::InputSystem& input,unsigned user,LiveLookInput& out) {
     out={};uint64_t epoch;
     auto allowed=[&] {

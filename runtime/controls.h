@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <array>
 #include <filesystem>
 #include <memory>
 namespace rex::input { class InputDriver; class InputSystem; struct X_INPUT_STATE; }
@@ -38,6 +39,9 @@ struct LiveLookInput {
     int16_t x=0,y=0;
     bool operator==(const LiveLookInput&) const = default;
 };
+// Device-axis stage only: raw SDK deadzone gate, authored [-100,100]
+// integer output and .01 scale. Action binding/response curves are separate.
+bool ConvertNativeDeviceLook(const LiveLookInput&,float native_deadzone,std::array<float,2>&);
 struct MouseLookFactors {float x=1,y=1;};
 MouseLookFactors MouseLookStrength();
 bool ControlBindingsOpen();

@@ -40,7 +40,7 @@ $check = Join-Path (Resolve-Path analysis) ('live-update-' + [Guid]::NewGuid().T
 
 This downloads the published first demo and its newest update through the native WinHTTP transport, verifies their hashes, and applies the normal transactional installer to an isolated copy. It checks that user-file markers survive. It does not launch either downloaded executable or update the normal installation. This network check is opt-in and is not part of the offline regression suite.
 
-The separate native camera clock is experimental and disabled by default. `--em2_present_camera=true` opts into presentation-rate updates for the primary offline normal gameplay camera above 30 FPS. World simulation stays at 30 Hz; camera position queries use the same interpolation phase as rendered characters. Scripted cameras, online sessions and unverified analog input retain the original update path. Controller action curves and focused movement still need validation.
+The separate native camera clock is experimental and disabled by default. `--em2_present_camera=true` opts into presentation-rate updates for the primary offline normal gameplay camera above 30 FPS. World simulation stays at 30 Hz; camera position queries use the same interpolation phase as rendered characters. Fresh right-stick samples pass through the original action binding, radial response and power-curve code, then the native look handler's input gates. Scripted cameras, online sessions and unsupported input mappings retain the original update path. Discrete camera-button actions keep their authored cadence. Focused movement and camera feel still need gameplay validation.
 
 For a passive developer capture using an isolated copy of the current save and settings:
 
@@ -49,3 +49,5 @@ For a passive developer capture using an isolated copy of the current save and s
 ```
 
 The background diagnostic requires all three camera switches, zero cached stick intent and no pending mouse motion. It does not sample or consume background input. Its measured camera cadence does not establish focused control feel. The regression suite also checks device-axis conversion against the original producer, raw getter and action consumer for every int16 value on both axes across six deadzones; action binding and curve validation is separate.
+
+With `-FinalDemoAssets`, timing captures keep only camera summaries. Add `-DetailedMotionTrace` for per-tick actor, mesh and physics diagnostics; that logging can affect frame pacing.

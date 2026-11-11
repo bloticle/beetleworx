@@ -7,7 +7,13 @@ namespace em2 {
 struct CameraTargetPose {
     uint32_t registry=0,handle=0,entity=0,component=0;
     std::array<float,3> position{};
+    uint32_t scenegraph=0,root=0;
+    std::array<float,3> physical_position{};
 };
+
+// Resolve the actor's owned JPSSceneGraphComponent and its native NiAV root.
+// Capture its completed world position, retaining physical data for jump guards.
+bool ReadCameraVisualTarget(CameraTargetPose&,uint8_t* base);
 
 // Camera queries need the same simulation interval as the visible character.
 // The native entity component remains authoritative outside those queries.
