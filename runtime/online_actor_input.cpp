@@ -1,6 +1,7 @@
 #include "online_actor_input.h"
 #include "online_actor_reference.h"
 #include "online_actor_frames.h"
+#include "online_actor_death.h"
 #include "guest_read_batch.h"
 #include "ppc_context.h"
 #include <rex/logging.h>
@@ -225,6 +226,12 @@ bool em2::net::SetOwnedActorInputEnabled(uint64_t peer,bool enabled){std::lock_g
 void em2::net::UnregisterOwnedActorInput(uint64_t peer){std::lock_guard lock(mutex);if(owner_thread!=GetCurrentThreadId())return;for(auto& actor:actors)if(actor.peer==peer && peer)actor={};for(auto& entry:basis_entries)if(entry.actor.peer==peer)entry={};}
 void em2::net::ResetOwnedActorInputs(){std::lock_guard lock(mutex);if(owner_thread && owner_thread!=GetCurrentThreadId())return;actors={};basis_entries={};basis_clock={};owner_thread=0;}
 bool em2::net::OwnedActorInputFor(uint64_t peer,PPCContext& ctx,uint8_t* base,Actor& output){Environment preserve;output={};auto found=ByPeer(peer);if(!found || !Owner() || !Current(*found,ctx,base))return false;output=*found;return true;}
+bool em2::net::OwnedActorInputForController(uint32_t controller,PPCContext& ctx,uint8_t* base,Actor& output){
+    ContextScope preserve(ctx);output={};if(!Owner())return false;
+    std::optional<Actor> found;
+    {std::lock_guard lock(mutex);for(const auto& actor:actors)if(actor.peer && actor.controller==controller){found=actor;break;}}
+    if(!found || !Current(*found,ctx,base))return false;output=*found;return true;
+}
 bool em2::net::BeginOwnedActorBasisTick(uint32_t registry,uint64_t tick,PPCContext&,uint8_t* base){
     Environment preserve;if(!Owner() || basis_update || !BasisWorldReady(registry,base))return false;
     std::lock_guard lock(mutex);
@@ -776,6 +783,7 @@ bool em2::net::TestOwnedActorInput(){
                 ~PreserveFixtureStages(){basis_clock=clock;basis_entries=entries;}} preserve_fixture_stages;
             if(!TestOwnedMovementFrames(ctx,base,a.peer,b.peer,FixtureBoundedOwnedController))return false;
         }
+        if(!TestOwnedActorDeaths(ctx,base,a.peer,b.peer))return false;
         // Restore initial per-peer cache values through ORIGINAL base callback
         // for the following historical lifecycle assertions, not manual writes.
         if(NativeCallbackFixture(a.peer,first,peer_a,ctx,base,FixtureBase)!=Result::Applied)return false;

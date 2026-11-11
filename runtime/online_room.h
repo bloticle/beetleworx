@@ -10,7 +10,7 @@ namespace em2::net {
 // Native movement values, not raw stick axes. Ground-plane basis is captured
 // with the command; no receiving peer consults its local camera for this input.
 using RoomCommand=RoomMovement;
-enum class RoomState {Idle,Listening,Connecting,Lobby,Running,Disconnected,Error};
+enum class RoomState {Idle,Listening,Connecting,Lobby,Loading,Running,Disconnected,Error};
 // Single-thread-owned direct TCP transport. Up to 16 peers is a transport
 // capability only; Host capacity MUST come from the actual gameplay adapter.
 // Caller supplies a verified, already-installed common checkpoint identity.
@@ -29,6 +29,11 @@ public:
     bool SetAppearance(LobbyCharacter,uint8_t color);
     bool SetReady(bool);
     bool Start();
+    // Start only freezes the roster and enters Loading. The caller explicitly
+    // asserts native world load + actor admission with a common nonzero token.
+    // No input/frame is admitted until all frozen peers assert the same token.
+    // Repeating the same local token is idempotent; changing it is rejected.
+    bool WorldReady(const std::array<uint8_t,32>& canonical_world_token);
     // Submit exactly next_submit_tick(), which includes negotiated input delay.
     // The first input_delay ticks contain a common neutral command. Success
     // queues intent; only a validated TakeFrame authorizes a simulation tick.

@@ -17,7 +17,8 @@ using Clock=std::chrono::steady_clock;
 using Bytes=std::vector<uint8_t>;
 constexpr size_t Window=64,MaxPacket=8192,MaxQueued=256*1024;
 constexpr auto Timeout=std::chrono::seconds(15);
-enum class Wire:uint8_t {Hello=1,Welcome,Profile,Snapshot,Start,Input,Frame,Ping,Pong,ProfileReply};
+constexpr auto StartupTimeout=std::chrono::seconds(180);
+enum class Wire:uint8_t {Hello=1,Welcome,Profile,Snapshot,Start,Input,Frame,Ping,Pong,ProfileReply,WorldReady,Activate};
 bool Winsock(){
     struct Startup {bool ok=false;Startup(){WSADATA data{};ok=WSAStartup(MAKEWORD(2,2),&data)==0;}~Startup(){if(ok)WSACleanup();}};
     static Startup startup;return startup.ok;
@@ -126,8 +127,11 @@ struct Room::Impl {
     std::map<uint64_t,RoomCommand> echoes;
     std::deque<RoomFrame> frames;
     Clock::time_point progress=Clock::now();
+    Clock::time_point loading_started{};
+    std::optional<std::array<uint8_t,32>> local_world;
+    std::array<std::optional<std::array<uint8_t,32>>,kOnlineRoomCapacity> worlds;
     ~Impl(){Close(listener);}
-    bool Active()const{return state==RoomState::Listening || state==RoomState::Connecting || state==RoomState::Lobby || state==RoomState::Running;}
+    bool Active()const{return state==RoomState::Listening || state==RoomState::Connecting || state==RoomState::Lobby || state==RoomState::Loading || state==RoomState::Running;}
     void Fail(std::string why){error=std::move(why);state=RoomState::Error;Close(listener);connections.clear();inputs.clear();echoes.clear();frames.clear();}
     bool Queue(Connection& c,const Bytes& p){if(c.Queue(p))return true;Fail("Room send queue exceeded its bounded capacity");return false;}
     bool Broadcast(const Bytes& p){for(auto& c:connections)if(c->welcomed && !c->Queue(p)){Fail("Room broadcast queue full");return false;}return true;}
@@ -135,14 +139,26 @@ struct Room::Impl {
         lobby=Snapshot(roster);auto p=Packet(Wire::Snapshot);U64(p,0,4);U8(p,0);WriteRoster(p,lobby);
         return Broadcast(p);
     }
-    void BeginRunning(){
+    void BeginLoading(Clock::time_point now){state=RoomState::Loading;loading_started=now;Close(listener);}
+    void BeginRunning(Clock::time_point now){
         state=RoomState::Running;submit_next=id.first_tick+id.input_delay;frame_next=consume_next=id.first_tick;
-        progress=Clock::now();Close(listener);
-        for(auto& c:connections)c->wire_next=submit_next;
+        progress=now;Close(listener);
+        for(auto& c:connections){c->wire_next=submit_next;c->received=c->pinged=now;}
         for(uint64_t t=id.first_tick;t<submit_next;++t){
             if(host)for(const auto& p:lobby.players)inputs[t][p.peer]=Neutral();
             else echoes[t]=Neutral();
         }
+    }
+    uint16_t PlayerMask()const{uint16_t mask=0;for(const auto& p:lobby.players)mask|=uint16_t(1u<<(p.peer-1));return mask;}
+    bool ActivateIfReady(Clock::time_point now){
+        if(!host || state!=RoomState::Loading || !local_world)return true;
+        for(const auto& p:lobby.players){
+            const auto& token=worlds[p.peer-1];if(token && *token!=*local_world){Fail("Online peers loaded different native worlds");return false;}
+        }
+        for(const auto& p:lobby.players)if(!worlds[p.peer-1])return true;
+        auto packet=Packet(Wire::Activate);packet.insert(packet.end(),local_world->begin(),local_world->end());
+        U64(packet,lobby.revision);U64(packet,PlayerMask(),2);U64(packet,id.first_tick);
+        if(!Broadcast(packet))return false;BeginRunning(now);return true;
     }
     bool CompleteFrames(Clock::time_point now){
         while(!frame_exhausted && frames.size()<Window){
@@ -196,7 +212,7 @@ struct Room::Impl {
             if(!r.Done())return false;if(kind==Wire::Ping){auto p=Packet(Wire::Pong);return c.Queue(p);}return true;
         }
         if(kind==Wire::Profile){
-            if(!host || (state!=RoomState::Lobby && state!=RoomState::Running))return false;
+            if(!host || (state!=RoomState::Lobby && state!=RoomState::Loading && state!=RoomState::Running))return false;
             const auto sequence=uint32_t(r.Number(4));const auto action=r.Byte();std::string name;LobbyCharacter character{};uint8_t color=0,ready=0;
             if(action==1)name=r.String();else if(action==2){character=LobbyCharacter(r.Byte());color=r.Byte();}else if(action==3)ready=r.Byte();else return false;
             if(!r.Done() || ready>1 || sequence!=c.profile_next || !sequence)return false;
@@ -204,13 +220,13 @@ struct Room::Impl {
             // Requests already in flight when Start freezes the roster receive
             // a normal rejection. They cannot mutate the running room or turn
             // a legitimate Ready/Start race into a protocol disconnect.
-            const auto result=state==RoomState::Running?LobbyResult::Locked:Apply(c.peer,action,name,character,color,ready!=0);
+            const auto result=state!=RoomState::Lobby?LobbyResult::Locked:Apply(c.peer,action,name,character,color,ready!=0);
             if(state==RoomState::Lobby && !Publish())return true;
             auto reply=Packet(Wire::ProfileReply);U64(reply,sequence,4);U8(reply,uint8_t(result));U64(reply,lobby.revision);
             return c.Queue(reply);
         }
         if(kind==Wire::ProfileReply){
-            if(host || (state!=RoomState::Lobby && state!=RoomState::Running))return false;
+            if(host || (state!=RoomState::Lobby && state!=RoomState::Loading && state!=RoomState::Running))return false;
             const auto sequence=uint32_t(r.Number(4));const auto result=r.Byte();const auto revision=r.Number(8);
             if(!r.Done() || !pending_profile || sequence!=pending_profile || revision!=lobby.revision || result>uint8_t(LobbyResult::NotReady))return false;
             pending_profile=0;profile_result=LobbyResult(result);return true;
@@ -228,7 +244,22 @@ struct Room::Impl {
             auto snapshot=ReadRoster(r);if(!r.Done() || !snapshot || !snapshot->locked || snapshot->players.size()<2 || snapshot->capacity!=lobby.capacity || snapshot->players.size()!=lobby.players.size())return false;
             auto expected=lobby;expected.locked=true;expected.revision=snapshot->revision;
             if(*snapshot!=expected || snapshot->revision<=lobby.revision)return false;
-            lobby=std::move(*snapshot);BeginRunning();return true;
+            lobby=std::move(*snapshot);BeginLoading(now);return true;
+        }
+        if(kind==Wire::WorldReady){
+            if(!host || (state!=RoomState::Loading && state!=RoomState::Running))return false;
+            std::array<uint8_t,32> token{};for(auto& b:token)b=r.Byte();
+            if(!r.Done() || !std::any_of(token.begin(),token.end(),[](auto b){return b!=0;}))return false;
+            auto& previous=worlds[c.peer-1];if(previous && *previous!=token)return false;
+            if(state==RoomState::Running)return previous && *previous==token;
+            previous=token;return ActivateIfReady(now);
+        }
+        if(kind==Wire::Activate){
+            if(host || state!=RoomState::Loading || !local_world)return false;
+            std::array<uint8_t,32> token{};for(auto& b:token)b=r.Byte();
+            const auto revision=r.Number(8),mask=r.Number(2),tick=r.Number(8);
+            if(!r.Done() || token!=*local_world || revision!=lobby.revision || mask!=PlayerMask() || tick!=id.first_tick)return false;
+            BeginRunning(now);return true;
         }
         if(kind==Wire::Input){
             if(!host || state!=RoomState::Running)return false;
@@ -275,6 +306,7 @@ bool Room::Join(const Identity& id,std::string_view address,uint16_t port,std::s
 }
 void Room::Poll(Clock::time_point now){
     auto& p=*impl_;if(!p.Active())return;
+    if(p.state==RoomState::Loading && now-p.loading_started>StartupTimeout){p.Fail("Online native world startup exceeded its 180-second deadline");return;}
     if(p.host && p.listener!=INVALID_SOCKET){
         // Bounded work per poll, including unauthenticated sockets.
         for(unsigned i=0;i<16;++i){auto socket=accept(p.listener,nullptr,nullptr);if(socket==INVALID_SOCKET)break;
@@ -306,9 +338,9 @@ void Room::Poll(Clock::time_point now){
             if(alive && c.welcomed && now-c.pinged>=std::chrono::seconds(2)){auto ping=Packet(Wire::Ping);alive=c.Queue(ping);c.pinged=now;}
             if(alive)alive=c.Flush();
         }
-        if(now-c.received>Timeout)alive=false;
+        if(now-c.received>(p.state==RoomState::Loading?StartupTimeout:Timeout))alive=false;
         if(!alive){
-            if(!p.host || (c.welcomed && p.state==RoomState::Running)){p.Fail("Online room participant disconnected, timed out, or sent invalid data; simulation stopped");return;}
+            if(!p.host || (c.welcomed && (p.state==RoomState::Loading || p.state==RoomState::Running))){p.Fail("Online room participant disconnected, timed out, or sent invalid data; simulation stopped");return;}
             const auto departed=c.welcomed?c.peer:0;
             p.connections.erase(p.connections.begin()+i);
             if(departed){
@@ -333,7 +365,17 @@ bool Room::Start(){
     if(p.roster.Start()!=LobbyResult::Ok)return false;p.lobby=Snapshot(p.roster);
     // Pending unadmitted TCP sockets do not become gameplay participants.
     for(size_t i=0;i<p.connections.size();)if(!p.connections[i]->welcomed)p.connections.erase(p.connections.begin()+i);else ++i;
-    auto start=Packet(Wire::Start);WriteRoster(start,p.lobby);if(!p.Broadcast(start))return false;p.BeginRunning();return true;
+    auto start=Packet(Wire::Start);WriteRoster(start,p.lobby);if(!p.Broadcast(start))return false;p.BeginLoading(Clock::now());return true;
+}
+bool Room::WorldReady(const std::array<uint8_t,32>& token){
+    auto& p=*impl_;
+    if(p.state!=RoomState::Loading && p.state!=RoomState::Running)return false;
+    if(p.local_world)return *p.local_world==token;
+    if(p.state!=RoomState::Loading || !std::any_of(token.begin(),token.end(),[](auto b){return b!=0;}))return false;
+    const auto now=Clock::now();if(now-p.loading_started>StartupTimeout){p.Fail("Online native world startup exceeded its 180-second deadline");return false;}
+    p.local_world=token;
+    if(p.host){p.worlds[p.peer-1]=token;return p.ActivateIfReady(now);}
+    auto packet=Packet(Wire::WorldReady);packet.insert(packet.end(),token.begin(),token.end());return p.Queue(*p.connections.front(),packet);
 }
 bool Room::SubmitLocal(uint64_t tick,const RoomCommand& command){
     auto& p=*impl_;if(p.state!=RoomState::Running || p.submit_exhausted || tick!=p.submit_next || tick<p.consume_next || tick-p.consume_next>=Window || !ValidCommand(command))return false;
@@ -363,6 +405,7 @@ bool TestOnlineRoom(){
     // save paths, actor creation, GUI or separate executable are involved.
     bool ok=true;unsigned checks=0;auto check=[&](bool value,const char* why){++checks;if(!value){REXLOG_ERROR("Online room: {}",why);ok=false;}return value;};
     Identity id;id.session[0]=7;id.build[0]=1;id.content[0]=2;id.checkpoint[0]=3;id.first_tick=100;id.input_delay=2;
+    std::array<uint8_t,32> world{};world[0]=9;
     std::vector<std::unique_ptr<Room>> rooms;
     auto pump=[&](auto done){const auto deadline=Clock::now()+std::chrono::seconds(5);do{for(auto& r:rooms)r->Poll();if(done())return true;std::this_thread::sleep_for(std::chrono::milliseconds(1));}while(Clock::now()<deadline);return false;};
     auto setup=[&](unsigned count){rooms.clear();rooms.push_back(std::make_unique<Room>());if(!rooms[0]->Host(id,"127.0.0.1",0,uint8_t(count),"Host"))return false;
@@ -376,7 +419,16 @@ bool TestOnlineRoom(){
     check(rooms[1]->Rename("Unicode \xE7\x8E\xA9\xE5\xAE\xB6") && pump([&]{return !rooms[1]->profile_pending();}) && rooms[1]->last_lobby_result()==LobbyResult::Ok,"bounded Unicode rename reaches authority");
     for(auto& r:rooms)check(r->SetReady(true),"each participant explicitly readies");
     check(pump([&]{return std::all_of(rooms[0]->lobby().players.begin(),rooms[0]->lobby().players.end(),[](const auto& p){return p.ready;}) && std::none_of(rooms.begin(),rooms.end(),[](const auto& r){return r->profile_pending();});}),"readiness acknowledged by all clients");
-    check(rooms[0]->Start() && pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& r){return r->state()==RoomState::Running;});}),"host freezes the complete ready roster");
+    check(rooms[0]->Start() && pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& r){return r->state()==RoomState::Loading;});}),"host freezes complete ready roster and enters native Loading, never automatic Running");
+    for(auto& r:rooms){RoomFrame frame;check(!r->SubmitLocal(102,Neutral()) && !r->TakeFrame(frame) && r->impl_->frames.empty() && r->impl_->inputs.empty(),"no commands, neutral seeds or frames admitted before world barrier");}
+    for(unsigned i=0;i<15;++i)check(rooms[i]->WorldReady(world),"caller explicitly asserts loaded native world for each ready participant");
+    check(pump([&]{return std::count_if(rooms[0]->impl_->worlds.begin(),rooms[0]->impl_->worlds.end(),[](const auto& token){return bool(token);})==15;}),"fifteen native-world assertions reach authority, final guest still loading");
+    const auto slow=Clock::now()+std::chrono::seconds(20);for(unsigned i=0;i<15;++i)rooms[i]->Poll(slow);
+    check(std::all_of(rooms.begin(),rooms.end(),[](const auto& r){return r->state()==RoomState::Loading && r->impl_->frames.empty();}),"blocked native loader beyond runtime15-second timeout keeps startup barrier closed without disconnect");
+    auto different=world;++different[0];
+    check(rooms[0]->WorldReady(world) && !rooms[0]->WorldReady(different) && !rooms[15]->WorldReady({}),"same caller assertion idempotent; changed and empty tokens rejected");
+    check(rooms[15]->WorldReady(world) && pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& r){return r->state()==RoomState::Running;});}),"only final matching world assertion activates all sixteen peers");
+    check(rooms[0]->WorldReady(world) && rooms[15]->WorldReady(world),"same readiness remains idempotent after activation");
     check(!rooms[1]->SetReady(false) && !rooms[0]->Rename("Changed"),"locked roster cannot mutate after start");
     for(uint64_t t=100;t<102;++t){check(pump([&]{return std::all_of(rooms.begin(),rooms.end(),[&](const auto& r){return !r->impl_->frames.empty();});}),"neutral delayed frame delivered to every peer");
         for(auto& r:rooms){RoomFrame f;check(r->TakeFrame(f) && f.tick==t && f.players_mask==0xFFFF && std::all_of(f.players.begin(),f.players.end(),[](const auto& p){return p==Neutral();}),"identical full-roster neutral delay frame");}}
@@ -404,9 +456,41 @@ bool TestOnlineRoom(){
     check(!late_connect || late.state()==RoomState::Error,"closed listener cannot admit late participants");
     rooms[15]->Disconnect();check(pump([&]{return rooms[0]->state()==RoomState::Error;}) && pump([&]{return rooms[1]->state()==RoomState::Error;}),"one disconnect stops host and remaining clients, never silent continuation");
     // Each malicious admitted client gets its own isolated two-peer room.
-    auto running=[&]{if(!setup(2))return false;rooms[0]->SetReady(true);rooms[1]->SetReady(true);
+    auto loading=[&]{if(!setup(2))return false;rooms[0]->SetReady(true);rooms[1]->SetReady(true);
         if(!pump([&]{return !rooms[1]->profile_pending() && rooms[0]->lobby().players[1].ready;}))return false;
-        return rooms[0]->Start() && pump([&]{return rooms[1]->state()==RoomState::Running;});};
+        return rooms[0]->Start() && pump([&]{return rooms[1]->state()==RoomState::Loading;});};
+    auto activate=[&]{for(auto& r:rooms)if(!r->WorldReady(world))return false;
+        return pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& r){return r->state()==RoomState::Running;});});};
+    auto running=[&]{return loading() && activate();};
+    if(!check(setup(2),"unsolicited WorldReady fixture connects lobby"))return false;
+    auto premature=Packet(Wire::WorldReady);premature.insert(premature.end(),world.begin(),world.end());rooms[1]->impl_->connections.front()->Queue(premature);
+    check(pump([&]{return rooms[1]->state()==RoomState::Error && rooms[0]->state()==RoomState::Listening;}),"native-world assertion before frozen Start is rejected without activating or destroying host lobby");
+    if(!check(loading(),"input-before-world-barrier fixture enters Loading"))return false;
+    premature=Packet(Wire::Input);U64(premature,id.first_tick+id.input_delay);WriteCommand(premature,Neutral());rooms[1]->impl_->connections.front()->Queue(premature);
+    check(pump([&]{return rooms[0]->state()==RoomState::Error;}),"remote movement before all native world assertions is a protocol violation, never buffered for simulation");
+    if(!check(loading(),"mismatched loaded-world fixture enters Loading"))return false;
+    check(rooms[0]->WorldReady(world) && rooms[1]->WorldReady(different) &&
+        pump([&]{return rooms[0]->state()==RoomState::Error;}),"different canonical native world token stops startup instead of activating");
+    if(!check(loading(),"heartbeat-only startup deadline fixture enters Loading"))return false;
+    const auto startup=Clock::now();
+    for(unsigned seconds=10;seconds<=170;seconds+=10)for(auto& r:rooms)r->Poll(startup+std::chrono::seconds(seconds));
+    check(rooms[0]->state()==RoomState::Loading && rooms[1]->state()==RoomState::Loading,"heartbeats keep slow loading connection alive within absolute startup bound");
+    rooms[0]->Poll(startup+StartupTimeout+std::chrono::seconds(1));
+    check(rooms[0]->state()==RoomState::Error && rooms[0]->error().find("180-second")!=std::string::npos,"heartbeat traffic cannot extend missing WorldReady beyond absolute180-second deadline");
+    if(!check(loading(),"client-forged activation fixture enters Loading"))return false;
+    auto forged_activation=Packet(Wire::Activate);forged_activation.insert(forged_activation.end(),world.begin(),world.end());
+    U64(forged_activation,rooms[0]->lobby().revision);U64(forged_activation,3,2);U64(forged_activation,id.first_tick);
+    rooms[1]->impl_->connections.front()->Queue(forged_activation);
+    check(pump([&]{return rooms[0]->state()==RoomState::Error;}),"guest cannot activate the frozen room even with valid token and roster metadata");
+    if(!check(loading(),"unsolicited activation fixture enters Loading"))return false;
+    forged_activation=Packet(Wire::Activate);forged_activation.insert(forged_activation.end(),world.begin(),world.end());
+    U64(forged_activation,rooms[0]->lobby().revision);U64(forged_activation,3,2);U64(forged_activation,id.first_tick);
+    rooms[0]->impl_->connections.front()->Queue(forged_activation);
+    check(pump([&]{return rooms[1]->state()==RoomState::Error;}) && rooms[0]->state()==RoomState::Loading,"client rejects activation before its native caller asserted loaded-world readiness");
+    if(!check(loading(),"repeated-invalid WorldReady fixture enters Loading"))return false;
+    check(rooms[1]->WorldReady(world) && pump([&]{return bool(rooms[0]->impl_->worlds[1]);}),"first native world token is bound to authenticated guest socket");
+    auto repeated=Packet(Wire::WorldReady);repeated.insert(repeated.end(),different.begin(),different.end());rooms[1]->impl_->connections.front()->Queue(repeated);
+    check(pump([&]{return rooms[0]->state()==RoomState::Error;}),"guest cannot replace its earlier world assertion with another token");
     for(unsigned edit=0;edit<2;++edit){
         if(!check(setup(2),"in-flight profile race connects real TCP peers"))return false;
         rooms[0]->SetReady(true);rooms[1]->SetReady(true);
@@ -414,10 +498,11 @@ bool TestOnlineRoom(){
         check(edit==0?rooms[1]->Rename("In-flight rename"):rooms[1]->SetReady(false),"client queues profile before host start without polling it to authority");
         check(rooms[1]->profile_pending() && rooms[0]->Start(),"host freezes last accepted ready roster while profile request remains in flight");
         const auto frozen=rooms[0]->lobby();
-        check(pump([&]{return rooms[1]->state()==RoomState::Running && !rooms[1]->profile_pending();}) &&
-            rooms[0]->state()==RoomState::Running && rooms[1]->last_lobby_result()==LobbyResult::Locked &&
+        check(pump([&]{return rooms[1]->state()==RoomState::Loading && !rooms[1]->profile_pending();}) &&
+            rooms[0]->state()==RoomState::Loading && rooms[1]->last_lobby_result()==LobbyResult::Locked &&
             rooms[0]->lobby()==frozen && rooms[1]->lobby()==frozen,
             "queued rename/unready receives Locked after Start without disconnect or frozen roster mutation");
+        check(activate(),"in-flight rejected profile does not prevent explicit world activation");
     }
     if(!check(running(),"malformed-wire fixture starts fresh real room"))return false;
     if(rooms[1]->state()==RoomState::Running){auto spoof=Packet(Wire::Input);U64(spoof,102);U64(spoof,1);WriteCommand(spoof,Neutral());rooms[1]->impl_->connections.front()->Queue(spoof);

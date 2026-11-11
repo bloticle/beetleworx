@@ -104,10 +104,16 @@ bool TestOwnedMovementFrames(PPCContext& ctx,uint8_t* base,uint64_t first_peer,u
         REXLOG_ERROR("Owned room states {}/{} errors '{}'/'{}'",int(host.state()),int(client.state()),host.error(),client.error());return false;};
     if(!check(pump([&]{return host.lobby().players.size()==2 && client.lobby().players.size()==2;}) &&
         host.SetReady(true) && client.SetReady(true) && pump([&]{return !client.profile_pending() && host.lobby().players[1].ready;}) &&
-        host.Start() && pump([&]{return host.state()==RoomState::Running && client.state()==RoomState::Running;}),"frozen native-room roster starts"))return false;
+        host.Start() && pump([&]{return host.state()==RoomState::Loading && client.state()==RoomState::Loading;}),"frozen native-room roster waits for native world admission"))return false;
     OwnedMovementFrames coordinator;std::array<uint64_t,kOnlineRoomCapacity> epochs{};epochs[0]=epochs[1]=1;
     if(!check(coordinator.Configure(3,0,epochs,identity.first_tick,a.registry) && coordinator.Bind(1,a.peer,ctx,base) &&
         coordinator.Bind(2,b.peer,ctx,base) && !coordinator.Bind(3,a.peer,ctx,base),"room IDs bind distinct native actors without retail slot fabrication"))return false;
+    RoomFrame premature;
+    if(!check(!host.TakeFrame(premature) && !client.TakeFrame(premature),"loading cannot expose a frame before native actors are admitted"))return false;
+    // This controlled fixture already owns both admitted actors. Production
+    // readiness must come from its actual load/admission transaction instead.
+    if(!check(host.WorldReady(identity.checkpoint) && client.WorldReady(identity.checkpoint) &&
+        pump([&]{return host.state()==RoomState::Running && client.state()==RoomState::Running;}),"matching native world readiness activates frame dispatch"))return false;
     for(unsigned n=0;n<3;++n){
         RoomMovement first,second;first.source=second.source=RoomMovementSource::NativeActionV1;first.actor_epoch=second.actor_epoch=1;
         first.x=n==2?0:.5f;first.y=n==2?0:-.25f;second.x=n==2?0:-.75f;second.y=n==2?0:.125f;
