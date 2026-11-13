@@ -15,6 +15,7 @@ class RvzSource {
   static std::unique_ptr<RvzSource> Open(const std::filesystem::path& image,
                                        std::string& error);
   static bool TestGenericSource(const std::filesystem::path& image,std::string& error);
+  static bool TestFolderSource(const std::filesystem::path& isolated_directory,std::string& error);
   ~RvzSource();
   RvzSource(const RvzSource&) = delete;
   RvzSource& operator=(const RvzSource&) = delete;

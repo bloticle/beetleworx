@@ -28,11 +28,11 @@ bool PrepareDemoSession(const std::filesystem::path& executable,std::filesystem:
             const TASKDIALOG_BUTTON buttons[]={
                 {100,L"Play Epic Mickey 2\nYour Xbox 360 game, recompiled for PC"},
                 {101,L"Play Epic Mickey compatibility demo\nExplore the original Dark Beauty Castle courtyard"},
-                {102,L"Add or locate Epic Mickey (Wii)\nSelect your RVZ image; the location is remembered"}};
+                {102,L"Add or locate Epic Mickey (Wii)\nSelect a Wii disc image or extracted folder; the location is remembered"}};
             TASKDIALOGCONFIG dialog{};dialog.cbSize=sizeof(dialog);dialog.dwFlags=TDF_USE_COMMAND_LINKS|TDF_ALLOW_DIALOG_CANCELLATION;
             dialog.dwCommonButtons=TDCBF_CANCEL_BUTTON;dialog.pszWindowTitle=L"Beetleworx - Public Testing Demo";
             dialog.pszMainInstruction=L"What would you like to play?";
-            dialog.pszContent=L"Setup is built into this executable. Both modes use your Epic Mickey 2 Xbox 360 files. The Wii preview also needs your Epic Mickey RVZ image. Original game files stay unchanged.";
+            dialog.pszContent=L"Setup is built into this executable. Both modes use your Epic Mickey 2 Xbox 360 files. The Wii preview also needs an Epic Mickey Wii disc image or extracted folder. Original game files stay unchanged.";
             dialog.cButtons=3;dialog.pButtons=buttons;dialog.nDefaultButton=100;
             int choice=IDCANCEL;
             if(FAILED(TaskDialogIndirect(&dialog,&choice,nullptr,nullptr))){error="Could not open the game selection window.";return false;}
@@ -51,7 +51,7 @@ bool PrepareDemoSession(const std::filesystem::path& executable,std::filesystem:
         const auto explicit_source=REXCVAR_GET(em1_source_rvz);
         const auto source_path=explicit_source.empty()?ConfiguredEm1Source():fs::path(std::u8string(explicit_source.begin(),explicit_source.end()));
         auto source=em1::RvzSource::Open(source_path,error);
-        if(!source || !source->DiscId().starts_with("SEM")){if(error.empty())error="Choose an original Epic Mickey Wii RVZ image.";return false;}
+        if(!source || !source->DiscId().starts_with("SEM")){if(error.empty())error="Choose an Epic Mickey Wii disc image or extracted disc folder.";return false;}
         const auto encoded=source_path.u8string();REXCVAR_SET(em1_source_rvz,std::string(encoded.begin(),encoded.end()));
         REXCVAR_SET(em1_enter_courtyard,true);REXCVAR_SET(em1_masked_material_candidate,true);
         REXCVAR_SET(em1_dual_uv_material_candidate,true);REXCVAR_SET(em1_cutout_material_candidate,true);

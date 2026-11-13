@@ -7,6 +7,7 @@
 #include "em1_compat/zstd/lib/zstd.h"
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <deque>
 #include <fstream>
 #include <limits>
@@ -151,6 +152,10 @@ struct RvzSource::Impl {
   }
   std::string disc_id, identity;
   std::unique_ptr<void,void(*)(void*)> generic{nullptr,em1_disc_close};
+  struct FolderEntry {std::filesystem::path path;uint64_t size;std::filesystem::file_time_type modified;};
+  std::filesystem::path folder_root;
+  FolderEntry folder_boot;
+  std::vector<FolderEntry> folder_entries;
   std::vector<Partition> partitions;
   std::vector<Group> groups;
   size_t game_partition = 0;
@@ -158,6 +163,41 @@ struct RvzSource::Impl {
   std::vector<RvzFile> files;
   std::deque<Cache> cache;
   std::mutex mutex;
+
+  void CheckFolderPath(const std::filesystem::path& path) const {
+    auto current=folder_root;
+    const auto safe=[](const auto& p){const auto a=GetFileAttributesW(p.c_str());Check(a!=INVALID_FILE_ATTRIBUTES && !(a&FILE_ATTRIBUTE_REPARSE_POINT),"Extracted Wii folders must not contain redirected paths");};
+    safe(current);
+    for(const auto& part:path.lexically_relative(folder_root)){Check(part!=L"..","Extracted Wii path escapes its root");current/=part;safe(current);}
+  }
+  void OpenFolder(const std::filesystem::path& selected) {
+    namespace fs=std::filesystem;
+    auto base=CompareStringOrdinal(selected.filename().c_str(),-1,L"files",-1,TRUE)==CSTR_EQUAL?selected.parent_path():selected;
+    if(!fs::is_regular_file(base/"sys/boot.bin") && fs::is_regular_file(base/"DATA/sys/boot.bin"))base/="DATA";
+    folder_root=fs::absolute(base).lexically_normal();CheckFolderPath(folder_root/"sys/boot.bin");
+    std::array<uint8_t,32> boot{};std::ifstream header(folder_root/"sys/boot.bin",std::ios::binary);header.read(reinterpret_cast<char*>(boot.data()),boot.size());
+    Check(header.gcount()==boot.size() && boot[0]=='S' && boot[1]=='E' && boot[2]=='M' && U32(boot,24)==0x5d1c9ea3,"Select an extracted Epic Mickey Wii disc with sys/boot.bin and its game files");
+    disc_id.assign(boot.begin(),boot.begin()+6);
+    folder_boot={folder_root/"sys/boot.bin",fs::file_size(folder_root/"sys/boot.bin"),fs::last_write_time(folder_root/"sys/boot.bin")};
+    const auto data=fs::is_directory(folder_root/"files")?folder_root/"files":folder_root;
+    CheckFolderPath(data);Check(fs::is_regular_file(data/"packfiles/levels.pak"),"Extracted Wii folder has no packfiles/levels.pak");
+    size_t count=0;
+    for(const auto& entry:fs::recursive_directory_iterator(data)){
+      Check(++count<=100000,"Extracted Wii folder has too many entries");CheckFolderPath(entry.path());
+      Check(entry.path().lexically_relative(data).generic_u8string().size()<=2048,"Extracted Wii path is too long");
+      if(entry.is_directory())continue;Check(entry.is_regular_file(),"Unsupported extracted Wii file type");
+      const auto encoded=entry.path().lexically_relative(data).generic_u8string();const auto key=Key(std::string(reinterpret_cast<const char*>(encoded.data()),encoded.size()));
+      const auto bytes=entry.file_size();Check(bytes<=16ull*1024*1024*1024,"Extracted Wii file exceeds disc bounds");
+      Check(ranges.emplace(key,Range{folder_entries.size(),bytes}).second,"Duplicate extracted Wii filename");
+      folder_entries.push_back({entry.path(),bytes,entry.last_write_time()});files.push_back({key,bytes});
+    }
+    std::sort(files.begin(),files.end(),[](const auto& a,const auto& b){return a.path<b.path;});
+    Bytes fingerprint(boot.begin(),boot.end());
+    const auto append=[&](std::string_view s){fingerprint.insert(fingerprint.end(),s.begin(),s.end());fingerprint.push_back(0);};
+    const auto canonical=fs::canonical(folder_root).generic_u8string();append(std::string_view(reinterpret_cast<const char*>(canonical.data()),canonical.size()));
+    for(const auto& f:files){append(f.path);append(std::to_string(f.size));append(std::to_string(folder_entries.at(size_t(ranges.at(f.path).offset)).modified.time_since_epoch().count()));}
+    identity="em1-folder-v1:"+Hex(Hash(fingerprint,BCRYPT_SHA256_ALGORITHM,32));
+  }
 
   Bytes ReadAt(uint64_t offset, uint64_t length) {
     Check(offset <= size && length <= size - offset && length <= 32 * 1024 * 1024,
@@ -277,7 +317,9 @@ struct RvzSource::Impl {
     return result;
   }
   explicit Impl(const std::filesystem::path& image,bool other_format=false)
-      : image_path(image), modified(std::filesystem::last_write_time(image)), file(image, std::ios::binary) {
+      : image_path(image), modified(std::filesystem::last_write_time(image)) {
+    if(std::filesystem::is_directory(image)){OpenFolder(image);return;}
+    file.open(image,std::ios::binary);
     Check(bool(file), "Cannot open original RVZ read-only");
     size = std::filesystem::file_size(image);
     if(other_format){
@@ -372,13 +414,44 @@ struct RvzSource::Impl {
 RvzSource::RvzSource(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 RvzSource::~RvzSource() = default;
 std::unique_ptr<RvzSource> RvzSource::Open(const std::filesystem::path& image, std::string& error) {
-  try {std::unique_ptr<Impl> impl;try{impl=std::make_unique<Impl>(image);}catch(const std::exception&){impl=std::make_unique<Impl>(image,true);}
+  try {std::unique_ptr<Impl> impl;if(std::filesystem::is_directory(image))impl=std::make_unique<Impl>(image);
+    else try{impl=std::make_unique<Impl>(image);}catch(const std::exception&){impl=std::make_unique<Impl>(image,true);}
     auto result = std::unique_ptr<RvzSource>(new RvzSource(std::move(impl))); error.clear(); return result; }
   catch (const std::exception& exception) { error = exception.what(); return {}; }
 }
 const std::string& RvzSource::DiscId() const { return impl_->disc_id; }
+bool RvzSource::TestFolderSource(const std::filesystem::path& root,std::string& error){
+  namespace fs=std::filesystem;
+  try{
+    Check(!fs::exists(root),"Folder fixture already exists");fs::create_directories(root/"disc/DATA/sys");fs::create_directories(root/"disc/DATA/files/packfiles");
+    struct Cleanup{fs::path path;~Cleanup(){std::error_code ec;fs::remove_all(path,ec);}} cleanup{root};
+    const auto boot=root/"disc/DATA/sys/boot.bin",pak=root/"disc/DATA/files/packfiles/levels.pak";
+    std::array<uint8_t,32> header{};std::copy_n("SEME4Q",6,header.begin());header[24]=0x5d;header[25]=0x1c;header[26]=0x9e;header[27]=0xa3;
+    {std::ofstream f(boot,std::ios::binary);f.write(reinterpret_cast<const char*>(header.data()),header.size());}
+    {std::ofstream f(pak,std::ios::binary);f<<"level-data";}
+    auto source=Open(root/"disc",error);Check(bool(source),error.c_str());
+    auto partition=Open(root/"disc/DATA",error),files=Open(root/"disc/DATA/files",error);
+    Check(partition && files && source->DiscId()=="SEME4Q" && source->Files().size()==1,"Extracted disc layout or title mismatch");
+    Check(source->SourceIdentity()==partition->SourceIdentity() && source->SourceIdentity()==files->SourceIdentity(),"Equivalent folder selections get different identities");
+    Bytes bytes;Check(source->ReadFileRange("PACKFILES/Levels.PAK",1,4,bytes,error) && bytes==Bytes({'e','v','e','l'}),"Extracted folder range bytes differ");
+    Check(source->ReadFileRange("packfiles/levels.pak",10,0,bytes,error) && bytes.empty(),"Extracted file end read failed");
+    bytes={99};Check(!source->ReadFileRange("packfiles/levels.pak",9,2,bytes,error) && bytes==Bytes({99}),"Out-of-range read modified output");
+    Check(!source->ReadFile("../sys/boot.bin",bytes,error),"Extracted file traversal accepted");
+    fs::copy(root/"disc/DATA",root/"other",fs::copy_options::recursive);
+    auto other=Open(root/"other",error);Check(other && other->SourceIdentity()!=source->SourceIdentity(),"Different folder mounts share an identity");
+    {std::ofstream f(pak,std::ios::binary|std::ios::app);f<<'!';}
+    Check(!source->ReadFile("packfiles/levels.pak",bytes,error),"Changed extracted file accepted by old mount");
+    auto remount=Open(root/"disc",error);Check(remount && remount->SourceIdentity()!=source->SourceIdentity() && remount->ReadFile("packfiles/levels.pak",bytes,error) && bytes.size()==11,"Remount did not refresh extracted source");
+    Check(other->ReadFile("packfiles/levels.pak",bytes,error) && bytes.size()==10,"Unrelated extracted mount changed");
+    header[0]='X';{std::ofstream f(boot,std::ios::binary);f.write(reinterpret_cast<const char*>(header.data()),header.size());}
+    fs::last_write_time(boot,fs::last_write_time(boot)+std::chrono::seconds(2));
+    Check(!Open(root/"disc",error) && !remount->ReadFile("packfiles/levels.pak",bytes,error),"Wrong or changed disc header accepted");
+    fs::remove(root/"other/files/packfiles/levels.pak");Check(!Open(root/"other",error),"Missing required pack accepted");
+    error.clear();return true;
+  }catch(const std::exception& e){error=e.what();return false;}
+}
 bool RvzSource::TestGenericSource(const std::filesystem::path& image,std::string& error){
-  try{auto original=Open(image,error);Check(bool(original),error.c_str());
+  try{Check(!std::filesystem::is_directory(image),"Disc reader comparison requires an image, not an extracted folder");auto original=Open(image,error);Check(bool(original),error.c_str());
     RvzSource generic(std::make_unique<Impl>(image,true));Check(original->DiscId()==generic.DiscId(),"Disc IDs differ between source adapters");
     auto expected=original->Files(),actual=generic.Files();auto less=[](const auto& a,const auto& b){return a.path<b.path;};std::sort(expected.begin(),expected.end(),less);std::sort(actual.begin(),actual.end(),less);
     Check(expected.size()==actual.size(),"Disc file counts differ between adapters");for(size_t i=0;i<expected.size();++i)Check(expected[i].path==actual[i].path && expected[i].size==actual[i].size,"Disc filesystem differs between adapters");
@@ -400,12 +473,21 @@ bool RvzSource::ReadFileRange(std::string_view path, uint64_t offset, uint64_t l
                              std::vector<uint8_t>& output, std::string& error) {
   try {
     std::lock_guard lock(impl_->mutex);
-    Check(std::filesystem::file_size(impl_->image_path) == impl_->size &&
-          std::filesystem::last_write_time(impl_->image_path) == impl_->modified,
+    Check(!impl_->folder_root.empty() || (std::filesystem::file_size(impl_->image_path) == impl_->size &&
+          std::filesystem::last_write_time(impl_->image_path) == impl_->modified),
           "Original RVZ changed; remount required before cached reads");
     const auto found = impl_->ranges.find(Key(path));
     Check(found != impl_->ranges.end(), "File absent from EM1 source mount");
     Check(offset <= found->second.size && length <= found->second.size - offset, "Read outside EM1 source file");
+    if(!impl_->folder_root.empty()){
+      Check(length<=256*1024*1024,"Oversized extracted Wii read");
+      const auto& entry=impl_->folder_entries.at(size_t(found->second.offset));
+      const auto unchanged=[&](const auto& f){impl_->CheckFolderPath(f.path);Check(std::filesystem::file_size(f.path)==f.size && std::filesystem::last_write_time(f.path)==f.modified,"Extracted Wii source changed; remount required");};
+      unchanged(impl_->folder_boot);unchanged(entry);
+      std::ifstream input(entry.path,std::ios::binary);input.seekg(std::streamoff(offset));Check(bool(input),"Cannot seek extracted Wii file");
+      Bytes bytes(size_t(length),uint8_t(0));input.read(reinterpret_cast<char*>(bytes.data()),std::streamsize(length));Check(uint64_t(input.gcount())==length,"Short extracted Wii file read");
+      unchanged(entry);output=std::move(bytes);error.clear();return true;
+    }
     if(impl_->generic){Check(length<=256*1024*1024,"Oversized EM1 disc read");Bytes bytes(size_t(length),uint8_t(0));std::array<uint8_t,1024> message{};
       Check(em1_disc_read(impl_->generic.get(),size_t(found->second.offset),offset,bytes.data(),bytes.size(),message.data(),message.size())==0,reinterpret_cast<const char*>(message.data()));
       output=std::move(bytes);error.clear();return true;}

@@ -228,6 +228,11 @@ REXCVAR_DECLARE(bool,em1_enter_courtyard);
 REXCVAR_DECLARE(int32_t,draw_resolution_scale_x);
 REXCVAR_DECLARE(int32_t,draw_resolution_scale_y);
 
+static bool TestEm1Folders(const std::filesystem::path& root){
+    std::string error;const bool success=em2::em1::RvzSource::TestFolderSource(root,error);
+    REXLOG_INFO("Extracted EM1 folder regressions: {} {}",success?"PASS":"FAIL",error);return success;
+}
+
 class DebugOverlayDialog : public rex::ui::ImGuiDialog {
 public:
     DebugOverlayDialog(rex::ui::ImGuiDrawer* imgui_drawer,std::function<void()> capture_tick)
@@ -492,7 +497,7 @@ public:
         }
         if(REXCVAR_GET(em2_test_content_setup)){
             const auto root=exe_dir/("content-setup-test-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-            bool success=em2::TestContentSetup(root/"setup") && em2::TestContentLibraryPersistence(root/"library") && em2::TestContentPatches(root/"patches") && em2::TestDiscImageImport(root/"disc-image");
+            bool success=em2::TestContentSetup(root/"setup") && em2::TestContentLibraryPersistence(root/"library") && em2::TestContentPatches(root/"patches") && em2::TestDiscImageImport(root/"disc-image") && TestEm1Folders(root/"em1-folder");
             const auto patch_directory=REXCVAR_GET(em2_test_content_patch_directory);
             if(success && !patch_directory.empty()){
                 for(const auto* name:em2::kPatchedGameArchives){
@@ -520,7 +525,7 @@ public:
             // must not make a later, unrelated regression run fail.
             const auto test_nonce=std::chrono::system_clock::now().time_since_epoch().count();
             const auto test_dir=exe_dir / ("pc-settings-test-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(test_nonce));
-            const auto settings_ok=em2::TestGuestReadBatch() && em2::TestPCSettings(test_dir,game_dir/"ConfigFiles.ini") && em2::TestContentSetup(test_dir/"content-setup") && em2::TestContentLibraryPersistence(test_dir/"content-library") && em2::net::TestNativeContentRoot(test_dir/"content-root") && em2::TestDiscImageImport(test_dir/"disc-image") && em2::TestPackReads(test_dir/"pack-reads");
+            const auto settings_ok=em2::TestGuestReadBatch() && em2::TestPCSettings(test_dir,game_dir/"ConfigFiles.ini") && em2::TestContentSetup(test_dir/"content-setup") && em2::TestContentLibraryPersistence(test_dir/"content-library") && em2::net::TestNativeContentRoot(test_dir/"content-root") && em2::TestDiscImageImport(test_dir/"disc-image") && TestEm1Folders(test_dir/"em1-folder") && em2::TestPackReads(test_dir/"pack-reads");
             const auto controls_ok=em2::TestPsoBinaryCache(test_dir/"pso-cache") && em2::TestControls(test_dir/"controls") && em2::TestEngineWorkbench() && em2::TestGPUInterruptLifetime() && em2::TestGameplayMods(test_dir/"gameplay-mods") && em2::net::TestInstallationIdentity(test_dir/"online-identity") && em2::net::TestOnlineInvites() && em2::net::TestLANDiscovery() && em2::net::TestRouterMapping() && em2::net::TestNativeUpnpAutomation() && em2::net::TestUpnpRouterMapping() && em2::net::TestCheckpointBundles(test_dir/"checkpoint") && em2::net::TestCheckpointTransport(test_dir/"checkpoint-transport") && em2::net::TestOnlineBoot(test_dir/"online-boot") && em2::net::TestOnlineRoomBoot(test_dir/"online-room-boot") && em2::net::TestRoomBootstrapGate() && em2::net::TestNativeRoomSession() && em2::net::TestRetainedHostCampaigns(test_dir/"online-campaigns") && em2::net::TestNativeOnlineSession() && em2::net::TestOnlineNotices() && em2::TestAllocationTrace() && em2::TestPlatformAllocations() && em2::TestMovieTextureMemory() && em2::TestNativeHeapBudget() && em2::TestShadowResourceCreation() && em2::TestLiveShadowResize() && em2::TestNativeResources() && em2::TestNativeEntityProbe();
             const auto lowering_ok=em2::TestLinkTimeDispatch() && em2::TestNativeRandom() && em2::net::TestOnlinePerceptionBudget() && em2::TestPhysicsTiming() && em2::TestNativeMatrixMath() && em2::TestNativeMaterialBinding() && em2::TestMickeyEarInstances() && em2::TestNativeTypeCheck() && (!em2::HasLoweringTests || em2::TestLowering());
             std::string em1_collision_error;

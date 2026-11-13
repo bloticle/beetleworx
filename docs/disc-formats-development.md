@@ -12,6 +12,15 @@ recognizes containers by their contents. Raw images named `.xiso`, `.img` or
 `.bin` work through the same XDVDFS parser. Choosing `default.xex` inside a
 complete extracted folder selects that folder.
 
+Development source also mounts extracted EM1 Wii discs directly. In the Wii
+image picker, choose **Use an extracted game folder instead**. Select the disc
+root, `DATA`, or `files`; the reader accepts Dolphin-style `sys/boot.bin` plus
+`files/packfiles/levels.pak`, or game files beside `sys`. The original Wii disc
+header must be present and identify Epic Mickey. No copying or conversion is
+required. The mount is read-only; after changing source files, remount it.
+Redirected/junction paths inside the selected source are rejected. This folder
+reader is not included in demo.3 and does not complete EM1 campaign support.
+
 Tests use synthetic Xbox filesystems with mixed raw/compressed blocks, partial
 last blocks, alignment padding, cross-block reads and malformed indices and
 LZ4 streams. Extraction and verified resume are exercised across different
@@ -31,7 +40,7 @@ result proves that every file discovered by the native disc parser has matching
 length and contents in the reference; it does not prove executable compatibility
 or successful gameplay. Missing or different reference files fail verification.
 
-CHD, GOD/SVOD, CCI, ZAR, ZIP/7z/RAR wrappers, extracted Wii folders and legacy
+CHD, GOD/SVOD, CCI, ZAR, ZIP/7z/RAR wrappers, legacy
 NKit conversions remain unfinished. File-container support also does not make
 changed executable code compatible with the existing static translation.
 

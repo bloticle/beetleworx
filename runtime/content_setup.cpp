@@ -61,26 +61,9 @@ std::mutex library_mutex;
 fs::path library_directory;
 std::atomic<int> em1_library_status{0};
 std::atomic<bool> library_selecting{false};
-fs::path ChooseEm1Source(){
-    fs::path selected;
-    std::thread picker([&]{
-        if(FAILED(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED|COINIT_DISABLE_OLE1DDE)))return;
-        IFileOpenDialog* dialog=nullptr;
-        if(SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&dialog)))){
-            DWORD options=0;dialog->GetOptions(&options);
-            dialog->SetOptions(options|FOS_FILEMUSTEXIST|FOS_PATHMUSTEXIST|FOS_FORCEFILESYSTEM|FOS_NOCHANGEDIR);
-            dialog->SetTitle(L"Add Epic Mickey (Wii) to your game library");
-            const COMDLG_FILTERSPEC filters[]={{L"Wii disc images",L"*.rvz;*.iso;*.gcm;*.wia;*.wbfs;*.ciso;*.gcz;*.nfs"},{L"All files",L"*.*"}};dialog->SetFileTypes(2,filters);
-            if(SUCCEEDED(dialog->Show(nullptr))){
-                IShellItem* item=nullptr;
-                if(SUCCEEDED(dialog->GetResult(&item))){PWSTR path=nullptr;
-                    if(SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH,&path))){selected=path;CoTaskMemFree(path);}item->Release();}
-            }
-            dialog->Release();
-        }
-        CoUninitialize();
-    });picker.join();return selected;
-}
+fs::path ChooseSource(bool em1=false);
+fs::path ChooseEm1Source(){return ChooseSource(true);}
+
 bool Nested(const fs::path& candidate,const fs::path& parent) {
     const auto child=fs::weakly_canonical(candidate),base=fs::weakly_canonical(parent);
     auto a=child.begin(),b=base.begin();
@@ -138,7 +121,7 @@ public:
         return S_OK;
     }
 };
-fs::path ChooseSource() {
+fs::path ChooseSource(bool em1) {
     fs::path selected;
     // Use a dedicated STA so the host application's COM mode cannot break the
     // Windows folder picker. The picker runs before the guest starts.
@@ -149,12 +132,12 @@ fs::path ChooseSource() {
         do {
             IFileDialog* dialog=nullptr;
             if(FAILED(CoCreateInstance(CLSID_FileOpenDialog,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&dialog))))break;
-            DWORD options=0;dialog->GetOptions(&options);dialog->SetOptions(options|FOS_FORCEFILESYSTEM|FOS_PATHMUSTEXIST|(folders?FOS_PICKFOLDERS:FOS_FILEMUSTEXIST));
-            dialog->SetTitle(folders?L"Select your extracted Epic Mickey 2 Xbox 360 folder":L"Select your Epic Mickey 2 Xbox 360 disc image");
+            DWORD options=0;dialog->GetOptions(&options);dialog->SetOptions(options|FOS_FORCEFILESYSTEM|FOS_PATHMUSTEXIST|FOS_NOCHANGEDIR|(folders?FOS_PICKFOLDERS:FOS_FILEMUSTEXIST));
+            dialog->SetTitle(em1?(folders?L"Select your extracted Epic Mickey Wii folder":L"Select your Epic Mickey Wii disc image"):(folders?L"Select your extracted Epic Mickey 2 Xbox 360 folder":L"Select your Epic Mickey 2 Xbox 360 disc image"));
             dialog->SetOkButtonLabel(folders?L"Use game folder":L"Use disc image");
             auto* events=new SourcePickerEvents;DWORD cookie=0;
             if(!folders) {
-                const COMDLG_FILTERSPEC filters[]={{L"Xbox 360 disc images",L"*.iso;*.xiso;*.cso;*.zso;*.img;*.bin"},{L"All files",L"*.*"}};dialog->SetFileTypes(2,filters);
+                const COMDLG_FILTERSPEC filters[]={{em1?L"Wii disc images":L"Xbox 360 disc images",em1?L"*.rvz;*.iso;*.gcm;*.wia;*.wbfs;*.ciso;*.gcz;*.nfs":L"*.iso;*.xiso;*.cso;*.zso;*.img;*.bin"},{L"All files",L"*.*"}};dialog->SetFileTypes(2,filters);
                 IFileDialogCustomize* customize=nullptr;
                 if(SUCCEEDED(dialog->QueryInterface(IID_PPV_ARGS(&customize)))){customize->AddPushButton(100,L"Use an extracted game folder instead");customize->Release();}
                 dialog->Advise(events,&cookie);
@@ -292,7 +275,7 @@ void InitializeContentLibrary(const fs::path& directory) {
     std::lock_guard lock(library_mutex);
     library_directory=directory;
     const auto source=Marker(directory,"em1-source.txt");
-    em1_library_status=source.empty()?0:(fs::is_regular_file(source)?0:2);
+    em1_library_status=source.empty()?0:((fs::is_regular_file(source) || fs::is_directory(source))?0:2);
 }
 fs::path ConfiguredEm1Source() {
     std::lock_guard lock(library_mutex);
@@ -303,11 +286,11 @@ bool SelectEm1SourceForSetup(const fs::path& directory,std::string& error) {
     try {
         const auto selected=ChooseEm1Source();if(selected.empty())return false;
         auto source=em1::RvzSource::Open(selected,error);
-        if(!source || !source->DiscId().starts_with("SEM")){if(error.empty())error="This is not an Epic Mickey Wii image.";return false;}
+        if(!source || !source->DiscId().starts_with("SEM")){if(error.empty())error="This is not an Epic Mickey Wii disc image or extracted folder.";return false;}
         fs::create_directories(directory);
-        if(!StoreMarker(directory,"em1-source.txt",selected)){error="Could not remember the Wii image. Extract the demo to a writable folder.";return false;}
+        if(!StoreMarker(directory,"em1-source.txt",selected)){error="Could not remember the Wii source. Extract the demo to a writable folder.";return false;}
         InitializeContentLibrary(directory);return true;
-    }catch(const std::exception& e){error="Could not add the Wii image: "+std::string(e.what());return false;}
+    }catch(const std::exception& e){error="Could not add the Wii source: "+std::string(e.what());return false;}
 }
 bool NativeContentLibraryOption(int id,int choice,int& result) {
     struct RestoreHost {DWORD error=GetLastError();unsigned csr=_mm_getcsr();~RestoreHost(){SetLastError(error);_mm_setcsr(csr);}} restore;
