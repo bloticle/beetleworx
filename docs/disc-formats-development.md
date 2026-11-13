@@ -26,8 +26,16 @@ rules do not concatenate compressed containers. Native setup regressions and
 31 independently generated split/import cases pass, covering both extensions,
 all three conventions, selection of first and two-digit final parts, exact
 extracted bytes, ISO-equivalent resume identity, and missing/empty parts.
-Full retail-sized split sets still need validation. Run
-`ctest -R split-iso-content-import` in the runtime build directory.
+On 2026-11-12 an owned 8,738,846,720-byte retail ISO split into three
+`EM2.iso.001`/`.002`/`.003` files passed the native read-only comparison after
+selecting the third part: all 2,325 files and 6,975,770,804 game bytes matched
+the extracted reference. The unaligned cuts at 4,294,967,303 and 6,442,450,957
+bytes fall inside a packfile and a movie, exercising reads across both part
+boundaries and 64-bit offsets. The assembled source SHA-256 matched the known
+original during fixture creation. This proves that retail split set's file
+reads, alongside synthetic extraction/resume tests; it does not establish a
+complete setup/gameplay run or retail testing of every naming convention.
+Run `ctest -R split-iso-content-import` in the runtime build directory.
 These additions are not in demo.3.
 
 CCI supports both single files and numbered `name.1.cci`, `name.2.cci`, ...
@@ -160,6 +168,7 @@ coverage for that ISO, alongside the synthetic compressed-container tests.
 
 Format references: [maxcso](https://github.com/unknownbrackets/maxcso),
 [CCI reference format](https://github.com/Team-Resurgent/libCCI/blob/main/FORMAT.md),
+[XbWrite split-image conventions](https://github.com/PlayingKarrde/XbWrite),
 [chd-rs](https://github.com/SnowflakePowered/chd-rs),
 [ZIP specification](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT),
 [ZArchive reader/writer reference](https://github.com/Exzap/ZArchive/tree/965b66c8d67b6b7e30fd63b3b75aa91a99ff303b),
