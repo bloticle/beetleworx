@@ -1,6 +1,7 @@
 // ZArchive v1 layout reference: Exzap/ZArchive at
 // 965b66c8d67b6b7e30fd63b3b75aa91a99ff303b (MIT-0).
 #include "zar_image.h"
+#include "archive_io.h"
 #define NOMINMAX
 #include <windows.h>
 #include <bcrypt.h>
@@ -17,23 +18,8 @@ void Require(bool ok,const char* text){if(!ok)throw std::runtime_error(text);}
 struct Canceled{};
 uint32_t U32(const uint8_t* p){return uint32_t(p[0])<<24|uint32_t(p[1])<<16|uint32_t(p[2])<<8|p[3];}
 uint64_t U64(const uint8_t* p){return uint64_t(U32(p))<<32|U32(p+4);}
-struct File {
- HANDLE value=INVALID_HANDLE_VALUE;uint64_t size=0;
- explicit File(const std::filesystem::path& path){value=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
-  LARGE_INTEGER length{};if(value==INVALID_HANDLE_VALUE || !GetFileSizeEx(value,&length)){if(value!=INVALID_HANDLE_VALUE)CloseHandle(value);throw std::runtime_error("Cannot open ZArchive read-only");}size=uint64_t(length.QuadPart);}
- ~File(){if(value!=INVALID_HANDLE_VALUE)CloseHandle(value);}
- void Read(uint64_t at,std::span<uint8_t> out){Require(at<=size && out.size()<=size-at && out.size()<=MAXDWORD,"ZArchive read exceeds its container");LARGE_INTEGER offset{};offset.QuadPart=LONGLONG(at);DWORD got=0;
-  Require(SetFilePointerEx(value,offset,nullptr,FILE_BEGIN) && ReadFile(value,out.data(),DWORD(out.size()),&got,nullptr) && got==out.size(),"Short ZArchive read");}
-};
-struct Hash {
- BCRYPT_ALG_HANDLE provider=nullptr;BCRYPT_HASH_HANDLE hash=nullptr;std::vector<uint8_t> object;
- Hash(){Require(BCryptOpenAlgorithmProvider(&provider,BCRYPT_SHA256_ALGORITHM,nullptr,0)>=0,"Cannot initialize archive SHA-256");DWORD length=0,got=0;
-  try{Require(BCryptGetProperty(provider,BCRYPT_OBJECT_LENGTH,reinterpret_cast<PUCHAR>(&length),4,&got,0)>=0 && length<=1024*1024,"Invalid archive hash workspace");object.resize(length);Require(BCryptCreateHash(provider,&hash,object.data(),length,nullptr,0,0)>=0,"Cannot initialize archive hash");}
-  catch(...){BCryptCloseAlgorithmProvider(provider,0);throw;}}
- ~Hash(){if(hash)BCryptDestroyHash(hash);if(provider)BCryptCloseAlgorithmProvider(provider,0);}
- void Add(std::span<const uint8_t> bytes){Require(BCryptHashData(hash,const_cast<PUCHAR>(bytes.data()),ULONG(bytes.size()),0)>=0,"Cannot hash archive bytes");}
- std::array<uint8_t,32> Finish(){std::array<uint8_t,32> out{};Require(BCryptFinishHash(hash,out.data(),DWORD(out.size()),0)>=0,"Cannot finish archive hash");return out;}
-};
+using archive_detail::File;
+using archive_detail::Hash;
 std::string Lower(std::string s){for(auto& c:s)if(c>='A' && c<='Z')c+=32;return s;}
 }
 struct ZarImage::Impl {

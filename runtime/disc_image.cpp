@@ -3,6 +3,7 @@
 #include "em1_deflate.h"
 #include "svod_image.h"
 #include "zar_image.h"
+#include "zip_image.h"
 #include <windows.h>
 #include <winioctl.h>
 #include <bcrypt.h>
@@ -43,7 +44,7 @@ struct Image {
     std::vector<std::unique_ptr<Image>> parts;std::vector<uint64_t> part_starts;
     std::unique_ptr<void,void(*)(void*)> chd{nullptr,bw_chd_close};
     std::unique_ptr<SvodImage> svod;
-    std::unique_ptr<ZarImage> zar;uint64_t zar_base=0;bool zar_tree=false;
+    std::unique_ptr<ArchiveImage> archive;uint64_t archive_base=0;bool archive_tree=false;
     uint32_t block_size=0,cached=UINT32_MAX;std::vector<uint32_t> index;std::vector<uint8_t> cache;
     void Physical(uint64_t offset,std::span<uint8_t> bytes){
         Require(offset<=physical_size && bytes.size()<=physical_size-offset,"Compressed image block extends outside its container");
@@ -58,11 +59,14 @@ struct Image {
         size=physical_size=uint64_t(length.QuadPart);Require(size>=24 && size<=16ull*1024*1024*1024,"Invalid Xbox disc image size");
         std::array<uint8_t,24> header{};Physical(0,header);
         std::array<uint8_t,8> trailer{};Physical(physical_size-8,trailer);
-        if((BE32(trailer.data())==0x61bf3a01 && BE32(trailer.data()+4)==0x169f52d6) || CompareStringOrdinal(path.extension().c_str(),-1,L".zar",-1,TRUE)==CSTR_EQUAL){
-            std::string error;zar=ZarImage::Open(path,error,[&](uint64_t done,uint64_t total){return !progress || progress(L"Verifying archive integrity",done,total);});Require(bool(zar),error.c_str());
-            size=zar->Size();zar_tree=true;const ZarFile* single=nullptr;size_t count=0;for(const auto& entry:zar->Files())if(!entry.directory){single=&entry;++count;}
-            if(count==1){auto extension=fs::path(single->path).extension().wstring();if(CompareStringOrdinal(extension.c_str(),-1,L".iso",-1,TRUE)==CSTR_EQUAL || CompareStringOrdinal(extension.c_str(),-1,L".xiso",-1,TRUE)==CSTR_EQUAL || CompareStringOrdinal(extension.c_str(),-1,L".img",-1,TRUE)==CSTR_EQUAL || CompareStringOrdinal(extension.c_str(),-1,L".bin",-1,TRUE)==CSTR_EQUAL){zar_tree=false;zar_base=single->offset;size=single->size;}}
-            return;
+        const auto archive_progress=[&](uint64_t done,uint64_t total){return !progress || progress(L"Verifying archive integrity",done,total);};
+        std::string archive_error;
+        const bool zar_magic=BE32(trailer.data())==0x61bf3a01 && BE32(trailer.data()+4)==0x169f52d6;
+        if(zar_magic){archive=ZarImage::Open(path,archive_error,archive_progress);Require(bool(archive),archive_error.c_str());}
+        else if(U32(header.data())==0x04034b50 || CompareStringOrdinal(path.extension().c_str(),-1,L".zip",-1,TRUE)==CSTR_EQUAL){archive=ZipImage::Open(path,archive_error,archive_progress);Require(bool(archive),archive_error.c_str());}
+        else if(CompareStringOrdinal(path.extension().c_str(),-1,L".zar",-1,TRUE)==CSTR_EQUAL){archive=ZarImage::Open(path,archive_error,archive_progress);Require(bool(archive),archive_error.c_str());}
+        if(archive){size=archive->Size();archive_tree=true;const ArchiveFile* single=nullptr;size_t count=0;for(const auto& entry:archive->Files())if(!entry.directory){single=&entry;++count;}
+            if(count==1){auto extension=fs::path(single->path).extension().wstring();if(CompareStringOrdinal(extension.c_str(),-1,L".iso",-1,TRUE)==CSTR_EQUAL || CompareStringOrdinal(extension.c_str(),-1,L".xiso",-1,TRUE)==CSTR_EQUAL || CompareStringOrdinal(extension.c_str(),-1,L".img",-1,TRUE)==CSTR_EQUAL || CompareStringOrdinal(extension.c_str(),-1,L".bin",-1,TRUE)==CSTR_EQUAL){archive_tree=false;archive_base=single->offset;size=single->size;}}return;
         }
         if(std::equal(header.begin(),header.begin()+4,"LIVE") || std::equal(header.begin(),header.begin()+4,"PIRS") || std::equal(header.begin(),header.begin()+4,"CON ")){
             std::string error;svod=SvodImage::Open(path,error);Require(bool(svod),error.c_str());size=svod->Size();return;
@@ -117,7 +121,7 @@ struct Image {
     bool Contains(uint64_t offset,uint64_t length)const{return offset<=size && length<=size-offset;}
     void Read(uint64_t offset,std::span<uint8_t> bytes) {
         Require(Contains(offset,bytes.size()),"The disc image is truncated or contains an invalid file extent.");
-        if(zar){std::string error;const auto result=zar->Read(zar_base+offset,bytes,error);Require(result,error.c_str());return;}
+        if(archive){std::string error;const auto result=archive->Read(archive_base+offset,bytes,error);Require(result,error.c_str());return;}
         if(svod){std::string error;const auto result=svod->Read(offset,bytes,error);Require(result,error.c_str());return;}
         if(chd){std::array<uint8_t,1024> error{};const auto result=bw_chd_read(chd.get(),offset,bytes.data(),bytes.size(),error.data(),error.size());Require(result==0,reinterpret_cast<const char*>(error.data()));return;}
         if(!parts.empty()){size_t copied=0;while(copied<bytes.size()){
@@ -174,12 +178,13 @@ struct DiscFile {std::string path;uint64_t offset=0,size=0;bool directory=false;
 struct DiscPlan {uint64_t partition=0,total=0;std::vector<DiscFile> files;};
 DiscPlan Plan(Image& image) {
     DiscPlan plan;std::array<uint8_t,2048> descriptor{};bool found=false;
-    if(image.zar && image.zar_tree){
-        const auto& entries=image.zar->Files();std::set<std::string> names;for(const auto& entry:entries){size_t at=0;while(at<entry.path.size()){auto end=entry.path.find('/',at);if(end==std::string::npos)end=entry.path.size();Require(Component(entry.path.substr(at,end-at)),"Unsafe filename in archived Xbox game");at=end+1;}names.insert(Lower(entry.path));}
+    if(image.archive && image.archive_tree){
+        const auto& entries=image.archive->Files();std::set<std::string> names;for(const auto& entry:entries)names.insert(Lower(entry.path));
         std::vector<std::string> roots;
         for(const auto& entry:entries)if(!entry.directory){const auto path=Lower(entry.path);const auto slash=path.rfind('/');const auto base=slash==std::string::npos?std::string{}:path.substr(0,slash+1);if(path.substr(base.size())=="default.xex" && names.contains(base+"configfiles.ini") && names.contains(base+"packfiles"))roots.push_back(base);}
-        Require(roots.size()==1,"ZArchive must contain one EM2 game folder, or one raw ISO file");
+        Require(roots.size()==1,"Archive must contain one EM2 game folder, or one raw ISO file");
         for(const auto& entry:entries)if(Lower(entry.path).starts_with(roots[0]) && entry.path.size()>roots[0].size()){
+            const auto relative=entry.path.substr(roots[0].size());size_t at=0;while(at<relative.size()){auto end=relative.find('/',at);if(end==std::string::npos)end=relative.size();Require(Component(relative.substr(at,end-at)),"Unsafe filename in archived Xbox game");at=end+1;}
             plan.files.push_back({entry.path.substr(roots[0].size()),entry.offset,entry.size,entry.directory});if(!entry.directory){plan.total+=entry.size;Require(plan.total<=image.size*2,"Archived game has an excessive expanded data size");}}
     }else{
     if(image.svod){descriptor=image.svod->Descriptor();found=true;}
@@ -267,7 +272,7 @@ bool ImportXbox360Disc(const fs::path& path,const fs::path& destination,const Di
     try {
         error.clear();Image image(path,true,progress);auto plan=Plan(image);std::vector<uint8_t> buffer(1024*1024);Digest digest;
         if(image.svod)digest.Add(image.svod->IdentityPrefix());
-        if(image.zar)digest.Add(image.zar->Identity());
+        if(image.archive)digest.Add(image.archive->Identity());
         else for(uint64_t offset=0;offset<image.size;) {Progress(progress,L"Verifying the disc image",offset,image.size);const auto count=size_t(std::min<uint64_t>(buffer.size(),image.size-offset));auto bytes=std::span(buffer).first(count);image.Read(offset,bytes);digest.Add(bytes);offset+=count;}
         const auto identity=digest.Finish();
         if(!fs::exists(destination))fs::create_directories(destination);
@@ -318,7 +323,10 @@ bool VerifyXbox360Disc(const fs::path& path,const fs::path& reference,std::strin
         uint64_t bytes=0,files=0;
         for(const auto& file:plan.files){
             if(file.directory)continue;
-            try{Require(ExistingMatches(image,file,reference/fs::path(file.path),buffer),"Reference file is missing");}
+            try{Require(ExistingMatches(image,file,reference/fs::path(file.path),buffer),"Reference file is missing");
+                if(image.archive && file.size>8*1024*1024){Handle input;input.value=CreateFileW((reference/fs::path(file.path)).c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);Require(input.value!=INVALID_HANDLE_VALUE,"Cannot open archive seek reference");
+                    for(const auto at:{file.size-64,uint64_t(0),file.size/2}){std::array<uint8_t,64> expected{},actual{};LARGE_INTEGER offset{};offset.QuadPart=LONGLONG(at);DWORD got=0;Require(SetFilePointerEx(input.value,offset,nullptr,FILE_BEGIN) && ReadFile(input.value,expected.data(),DWORD(expected.size()),&got,nullptr) && got==expected.size(),"Cannot read archive seek reference");image.Read(file.offset+at,actual);Require(expected==actual,"Archive backward/checkpoint seek differs from reference");}}
+            }
             catch(const std::exception& problem){throw Failure(file.path+": "+problem.what());}
             bytes+=file.size;++files;
         }
@@ -508,7 +516,7 @@ bool TestDiscImageImport(const fs::path& root) {
         }
         const auto zar_fixture=[&](const fs::path& path,unsigned mode,int invalid){
             const bool iso=mode==2,wrapped=mode==1;std::vector<uint8_t> logical(2*65536,0);
-            if(iso)std::copy(raw.begin(),raw.end(),logical.begin()+37);
+            if(iso){std::copy(raw.begin(),raw.end(),logical.begin()+37);std::copy_n("PK\x03\x04",4,logical.begin());}
             else{std::copy_n(raw.begin()+44*2048,80,logical.begin());std::copy_n("config",6,logical.begin()+80);}
             std::vector<uint8_t> archive(logical.begin(),logical.begin()+65536);
             constexpr std::array<uint8_t,20> zero_frame={40,181,47,253,96,0,255,85,0,0,16,0,0,1,0,251,127,29,96,1};

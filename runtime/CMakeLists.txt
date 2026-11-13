@@ -216,7 +216,7 @@ target_sources(EM2Recomp PRIVATE online_notice.cpp)
 target_sources(EM2Recomp PRIVATE content_setup.cpp)
 target_sources(EM2Recomp PRIVATE disc_image.cpp)
 target_sources(EM2Recomp PRIVATE svod_image.cpp)
-target_sources(EM2Recomp PRIVATE zar_image.cpp)
+target_sources(EM2Recomp PRIVATE zar_image.cpp zip_image.cpp)
 target_sources(EM2Recomp PRIVATE online_lobby.cpp)
 target_sources(EM2Recomp PRIVATE online_content_root.cpp rex_content/content_manager.cpp)
 add_dependencies(EM2Recomp em2_kernel_library)
@@ -420,6 +420,11 @@ if(EXISTS "${EM2_GENERATED}/../tests/instructions.cpp")
         "--log_file=${CMAKE_CURRENT_BINARY_DIR}/demo-support-tests.log")
     add_test(NAME ability-resource-order COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/test-ability-resource-order.py")
+    add_test(NAME zip-content-import COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/test-zip-import.py"
+        --exe "$<TARGET_FILE:EM2Recomp>" --work "${CMAKE_CURRENT_BINARY_DIR}/zip-tests"
+        --report "${CMAKE_CURRENT_BINARY_DIR}/zip-import-results.json")
+    set_tests_properties(zip-content-import PROPERTIES TIMEOUT 300)
 endif()
 target_sources(EM2Recomp PRIVATE renderer_storage.cpp)
 

@@ -72,6 +72,24 @@ other game builds still need testing. This comparison verifies archive contents,
 not a full setup/gameplay run. Nested compressed disc containers and Wii archive
 mounts are not implemented. This reader is not in demo.3.
 
+Development setup also reads single-volume ZIP/ZIP64 archives with Stored or
+DEFLATE entries. It accepts one extracted EM2 tree (including implicit parent
+folders or a Unicode wrapping folder), or one contained raw ISO/XISO/IMG/BIN.
+Contained ISOs are read directly without an intermediate image. All entry CRCs
+are verified before extraction, local/central headers and data descriptors are
+checked, and links, unsafe paths, duplicate names and overlapping records are
+rejected. Bounded DEFLATE checkpoints every 8 MiB allow backward/random reads
+without repeatedly decoding a large ISO from the beginning; decoder allocation
+is capped at 128 MiB. A shared read-only archive interface now serves ZIP and
+ZArchive. ZIP receipts use the verified container bytes as source ownership.
+The independent Python `zipfile` regression suite covers extraction, resume,
+ZIP64, 32/64-bit streaming descriptors, empty files/directories, stored and
+deflated ISOs, checkpoint seeks, misleading extensions and corrupt inputs.
+Password-protected/multi-volume ZIPs and other ZIP compression methods are not
+implemented. Retail-data ZIP validation remains outstanding. This is not in
+demo.3. Run `ctest -R zip-content-import` in the runtime build directory to run
+the suite using the same game executable.
+
 Development source also mounts extracted EM1 Wii discs directly. In the Wii
 image picker, choose **Use an extracted game folder instead**. Select the disc
 root, `DATA`, or `files`; the reader accepts Dolphin-style `sys/boot.bin` plus
@@ -89,7 +107,9 @@ written. Real retail compressed Xbox images still need validation. These new
 Xbox readers are not included in demo.3 and no further binary release is implied.
 
 Developers can compare every game file in an image against a known extracted
-copy without importing or launching gameplay. Use the same game executable:
+copy without importing or launching gameplay. Add
+`--em2_test_xbox_destination="D:\Checks\extracted"` to exercise extraction into
+a new/owned folder before the comparison. Use the same game executable:
 
 ```powershell
 .\beetleworx.exe --em2_test_xbox_disc="D:\Games\EM2.iso" --em2_test_xbox_reference="D:\Games\EM2-extracted" --em2_user_data_directory="D:\Checks\EM2" --log_file="D:\Checks\EM2.log"
@@ -100,7 +120,7 @@ result proves that every file discovered by the native disc parser has matching
 length and contents in the reference; it does not prove executable compatibility
 or successful gameplay. Missing or different reference files fail verification.
 
-ZIP/7z/RAR wrappers, legacy
+7z/RAR wrappers, legacy
 NKit conversions remain unfinished. File-container support also does not make
 changed executable code compatible with the existing static translation.
 
@@ -112,6 +132,7 @@ coverage for that ISO, alongside the synthetic compressed-container tests.
 Format references: [maxcso](https://github.com/unknownbrackets/maxcso),
 [CCI reference format](https://github.com/Team-Resurgent/libCCI/blob/main/FORMAT.md),
 [chd-rs](https://github.com/SnowflakePowered/chd-rs),
+[ZIP specification](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT),
 [ZArchive reader/writer reference](https://github.com/Exzap/ZArchive/tree/965b66c8d67b6b7e30fd63b3b75aa91a99ff303b),
 [nod](https://github.com/encounter/nod/tree/v1.4.4),
 [Xenia SVOD reader](https://github.com/xenia-project/xenia/blob/master/src/xenia/vfs/devices/stfs_container_device.cc),
