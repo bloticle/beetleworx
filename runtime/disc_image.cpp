@@ -9,6 +9,7 @@
 #include <array>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <set>
 #include <span>
 #include <stdexcept>
@@ -31,7 +32,8 @@ uint32_t BE32(const uint8_t* p){return uint32_t(p[0])<<24|uint32_t(p[1])<<16|uin
 void Require(bool value,const char* error){if(!value)throw Failure(error);}
 void Progress(const DiscImportProgress& callback,std::wstring_view stage,uint64_t done,uint64_t total){if(callback && !callback(stage,done,total))throw Canceled{};}
 struct Image {
-    Handle file;uint64_t size=0,physical_size=0;unsigned version=0,shift=0;bool compressed=false,lz4=false;
+    Handle file;uint64_t size=0,physical_size=0;unsigned version=0,shift=0;bool compressed=false,lz4=false,cci=false;
+    std::vector<std::unique_ptr<Image>> parts;std::vector<uint64_t> part_starts;
     uint32_t block_size=0,cached=UINT32_MAX;std::vector<uint32_t> index;std::vector<uint8_t> cache;
     void Physical(uint64_t offset,std::span<uint8_t> bytes){
         Require(offset<=physical_size && bytes.size()<=physical_size-offset,"Compressed image block extends outside its container");
@@ -39,12 +41,41 @@ struct Image {
         DWORD read=0;Require(bytes.size()<=MAXDWORD && ReadFile(file.value,bytes.data(),DWORD(bytes.size()),&read,nullptr) && read==bytes.size(),"Could not read disc image bytes");
     }
     uint64_t Position(size_t i)const{return uint64_t(index[i]&0x7FFFFFFF)<<shift;}
-    explicit Image(const fs::path& path) {
+    explicit Image(const fs::path& path,bool discover_parts=true) {
         // Deny writers while validating, hashing and extracting this image.
         file.value=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
         LARGE_INTEGER length{};Require(file.value!=INVALID_HANDLE_VALUE && GetFileSizeEx(file.value,&length),"Could not open the disc image. Close any app writing it and try again.");
         size=physical_size=uint64_t(length.QuadPart);Require(size>=24 && size<=16ull*1024*1024*1024,"Invalid Xbox disc image size");
         std::array<uint8_t,24> header{};Physical(0,header);
+        cci=std::equal(header.begin(),header.begin()+4,"CCIM");
+        if(cci){
+            std::array<uint8_t,32> full{};Physical(0,full);compressed=lz4=true;version=1;shift=2;block_size=2048;size=U64(full.data()+8);
+            Require(U32(full.data()+4)==32 && U32(full.data()+24)==2048 && full[28]==1 && full[29]==2 && !U16(full.data()+30) &&
+                size>0 && size<=16ull*1024*1024*1024 && !(size%2048),"Unsupported CCI header or logical size");
+            const auto table=U64(full.data()+16),count=size/2048+1;
+            Require(table>=32 && table<=physical_size && count*4<=64*1024*1024 && count*4==physical_size-table,"Invalid CCI index bounds");
+            std::vector<uint8_t> bytes(size_t(count*4));Physical(table,bytes);index.resize(size_t(count));
+            for(size_t i=0;i<index.size();++i)index[i]=U32(bytes.data()+i*4);
+            Require(Position(0)==32 && Position(index.size()-1)==table,"CCI blocks do not match the header/index boundaries");
+            for(size_t i=1;i<index.size();++i){const auto span=Position(i)-Position(i-1);
+                Require(Position(i)>Position(i-1) && Position(i)<=table && ((index[i-1]&0x80000000u)?(span>=4 && span<=2048):(span==2048)),"Invalid CCI sector extent");}
+            if(discover_parts){
+                const auto stem=path.stem().wstring();const auto dot=stem.rfind(L'.');
+                if(dot!=std::wstring::npos && dot+1<stem.size() && std::all_of(stem.begin()+dot+1,stem.end(),[](wchar_t c){return c>=L'0' && c<=L'9';})){
+                    const auto number=stem.substr(dot+1);Require(number.size()<=2 && number[0]!=L'0',"Invalid CCI part number");const auto chosen=std::stoul(number);
+                    Require(chosen<=32,"CCI has too many parts");const auto base=stem.substr(0,dot);bool gap=false;uint64_t total=0;
+                    Require(!fs::exists(path.parent_path()/(base+L".33"+path.extension().wstring())),"CCI split image exceeds the 32-part limit");
+                    for(unsigned n=1;n<=32;++n){const auto sibling=path.parent_path()/(base+L'.'+std::to_wstring(n)+path.extension().wstring());
+                        if(!fs::exists(sibling)){gap=true;continue;}Require(!gap,"CCI split image has a missing part; keep all numbered parts together");
+                        auto part=std::make_unique<Image>(sibling,false);Require(part->cci,"CCI split image contains a different container format");
+                        Require(part->size<=16ull*1024*1024*1024-total,"CCI split image is too large");part_starts.push_back(total);total+=part->size;parts.push_back(std::move(part));
+                    }
+                    Require(parts.size()>=chosen,"CCI split image is missing its selected part");size=total;
+                    CloseHandle(file.value);file.value=INVALID_HANDLE_VALUE;index.clear();
+                }
+            }
+            return;
+        }
         compressed=std::equal(header.begin(),header.begin()+4,"CISO") || std::equal(header.begin(),header.begin()+4,"ZISO");
         if(!compressed){Require(size>=0x10800,"The disc image is too short");return;}
         lz4=header[0]=='Z';version=header[20];shift=header[21];block_size=U32(header.data()+16);size=U64(header.data()+8);
@@ -61,15 +92,23 @@ struct Image {
     bool Contains(uint64_t offset,uint64_t length)const{return offset<=size && length<=size-offset;}
     void Read(uint64_t offset,std::span<uint8_t> bytes) {
         Require(Contains(offset,bytes.size()),"The disc image is truncated or contains an invalid file extent.");
+        if(!parts.empty()){size_t copied=0;while(copied<bytes.size()){
+            const auto i=size_t(std::upper_bound(part_starts.begin(),part_starts.end(),offset)-part_starts.begin()-1);
+            const auto local=offset-part_starts[i],count=size_t(std::min<uint64_t>(bytes.size()-copied,parts[i]->size-local));
+            parts[i]->Read(local,bytes.subspan(copied,count));offset+=count;copied+=count;
+        }return;}
         if(compressed){size_t copied=0;while(copied<bytes.size()){
             const auto block=uint32_t(offset/block_size);const auto within=size_t(offset%block_size);
             if(cached!=block){const auto length=size_t(Position(block+1)-Position(block));const auto minimum=size_t(std::min<uint64_t>(block_size,size-uint64_t(block)*block_size));
-                const bool plain=version==2?length>=block_size:bool(index[block]&0x80000000u);
-                cache.assign(block_size,0);
+                const bool plain=cci?!(index[block]&0x80000000u):version==2?length>=block_size:bool(index[block]&0x80000000u);
+                cached=UINT32_MAX;cache.assign(block_size,0);
                 if(plain){Require(length>=minimum,"Short uncompressed CSO block");Physical(Position(block),std::span(cache).first(minimum));cache.resize(minimum);}
                 else{std::vector<uint8_t> encoded(length);Physical(Position(block),encoded);size_t produced=0;std::string error;
                     const bool use_lz4=lz4 || (version==2 && (index[block]&0x80000000u));
-                    if(use_lz4)produced=DecodeLz4(encoded,cache,minimum,(size_t(1)<<shift)-1);
+                    if(cci){const auto pad=encoded[0];Require(pad<=3 && encoded.size()>size_t(pad)+1,"Invalid CCI block padding");
+                        Require(std::all_of(encoded.end()-pad,encoded.end(),[](uint8_t b){return b==0;}),"Nonzero CCI padding");
+                        produced=DecodeLz4(std::span(encoded).subspan(1,encoded.size()-1-pad),cache,minimum,0);Require(produced==2048,"CCI sector did not decode to 2048 bytes");}
+                    else if(use_lz4)produced=DecodeLz4(encoded,cache,minimum,(size_t(1)<<shift)-1);
                     else{const auto decoded=em1::InflateDiscBlock(encoded,cache,minimum,(size_t(1)<<shift)-1,produced,error);Require(decoded,error.c_str());}
                     cache.resize(produced);
                 }cached=block;
@@ -302,6 +341,40 @@ bool TestDiscImageImport(const fs::path& root) {
             Require(ImportXbox360Disc(path,target,{},error),"Equivalent CSO/ZSO failed verified ISO extraction/resume");
             Require(VerifyXbox360Disc(path,target,error),"Compressed disc reference verification failed");
         }
+        auto cci_fixture=[&](const fs::path& path,std::span<const uint8_t> logical){
+            Require(logical.size()%2048==0,"CCI fixture is not sector-aligned");std::vector<uint8_t> container(32,0);std::vector<uint32_t> positions;
+            auto word=[&](size_t at,uint32_t n){for(unsigned i=0;i<4;++i)container[at+i]=uint8_t(n>>(8*i));};
+            std::copy_n("CCIM",4,container.begin());word(4,32);word(8,uint32_t(logical.size()));word(12,uint32_t(uint64_t(logical.size())>>32));word(24,2048);container[28]=1;container[29]=2;
+            for(size_t b=0;b<logical.size()/2048;++b){const auto sector=logical.subspan(b*2048,2048);std::vector<uint8_t> packed;
+                if(b%3 && std::all_of(sector.begin(),sector.end(),[&](uint8_t v){return v==sector[0];})){
+                    const auto literals=1+b%4;packed.push_back(uint8_t(literals<<4|15));packed.insert(packed.end(),literals,sector[0]);packed.push_back(1);packed.push_back(0);
+                    size_t extra=2048-literals-24;while(extra>=255){packed.push_back(255);extra-=255;}packed.push_back(uint8_t(extra));packed.push_back(0x50);packed.insert(packed.end(),5,sector[0]);
+                }
+                positions.push_back(uint32_t(container.size()/4)|(packed.empty()?0u:0x80000000u));
+                if(packed.empty())container.insert(container.end(),sector.begin(),sector.end());
+                else{const auto pad=(4-(packed.size()+1)%4)%4;container.push_back(uint8_t(pad));container.insert(container.end(),packed.begin(),packed.end());container.insert(container.end(),pad,0);}
+            }
+            const auto table=container.size();positions.push_back(uint32_t(table/4));word(16,uint32_t(table));word(20,uint32_t(uint64_t(table)>>32));
+            container.resize(table+positions.size()*4);for(size_t i=0;i<positions.size();++i)word(table+i*4,positions[i]);
+            std::ofstream out(path,std::ios::binary);out.write(reinterpret_cast<const char*>(container.data()),container.size());
+        };
+        const auto cci=root/"single.cci";cci_fixture(cci,raw);
+        {Image image(cci);std::vector<uint8_t> decoded(raw.size());image.Read(0,decoded);Require(decoded==raw,"CCI changed logical disc bytes");}
+        Require(ImportXbox360Disc(cci,target,{},error) && VerifyXbox360Disc(cci,target,error),"CCI extraction or verified resume failed");
+        constexpr size_t split=17*2048;cci_fixture(root/"split.1.cci",std::span(raw).first(split));cci_fixture(root/"split.2.cci",std::span(raw).subspan(split));
+        {Image image(root/"split.2.cci");std::vector<uint8_t> decoded(raw.size());image.Read(0,decoded);Require(decoded==raw,"CCI numbered parts did not join correctly");
+            std::array<uint8_t,4125> crossing{};image.Read(split-13,crossing);Require(std::equal(crossing.begin(),crossing.end(),raw.begin()+split-13),"CCI part boundary read differs");}
+        Require(ImportXbox360Disc(root/"split.2.cci",target,{},error),"CCI split image failed equivalent-container resume");
+        fs::copy_file(root/"split.2.cci",root/"split.33.cci");
+        {bool rejected=false;try{Image malformed(root/"split.1.cci");}catch(const Failure&){rejected=true;}Require(rejected,"CCI excess part was silently omitted");}
+        fs::remove(root/"split.33.cci");
+        fs::rename(root/"split.2.cci",root/"split.3.cci");
+        {bool rejected=false;try{Image malformed(root/"split.1.cci");}catch(const Failure&){rejected=true;}Require(rejected,"CCI missing middle part accepted");}
+        const auto bad_cci=root/"bad-pad.cci";cci_fixture(bad_cci,raw);
+        {std::fstream change(bad_cci,std::ios::binary|std::ios::in|std::ios::out);change.seekp(32+2048);change.put(4);}
+        {Image malformed(bad_cci);std::array<uint8_t,2048> bytes{};malformed.Read(0x10000,bytes);
+            bool rejected=false;try{malformed.Read(2048,bytes);}catch(const Failure&){rejected=true;}Require(rejected,"CCI invalid block padding accepted");
+            malformed.Read(0x10000,bytes);Require(std::equal(bytes.begin(),bytes.end(),raw.begin()+0x10000),"Failed compressed decode poisoned a previously cached sector");}
         {const auto bad=root/"bad-index.cso";compressed_fixture(bad,1,0,false,false);std::fstream change(bad,std::ios::binary|std::ios::in|std::ios::out);change.seekp(24);const char zero[4]{};change.write(zero,4);change.close();
             bool rejected=false;try{Image malformed(bad);}catch(const Failure&){rejected=true;}Require(rejected,"Overlapping CSO header/index accepted");}
         for(const auto& bad:std::vector<std::vector<uint8_t>>{{0x10,'a',0,0},{0x10,'a',2,0},{0xf0,255,255},{0x10,'a',1}}){
@@ -310,7 +383,7 @@ bool TestDiscImageImport(const fs::path& root) {
         }
         std::ifstream stream(target/"packfiles"/"level.pak",std::ios::binary);Require(std::string(std::istreambuf_iterator<char>(stream),{})=="level-data","Extracted ISO contents differ.");
         Require(!fs::exists(root/"escape"),"Unsafe ISO path escaped extraction.");
-        REXLOG_INFO("Native disc importer passed: four XDVDFS bases, CSO1/2 DEFLATE and LZ4/ZSO, raw/partial/aligned/cross-block decoding, malformed index, title/path rejection and equivalent-container SHA-256 resume (synthetic images; retail compressed images still need validation)");return true;
+        REXLOG_INFO("Native disc importer passed: four XDVDFS bases, CSO1/2 DEFLATE and LZ4/ZSO, single/split CCI, raw/partial/aligned/cross-block decoding, malformed index/padding/missing parts, title/path rejection and equivalent-container SHA-256 resume (synthetic images; retail compressed images still need validation)");return true;
     }catch(const std::exception& exception){REXLOG_ERROR("Disc image fixture: {}",exception.what());return false;}
 }
 }

@@ -6,11 +6,19 @@ The original RVZ mount and embedded reader have been compared against the same
 owned disc: full file inventory and sampled beginning/end bytes match. This
 does not establish full campaign compatibility or retail testing of each format.
 
-Development source additionally reads Xbox CSO v1/v2 and ZSO directly, with
+Development source additionally reads Xbox CSO v1/v2, ZSO and CCI directly, with
 bounded DEFLATE and LZ4 decoding and a single decompressed-block cache. It
 recognizes containers by their contents. Raw images named `.xiso`, `.img` or
 `.bin` work through the same XDVDFS parser. Choosing `default.xex` inside a
 complete extracted folder selects that folder.
+
+CCI supports both single files and numbered `name.1.cci`, `name.2.cci`, ...
+parts. Select any numbered part and keep the complete set together. The reader
+opens parts read-only and joins their logical sectors; no temporary ISO is
+created. It checks header/index extents, raw sector lengths, compressed padding
+and missing middle parts. The current bounded reader accepts up to 32 parts.
+Tests cover mixed raw/LZ4 sectors, padding, split-boundary reads and equivalent
+ISO/CCI import resume. Retail CCI images still need validation.
 
 Development source also mounts extracted EM1 Wii discs directly. In the Wii
 image picker, choose **Use an extracted game folder instead**. Select the disc
@@ -40,7 +48,7 @@ result proves that every file discovered by the native disc parser has matching
 length and contents in the reference; it does not prove executable compatibility
 or successful gameplay. Missing or different reference files fail verification.
 
-CHD, GOD/SVOD, CCI, ZAR, ZIP/7z/RAR wrappers, legacy
+CHD, GOD/SVOD, ZAR, ZIP/7z/RAR wrappers, legacy
 NKit conversions remain unfinished. File-container support also does not make
 changed executable code compatible with the existing static translation.
 
@@ -50,4 +58,5 @@ file bytes matched at partition offset `0x02080000`. This establishes real-disc
 coverage for that ISO, alongside the synthetic compressed-container tests.
 
 Format references: [maxcso](https://github.com/unknownbrackets/maxcso),
+[CCI reference format](https://github.com/Team-Resurgent/libCCI/blob/main/FORMAT.md),
 [nod](https://github.com/encounter/nod/tree/v1.4.4).

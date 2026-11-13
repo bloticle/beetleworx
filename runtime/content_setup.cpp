@@ -137,7 +137,7 @@ fs::path ChooseSource(bool em1) {
             dialog->SetOkButtonLabel(folders?L"Use game folder":L"Use disc image");
             auto* events=new SourcePickerEvents;DWORD cookie=0;
             if(!folders) {
-                const COMDLG_FILTERSPEC filters[]={{em1?L"Wii disc images":L"Xbox 360 disc images",em1?L"*.rvz;*.iso;*.gcm;*.wia;*.wbfs;*.ciso;*.gcz;*.nfs":L"*.iso;*.xiso;*.cso;*.zso;*.img;*.bin"},{L"All files",L"*.*"}};dialog->SetFileTypes(2,filters);
+                const COMDLG_FILTERSPEC filters[]={{em1?L"Wii disc images":L"Xbox 360 disc images",em1?L"*.rvz;*.iso;*.gcm;*.wia;*.wbfs;*.ciso;*.gcz;*.nfs":L"*.iso;*.xiso;*.cso;*.zso;*.cci;*.img;*.bin"},{L"All files",L"*.*"}};dialog->SetFileTypes(2,filters);
                 IFileDialogCustomize* customize=nullptr;
                 if(SUCCEEDED(dialog->QueryInterface(IID_PPV_ARGS(&customize)))){customize->AddPushButton(100,L"Use an extracted game folder instead");customize->Release();}
                 dialog->Advise(events,&cookie);
