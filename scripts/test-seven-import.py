@@ -65,7 +65,7 @@ def make_iso():
 results = []
 
 
-def run(name, path, good=True, iso=False, resume=None):
+def run(name, path, good=True, iso=False, resume=None, identity_source=None):
     source_hash = hashlib.sha256(path.read_bytes()).digest()
     destination = root / ((resume or name) + "-output")
     log = root / (name + ".log")
@@ -84,7 +84,7 @@ def run(name, path, good=True, iso=False, resume=None):
         expected = {k: v for k, v in content.items() if not iso or k != "empty.bin"}
         for relative, data in expected.items():
             assert (destination / relative).read_bytes() == data, (name, relative)
-        identity = hashlib.sha256(hashlib.sha256(path.read_bytes()).digest()).hexdigest()
+        identity = hashlib.sha256(hashlib.sha256((identity_source or path).read_bytes()).digest()).hexdigest()
         assert (destination / ".em2-iso-import/identity.txt").read_text() == identity + "\n", name
     else:
         assert not destination.exists(), (name, "malformed 7z reached extraction")
@@ -160,6 +160,59 @@ try:
     path = root / "oversized-dictionary.7z"
     path.write_bytes(oversized)
     run("oversized-dictionary", path, False)
+    # Raw 7z volume splitting is independent of compression. Split a producer's
+    # complete archive, including inside its signature and encoded end header.
+    split_sources = []
+    for label, source, cuts in [
+        ("split-header", root / "lzma2-solid.7z", None),
+        ("many-volumes", root / "copy.7z", 11),
+        ("max-volumes", root / "lzma2-solid.7z", 128),
+        ("single-volume", root / "lzma2-solid.7z", 1),
+    ]:
+        raw = source.read_bytes()
+        offsets = [0, 5, len(raw) - 3, len(raw)] if cuts is None else [len(raw) * i // cuts for i in range(cuts + 1)]
+        folder = root / label
+        folder.mkdir()
+        parts = []
+        for i, (start, end) in enumerate(zip(offsets, offsets[1:]), 1):
+            part = folder / f"game.7z.{i:03}"
+            part.write_bytes(raw[start:end])
+            parts.append(part)
+        split_sources.append((parts, source))
+        run(label + "-last", parts[-1], identity_source=source)
+        if len(parts) > 1:
+            run(label + "-first-resume", parts[0], resume=label + "-last", identity_source=source)
+            run(label + "-single-resume", source, resume=label + "-last")
+        assert b"".join(p.read_bytes() for p in parts) == raw
+    parts, source = split_sources[1]
+    for index, label in [(0, "missing-first"), (5, "missing-middle"), (10, "missing-final"), (10, "empty-final"), (5, "corrupt-middle")]:
+        saved = parts[index].read_bytes()
+        if label.startswith("missing"):
+            parts[index].unlink()
+        elif label == "empty-final":
+            parts[index].write_bytes(b"")
+        else:
+            corrupt = bytearray(saved)
+            corrupt[100] ^= 1
+            parts[index].write_bytes(corrupt)
+        run("split-" + label, parts[1], False)
+        parts[index].write_bytes(saved)
+    parts, source = split_sources[2]
+    extra = parts[0].parent / "game.7z.129"
+    extra.write_bytes(b"extra")
+    run("too-many-volumes", parts[0], False)
+    run("selected-volume-out-of-range", extra, False)
+    extra.unlink()
+    # The same native cancellation path must identify the combined source size.
+    cancel_log = root / "split-cancel.log"
+    cancel = subprocess.run([str(exe), f"--em2_test_xbox_disc={parts[-1]}",
+                             "--em2_test_seven_cancel=true", f"--em2_user_data_directory={root / 'split-cancel-profile'}",
+                             f"--log_file={cancel_log}"], cwd=exe.parent, timeout=60,
+                            creationflags=0x08000000 if os.name == "nt" else 0,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    assert cancel.returncode == 0 and "7z cancellation regression: PASS" in cancel_log.read_text(), cancel_log
+    results.append({"name": "split-cancel-during-decode", "result": "PASS"})
+    print("split-cancel-during-decode: PASS", flush=True)
     original = (root / "copy.7z").read_bytes()
     broken = bytearray(original)
     broken[33] ^= 1

@@ -7,6 +7,7 @@ namespace em2 {
 bool TestSevenImageCancellation(const std::filesystem::path&);
 class SevenImage : public ArchiveImage {
  public:
+  static bool IsSplitPath(const std::filesystem::path&);
   static std::unique_ptr<SevenImage> Open(const std::filesystem::path&,std::string&,const std::function<bool(uint64_t,uint64_t)>& progress={});
   ~SevenImage() override;
   uint64_t Size() const override;

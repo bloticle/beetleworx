@@ -1,7 +1,16 @@
 //! Streaming 7z decode bridge. No output names are passed to the filesystem.
-use std::{fs::OpenOptions,io::BufReader,panic::{catch_unwind,AssertUnwindSafe},slice};
+use std::{io::{self,BufReader,Read,Seek,SeekFrom},panic::{catch_unwind,AssertUnwindSafe}};
 use sevenz_rust2::{ArchiveReader,Password,Error};
 use std::ffi::c_void;
+type ReadAt=unsafe extern "C" fn(*mut c_void,u64,*mut u8,usize)->i32;
+struct Source{context:*mut c_void,read:ReadAt,length:u64,position:u64}
+impl Read for Source{fn read(&mut self,out:&mut [u8])->io::Result<usize>{
+ let count=out.len().min(self.length.saturating_sub(self.position) as usize);if count==0{return Ok(0);}
+ if unsafe{(self.read)(self.context,self.position,out.as_mut_ptr(),count)}==0{return Err(io::Error::other("Cannot read 7z source bytes"));}self.position+=count as u64;Ok(count)
+}}
+impl Seek for Source{fn seek(&mut self,from:SeekFrom)->io::Result<u64>{let at=match from{SeekFrom::Start(n)=>n as i128,SeekFrom::End(n)=>self.length as i128+n as i128,SeekFrom::Current(n)=>self.position as i128+n as i128};
+ if !(0..=u64::MAX as i128).contains(&at){return Err(io::Error::new(io::ErrorKind::InvalidInput,"Invalid 7z seek"));}self.position=at as u64;Ok(self.position)
+}}
 type Begin=unsafe extern "C" fn(*mut c_void,u64)->i32;
 type Entry=unsafe extern "C" fn(*mut c_void,*const u8,usize,u64,i32)->i32;
 type Data=unsafe extern "C" fn(*mut c_void,*const u8,usize)->i32;
@@ -15,14 +24,10 @@ fn normalized(name:&str,directory:bool)->Result<String,String>{
 }
 unsafe fn message(out:*mut u8,n:usize,s:&str){if !out.is_null() && n>0{let data=s.as_bytes();let len=data.len().min(n-1);unsafe{std::ptr::copy_nonoverlapping(data.as_ptr(),out,len);*out.add(len)=0;}}}
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn bw_seven_unpack(path:*const u8,length:usize,context:*mut c_void,begin:Begin,entry:Entry,data:Data,error:*mut u8,capacity:usize)->i32{
+pub unsafe extern "C" fn bw_seven_unpack(physical:u64,context:*mut c_void,read:ReadAt,begin:Begin,entry:Entry,data:Data,error:*mut u8,capacity:usize)->i32{
  let result=catch_unwind(AssertUnwindSafe(||->Result<(),String>{
-  require(!path.is_null() && length>0 && length<=32768,"Invalid 7z source path")?;
-  let path=std::str::from_utf8(unsafe{slice::from_raw_parts(path,length)}).map_err(|e|e.to_string())?;
-  let mut options=OpenOptions::new();options.read(true);
-  #[cfg(windows)]{use std::os::windows::fs::OpenOptionsExt;options.share_mode(1);}
-  let file=options.open(path).map_err(|e|e.to_string())?;let physical=file.metadata().map_err(|e|e.to_string())?.len();
-  require((32..=16*1024*1024*1024).contains(&physical),"Invalid 7z container size")?;
+  require(!context.is_null() && (32..=16*1024*1024*1024).contains(&physical),"Invalid 7z source/size")?;
+  let file=Source{context,read,length:physical,position:0};
   // Upstream bounds both encoded/decoded header buffers and each decoder's
   // dictionary/model. Output and entry/path budgets are checked separately.
   let mut reader=ArchiveReader::new_with_memory_limit(BufReader::with_capacity(65536,file),Password::empty(),128*1024).map_err(|e|e.to_string())?;

@@ -127,12 +127,19 @@ establish a complete setup/gameplay run from that archive or compatibility
 with every ZIP producer/build. Run `ctest -R zip-content-import` in the runtime
 build directory for the 27 independent fixture cases. This is not in demo.3.
 
-Development setup also reads single-volume 7z archives through pinned
+Development setup also reads single-file and numbered multipart 7z archives
+through pinned
 `sevenz-rust2` 0.25.0 linked into `beetleworx.exe`. Copy, LZMA and LZMA2 streams,
 including BCJ-filtered content, are enabled. Archives can contain an extracted
 EM2 tree (optionally wrapped in a folder) or a single raw ISO. Decoder CRC
 checks finish before final extraction; SHA-256 of the original container owns
-import/resume receipts. Source files remain read-only.
+import/resume receipts. Source files remain read-only. For numbered
+`name.7z.001`, `.002`, ... volumes, select any part and keep every part in the
+same folder. Up to 128 parts are read through one logical stream, without a
+joined input file. All volume handles deny writes during hashing, decoding and
+extraction. A byte-identical single-file archive and volume set share the same
+resume identity. Missing/empty volumes, an out-of-range selected part and an
+excess 129th part are rejected.
 
 Solid streams decode sequentially into one Windows temporary cache, enabling
 later random/backward file reads. The cache is opened with delete-on-close and
@@ -143,15 +150,17 @@ container and unpacked output, 100,000 entries, and 64 MiB of retained path
 metadata. The decoder uses a 128 MiB limit for each header buffer and
 individual dictionary/model; this is not a total process-memory cap. Encrypted
 headers/content, anti-items, links, duplicate/conflicting paths and unsafe
-paths are rejected. Multi-volume 7z and optional codecs such as PPMd/BZip2 are
-not enabled. This addition is not in demo.3; retail-sized 7z archives still
-need validation.
+paths are rejected. Optional codecs such as PPMd/BZip2 are not enabled. This
+addition is not in demo.3; retail-sized 7z archives still need validation.
 
-The independent fixture suite covers solid and multiple-block decoding, the
+The 39-case independent fixture suite covers solid and multiple-block decoding, the
 three enabled codecs and BCJ, plain/encoded headers, Unicode wrappers, contained
 ISOs, resume/source preservation, corrupt CRCs/truncation, unsafe/duplicate/link
 entries, encryption rejection, oversized dictionaries, cancellation during
-decoding, and temporary-cache cleanup. For development tests only, install
+decoding, and temporary-cache cleanup. Multipart cases split the signature and
+end header, use tiny final fragments, select first/later/128th volumes, resume
+between volume sets and single files, reject missing/corrupt/empty/excess parts,
+and cancel during multipart decoding. For development tests only, install
 `py7zr==1.1.3` into the build's Python environment and reconfigure CMake. The
 `seven-content-import` test is registered when that module is importable;
 `EM2_SEVEN_TEST_MODULES` can point to an isolated module directory instead.
@@ -201,6 +210,7 @@ Format references: [maxcso](https://github.com/unknownbrackets/maxcso),
 [chd-rs](https://github.com/SnowflakePowered/chd-rs),
 [ZIP specification](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT),
 [sevenz-rust2](https://github.com/hasenbanck/sevenz-rust/tree/v0.25.0),
+[7-Zip split-volume reader](https://github.com/ip7z/7zip/blob/main/CPP/7zip/Archive/SplitHandler.cpp),
 [ZArchive reader/writer reference](https://github.com/Exzap/ZArchive/tree/965b66c8d67b6b7e30fd63b3b75aa91a99ff303b),
 [nod](https://github.com/encounter/nod/tree/v1.4.4),
 [Xenia SVOD reader](https://github.com/xenia-project/xenia/blob/master/src/xenia/vfs/devices/stfs_container_device.cc),
