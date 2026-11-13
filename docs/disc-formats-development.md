@@ -51,6 +51,21 @@ executable/build checks. GOD
 imports have their own source identity and do not resume an ISO import receipt.
 These additions are not included in demo.3.
 
+Development setup also reads ZArchive v1 (`.zar`) with the existing embedded
+Zstandard decoder. It accepts one extracted EM2 game tree at the archive root
+or inside a wrapping folder, or one raw ISO/XISO/IMG/BIN file stored in the
+archive. A contained ISO is read directly without writing an intermediate image.
+The whole-archive SHA-256 checksum is verified with cancellable progress before
+extraction. Metadata, directory depth, names and block ranges are bounded;
+cyclic, multiply-parented, duplicate and unsafe paths are rejected. The
+verified archive hash provides resume ownership without a second full
+uncompressed hashing pass; an archive uses its own import receipt rather than
+resuming an ISO receipt. Tests cover raw/compressed blocks, cross-block reads,
+extended names, empty files, wrapped trees, a contained ISO, checksum failures,
+malformed/truncated metadata, cancellation and failed-decode cache recovery.
+Retail-data archives still need validation. Nested compressed disc containers
+and Wii archive mounts are not implemented. This reader is not in demo.3.
+
 Development source also mounts extracted EM1 Wii discs directly. In the Wii
 image picker, choose **Use an extracted game folder instead**. Select the disc
 root, `DATA`, or `files`; the reader accepts Dolphin-style `sys/boot.bin` plus
@@ -79,7 +94,7 @@ result proves that every file discovered by the native disc parser has matching
 length and contents in the reference; it does not prove executable compatibility
 or successful gameplay. Missing or different reference files fail verification.
 
-ZAR, ZIP/7z/RAR wrappers, legacy
+ZIP/7z/RAR wrappers, legacy
 NKit conversions remain unfinished. File-container support also does not make
 changed executable code compatible with the existing static translation.
 
@@ -91,6 +106,7 @@ coverage for that ISO, alongside the synthetic compressed-container tests.
 Format references: [maxcso](https://github.com/unknownbrackets/maxcso),
 [CCI reference format](https://github.com/Team-Resurgent/libCCI/blob/main/FORMAT.md),
 [chd-rs](https://github.com/SnowflakePowered/chd-rs),
+[ZArchive reader/writer reference](https://github.com/Exzap/ZArchive/tree/965b66c8d67b6b7e30fd63b3b75aa91a99ff303b),
 [nod](https://github.com/encounter/nod/tree/v1.4.4),
 [Xenia SVOD reader](https://github.com/xenia-project/xenia/blob/master/src/xenia/vfs/devices/stfs_container_device.cc),
 [iso2god-rs package writer](https://github.com/iliazeus/iso2god-rs/blob/master/src/god/con_header.rs).
