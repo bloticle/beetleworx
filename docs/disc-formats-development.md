@@ -30,6 +30,21 @@ Retail CHDs and the other decoder codecs still need validation. Parent-dependent
 CHDs and CD-sector/audio layouts are not accepted; this reader is for Xbox
 images and is not a Wii CHD mount. These additions are not included in demo.3.
 
+Development setup also reads Xbox 360 GOD/SVOD packages directly. Select the
+package header (use All files for extensionless headers), its containing folder,
+or its `.data` folder. Keep every `Data0000`, `Data0001`, ... fragment together.
+The reader covers external legacy/enhanced layouts and single-file SVOD, checks
+the package title and filesystem, and reads across hash-table/fragment boundaries.
+It derives readable size from physical fragment geometry because converter
+allocation counts may be byte-swapped or too small after trimming. Originals
+remain read-only; setup extracts the game files without creating an ISO.
+Synthetic tests cover all three layouts, two-fragment reads, folder detection,
+missing fragments and ambiguous package folders. Retail GOD packages still need
+validation. The stored SVOD SHA-1 hash tree is not verified yet; setup
+uses SHA-256 source ownership and the existing executable/build checks. GOD
+imports have their own source identity and do not resume an ISO import receipt.
+These additions are not included in demo.3.
+
 Development source also mounts extracted EM1 Wii discs directly. In the Wii
 image picker, choose **Use an extracted game folder instead**. Select the disc
 root, `DATA`, or `files`; the reader accepts Dolphin-style `sys/boot.bin` plus
@@ -58,7 +73,7 @@ result proves that every file discovered by the native disc parser has matching
 length and contents in the reference; it does not prove executable compatibility
 or successful gameplay. Missing or different reference files fail verification.
 
-GOD/SVOD, ZAR, ZIP/7z/RAR wrappers, legacy
+ZAR, ZIP/7z/RAR wrappers, legacy
 NKit conversions remain unfinished. File-container support also does not make
 changed executable code compatible with the existing static translation.
 
@@ -70,4 +85,6 @@ coverage for that ISO, alongside the synthetic compressed-container tests.
 Format references: [maxcso](https://github.com/unknownbrackets/maxcso),
 [CCI reference format](https://github.com/Team-Resurgent/libCCI/blob/main/FORMAT.md),
 [chd-rs](https://github.com/SnowflakePowered/chd-rs),
-[nod](https://github.com/encounter/nod/tree/v1.4.4).
+[nod](https://github.com/encounter/nod/tree/v1.4.4),
+[Xenia SVOD reader](https://github.com/xenia-project/xenia/blob/master/src/xenia/vfs/devices/stfs_container_device.cc),
+[iso2god-rs package writer](https://github.com/iliazeus/iso2god-rs/blob/master/src/god/con_header.rs).

@@ -1,6 +1,7 @@
 #include "content_setup.h"
 #include "content_patch.h"
 #include "disc_image.h"
+#include "svod_image.h"
 #include "em1_vfs.h"
 #include "demo_setup.h"
 #include <rex/kernel/kernel_state.h>
@@ -133,13 +134,13 @@ fs::path ChooseSource(bool em1) {
             IFileDialog* dialog=nullptr;
             if(FAILED(CoCreateInstance(CLSID_FileOpenDialog,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&dialog))))break;
             DWORD options=0;dialog->GetOptions(&options);dialog->SetOptions(options|FOS_FORCEFILESYSTEM|FOS_PATHMUSTEXIST|FOS_NOCHANGEDIR|(folders?FOS_PICKFOLDERS:FOS_FILEMUSTEXIST));
-            dialog->SetTitle(em1?(folders?L"Select your extracted Epic Mickey Wii folder":L"Select your Epic Mickey Wii disc image"):(folders?L"Select your extracted Epic Mickey 2 Xbox 360 folder":L"Select your Epic Mickey 2 Xbox 360 disc image"));
+            dialog->SetTitle(em1?(folders?L"Select your extracted Epic Mickey Wii folder":L"Select your Epic Mickey Wii disc image"):(folders?L"Select your EM2 game folder or GOD package folder":L"Select your Epic Mickey 2 Xbox 360 image or GOD package (All files)"));
             dialog->SetOkButtonLabel(folders?L"Use game folder":L"Use disc image");
             auto* events=new SourcePickerEvents;DWORD cookie=0;
             if(!folders) {
-                const COMDLG_FILTERSPEC filters[]={{em1?L"Wii disc images":L"Xbox 360 disc images",em1?L"*.rvz;*.iso;*.gcm;*.wia;*.wbfs;*.ciso;*.gcz;*.nfs":L"*.iso;*.xiso;*.cso;*.zso;*.cci;*.chd;*.img;*.bin"},{L"All files",L"*.*"}};dialog->SetFileTypes(2,filters);
+                const COMDLG_FILTERSPEC filters[]={{em1?L"Wii disc images":L"Xbox 360 disc images",em1?L"*.rvz;*.iso;*.gcm;*.wia;*.wbfs;*.ciso;*.gcz;*.nfs":L"*.iso;*.xiso;*.cso;*.zso;*.cci;*.chd;*.god;*.img;*.bin"},{L"All files",L"*.*"}};dialog->SetFileTypes(2,filters);
                 IFileDialogCustomize* customize=nullptr;
-                if(SUCCEEDED(dialog->QueryInterface(IID_PPV_ARGS(&customize)))){customize->AddPushButton(100,L"Use an extracted game folder instead");customize->Release();}
+                if(SUCCEEDED(dialog->QueryInterface(IID_PPV_ARGS(&customize)))){customize->AddPushButton(100,em1?L"Use an extracted game folder instead":L"Use a game folder instead");customize->Release();}
                 dialog->Advise(events,&cookie);
             }
             if(SUCCEEDED(dialog->Show(nullptr))) {
@@ -210,6 +211,9 @@ bool PrepareGameContent(const fs::path& executable_directory,fs::path& game,cons
         const auto remembered=saved.empty()?pending:saved;
         if(!explicit_game && !remembered.empty() && OriginalFolder(remembered))game=remembered;
         auto extract_image=[&] {
+            if(fs::is_directory(game) && !OriginalFolder(game)){
+                const auto package=SvodImage::FindPackage(game,error);if(!error.empty())return false;if(!package.empty())game=package;
+            }
             auto extension=game.extension().wstring();for(auto& ch:extension)if(ch>=L'A' && ch<=L'Z')ch+=32;
             if(!fs::is_regular_file(game))return true;
             if(extension==L".xex" && OriginalFolder(game.parent_path())){game=game.parent_path();return true;}

@@ -1,6 +1,7 @@
 #include "disc_image.h"
 #include "em1_inflate.h"
 #include "em1_deflate.h"
+#include "svod_image.h"
 #include <windows.h>
 #include <winioctl.h>
 #include <bcrypt.h>
@@ -40,6 +41,7 @@ struct Image {
     Handle file;uint64_t size=0,physical_size=0;unsigned version=0,shift=0;bool compressed=false,lz4=false,cci=false;
     std::vector<std::unique_ptr<Image>> parts;std::vector<uint64_t> part_starts;
     std::unique_ptr<void,void(*)(void*)> chd{nullptr,bw_chd_close};
+    std::unique_ptr<SvodImage> svod;
     uint32_t block_size=0,cached=UINT32_MAX;std::vector<uint32_t> index;std::vector<uint8_t> cache;
     void Physical(uint64_t offset,std::span<uint8_t> bytes){
         Require(offset<=physical_size && bytes.size()<=physical_size-offset,"Compressed image block extends outside its container");
@@ -53,6 +55,9 @@ struct Image {
         LARGE_INTEGER length{};Require(file.value!=INVALID_HANDLE_VALUE && GetFileSizeEx(file.value,&length),"Could not open the disc image. Close any app writing it and try again.");
         size=physical_size=uint64_t(length.QuadPart);Require(size>=24 && size<=16ull*1024*1024*1024,"Invalid Xbox disc image size");
         std::array<uint8_t,24> header{};Physical(0,header);
+        if(std::equal(header.begin(),header.begin()+4,"LIVE") || std::equal(header.begin(),header.begin()+4,"PIRS") || std::equal(header.begin(),header.begin()+4,"CON ")){
+            std::string error;svod=SvodImage::Open(path,error);Require(bool(svod),error.c_str());size=svod->Size();return;
+        }
         if(std::equal(header.begin(),header.begin()+8,"MComprHD")){
             const auto encoded=path.u8string();std::array<uint8_t,1024> error{};
             chd.reset(bw_chd_open(reinterpret_cast<const uint8_t*>(encoded.data()),encoded.size(),&size,error.data(),error.size()));
@@ -103,6 +108,7 @@ struct Image {
     bool Contains(uint64_t offset,uint64_t length)const{return offset<=size && length<=size-offset;}
     void Read(uint64_t offset,std::span<uint8_t> bytes) {
         Require(Contains(offset,bytes.size()),"The disc image is truncated or contains an invalid file extent.");
+        if(svod){std::string error;const auto result=svod->Read(offset,bytes,error);Require(result,error.c_str());return;}
         if(chd){std::array<uint8_t,1024> error{};const auto result=bw_chd_read(chd.get(),offset,bytes.data(),bytes.size(),error.data(),error.size());Require(result==0,reinterpret_cast<const char*>(error.data()));return;}
         if(!parts.empty()){size_t copied=0;while(copied<bytes.size()){
             const auto i=size_t(std::upper_bound(part_starts.begin(),part_starts.end(),offset)-part_starts.begin()-1);
@@ -158,11 +164,12 @@ struct DiscFile {std::string path;uint64_t offset=0,size=0;bool directory=false;
 struct DiscPlan {uint64_t partition=0,total=0;std::vector<DiscFile> files;};
 DiscPlan Plan(Image& image) {
     DiscPlan plan;std::array<uint8_t,2048> descriptor{};bool found=false;
-    for(const auto base:partitions)if(image.Contains(base+0x10000,descriptor.size())) {
+    if(image.svod){descriptor=image.svod->Descriptor();found=true;}
+    else for(const auto base:partitions)if(image.Contains(base+0x10000,descriptor.size())) {
         image.Read(base+0x10000,descriptor);
         if(std::equal(magic,magic+20,descriptor.begin()) && std::equal(magic,magic+20,descriptor.begin()+0x7EC)){plan.partition=base;found=true;break;}
     }
-    Require(found,"No supported XDVDFS game partition was found. Use an extracted Xbox 360 folder or an uncompressed XISO/XGD2/XGD3 .iso image.");
+    Require(found,"No supported Xbox game filesystem was found. Select an EM2 Xbox 360 image, GOD package header, or extracted game folder.");
     struct Directory {uint32_t sector,size;std::string path;unsigned depth;};
     std::vector<Directory> directories{{U32(descriptor.data()+20),U32(descriptor.data()+24),{},0}};
     std::set<std::pair<uint32_t,uint32_t>> tables;std::set<std::string> paths;
@@ -213,7 +220,7 @@ struct Digest {
     BCRYPT_ALG_HANDLE algorithm=nullptr;BCRYPT_HASH_HANDLE hash=nullptr;std::vector<uint8_t> object;
     Digest(){Require(BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,nullptr,0)>=0,"SHA-256 initialization failed.");DWORD length=0,read=0;Require(BCryptGetProperty(algorithm,BCRYPT_OBJECT_LENGTH,reinterpret_cast<PUCHAR>(&length),sizeof(length),&read,0)>=0,"SHA-256 initialization failed.");object.resize(length);Require(BCryptCreateHash(algorithm,&hash,object.data(),length,nullptr,0,0)>=0,"SHA-256 initialization failed.");}
     ~Digest(){if(hash)BCryptDestroyHash(hash);if(algorithm)BCryptCloseAlgorithmProvider(algorithm,0);}
-    void Add(std::span<uint8_t> bytes){Require(BCryptHashData(hash,bytes.data(),ULONG(bytes.size()),0)>=0,"Disc image hashing failed.");}
+    void Add(std::span<const uint8_t> bytes){Require(BCryptHashData(hash,const_cast<PUCHAR>(bytes.data()),ULONG(bytes.size()),0)>=0,"Disc image hashing failed.");}
     std::string Finish(){std::array<uint8_t,32> value{};Require(BCryptFinishHash(hash,value.data(),ULONG(value.size()),0)>=0,"Disc image hashing failed.");std::string result;for(auto byte:value){result+="0123456789abcdef"[byte>>4];result+="0123456789abcdef"[byte&15];}return result;}
 };
 void SafeDirectory(const fs::path& root,const fs::path& relative) {
@@ -240,6 +247,7 @@ bool ExistingMatches(Image& image,const DiscFile& file,const fs::path& destinati
 bool ImportXbox360Disc(const fs::path& path,const fs::path& destination,const DiscImportProgress& progress,std::string& error) {
     try {
         error.clear();Image image(path);auto plan=Plan(image);std::vector<uint8_t> buffer(1024*1024);Digest digest;
+        if(image.svod)digest.Add(image.svod->IdentityPrefix());
         for(uint64_t offset=0;offset<image.size;) {Progress(progress,L"Verifying the disc image",offset,image.size);const auto count=size_t(std::min<uint64_t>(buffer.size(),image.size-offset));auto bytes=std::span(buffer).first(count);image.Read(offset,bytes);digest.Add(bytes);offset+=count;}
         const auto identity=digest.Finish();
         if(!fs::exists(destination))fs::create_directories(destination);
@@ -414,6 +422,39 @@ bool TestDiscImageImport(const fs::path& root) {
         for(int invalid:{1,2,3,5,6}){const auto path=root/("bad"+std::to_string(invalid)+".chd");chd_fixture(path,invalid!=6,invalid);bool rejected=false;
             try{Image malformed(path);std::array<uint8_t,4096> decoded{};malformed.Read(0,decoded);}catch(const Failure&){rejected=true;}Require(rejected,"CHD accepted corrupt CRC, required parent or cyclic self reference");}
         {const auto path=root/"self-ref.chd";chd_fixture(path,true,4);Image image(path);std::vector<uint8_t> decoded(raw.size());image.Read(0,decoded);Require(decoded==raw,"Valid CHD self reference decoded incorrectly");}
+        auto god_fixture=[&](const fs::path& path,unsigned mode){
+            fs::create_directories(path.parent_path());
+            const bool enhanced=mode==0 || mode==3,internal=mode==2,split=mode==3;constexpr uint64_t per_file=0x14388,max_file=0xa290000;
+            const uint32_t blocks=split?41413:enhanced?25:24,count=split?2:1;std::vector<uint8_t> header(0xb000,0);
+            const auto be=[&](size_t at,uint32_t n){for(unsigned i=0;i<4;++i)header[at+i]=uint8_t(n>>(24-8*i));};
+            std::copy_n("LIVE",4,header.begin());be(0x340,0xad0e);be(0x344,0x7000);be(0x348,2);be(0x360,0x42560816);header[0x379]=0x24;header[0x391]=enhanced?0x40:0;
+            for(unsigned i=0;i<3;++i)header[0x392+i]=uint8_t(blocks>>(i*8));be(0x39d,count);be(0x3a9,1);
+            if(split){header[0x392]=0;header[0x393]=0;header[0x394]=1;} // Trimmed/converter allocation counts must not truncate actual parts.
+            {std::ofstream out(path,std::ios::binary);out.write(reinterpret_cast<const char*>(header.data()),header.size());}
+            const auto folder=fs::path(path.wstring()+L".data");if(!internal)fs::create_directory(folder);
+            std::vector<std::unique_ptr<Handle>> files;
+            const auto address=[&](uint64_t logical){const auto true_block=logical+(enhanced?2:0),block=true_block%per_file,l0=block/0x198+1;
+                return std::pair{size_t(true_block/per_file),block*2048+l0*4096+4096+(internal?0xb000:0)};};
+            for(uint32_t i=0;i<count;++i){const auto part=internal?path:folder/(i?L"Data0001":L"Data0000");auto file=std::make_unique<Handle>();file->value=CreateFileW(part.c_str(),GENERIC_WRITE,0,nullptr,internal?OPEN_EXISTING:CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);Require(file->value!=INVALID_HANDLE_VALUE,"Cannot create private GOD fixture");DWORD ignored=0;DeviceIoControl(file->value,FSCTL_SET_SPARSE,nullptr,0,nullptr,0,&ignored,nullptr);
+                const auto end=address(uint64_t(blocks)*2-1-(enhanced?2:0));LARGE_INTEGER length{};length.QuadPart=LONGLONG(i+1<count?max_file:end.second+2048);Require(SetFilePointerEx(file->value,length,nullptr,FILE_BEGIN) && SetEndOfFile(file->value),"Cannot size private GOD fixture");files.push_back(std::move(file));}
+            const auto write=[&](size_t part,uint64_t at,std::span<const uint8_t> data){LARGE_INTEGER offset{};offset.QuadPart=LONGLONG(at);DWORD written=0;Require(SetFilePointerEx(files.at(part)->value,offset,nullptr,FILE_BEGIN) && WriteFile(files.at(part)->value,data.data(),DWORD(data.size()),&written,nullptr) && written==data.size(),"Cannot write GOD fixture sector");};
+            auto content=raw;if(split){const auto put=[&](size_t at,uint32_t n){for(unsigned i=0;i<4;++i)content[at+i]=uint8_t(n>>(i*8));};put(42*2048+4,uint32_t(per_file-3));put(42*2048+8,4096);}
+            for(size_t b=0;b<content.size()/2048;++b){const auto [part,offset]=address(b);write(part,offset,std::span(content).subspan(b*2048,2048));}
+            write(0,internal?0xd000:enhanced?0x2000:0x12000,std::span(raw).subspan(0x10000,2048));
+            if(split){std::array<uint8_t,4096> payload{};for(size_t i=0;i<payload.size();++i)payload[i]=uint8_t(i*17+3);
+                for(unsigned b=0;b<2;++b){const auto [part,offset]=address(per_file-3+b);write(part,offset,std::span(payload).subspan(b*2048,2048));}}
+        };
+        for(unsigned mode=0;mode<4;++mode){const auto package=root/("god"+std::to_string(mode))/"Package",output=root/("god-output"+std::to_string(mode));god_fixture(package,mode);
+            Require(SvodImage::FindPackage(package.parent_path(),error)==package && error.empty(),"GOD folder did not resolve its extensionless package header");
+            if(mode!=2)Require(SvodImage::FindPackage(fs::path(package.wstring()+L".data"),error)==package,"GOD data folder did not resolve its package header");
+            Require(ImportXbox360Disc(package,output,{},error) && VerifyXbox360Disc(package,output,error),"GOD extraction/verification failed");
+            if(mode<3)Require(VerifyXbox360Disc(package,target,error),"GOD decoded bytes differ from the source ISO reference");
+            else{Image image(package);std::array<uint8_t,4096> payload{};image.Read(uint64_t(0x14388-3)*2048,payload);for(size_t i=0;i<payload.size();++i)Require(payload[i]==uint8_t(i*17+3),"GOD fragment-boundary bytes differ");}
+        }
+        {const auto package=root/"god0/Package",folder=fs::path(package.wstring()+L".data");fs::rename(folder/L"Data0000",folder/L"missing");bool rejected=false;
+            try{Image malformed(package);}catch(const Failure&){rejected=true;}Require(rejected,"GOD missing fragment accepted");fs::rename(folder/L"missing",folder/L"Data0000");}
+        {const auto package=root/"god0/Package",duplicate=root/"god0/Duplicate";fs::copy_file(package,duplicate);
+            Require(SvodImage::FindPackage(package.parent_path(),error).empty() && !error.empty(),"GOD folder silently chose between multiple packages");fs::remove(duplicate);}
         {const auto bad=root/"bad-index.cso";compressed_fixture(bad,1,0,false,false);std::fstream change(bad,std::ios::binary|std::ios::in|std::ios::out);change.seekp(24);const char zero[4]{};change.write(zero,4);change.close();
             bool rejected=false;try{Image malformed(bad);}catch(const Failure&){rejected=true;}Require(rejected,"Overlapping CSO header/index accepted");}
         for(const auto& bad:std::vector<std::vector<uint8_t>>{{0x10,'a',0,0},{0x10,'a',2,0},{0xf0,255,255},{0x10,'a',1}}){
@@ -422,7 +463,7 @@ bool TestDiscImageImport(const fs::path& root) {
         }
         std::ifstream stream(target/"packfiles"/"level.pak",std::ios::binary);Require(std::string(std::istreambuf_iterator<char>(stream),{})=="level-data","Extracted ISO contents differ.");
         Require(!fs::exists(root/"escape"),"Unsafe ISO path escaped extraction.");
-        REXLOG_INFO("Native disc importer passed: four XDVDFS bases, CSO1/2 DEFLATE and LZ4/ZSO, single/split CCI, raw V5 and DEFLATE V3 CHD, cross-block reads, malformed index/padding/missing parts/CRC/parent/cycle rejection and equivalent-container SHA-256 resume (synthetic images; retail compressed images still need validation)");return true;
+        REXLOG_INFO("Native disc importer passed: XDVDFS, CSO1/2, ZSO, single/split CCI, raw V5/DEFLATE V3 CHD, external/enhanced/internal GOD, hash-table and fragment-boundary reads, malformed/missing source rejection and verified extraction (synthetic images; retail container validation remains required)");return true;
     }catch(const std::exception& exception){REXLOG_ERROR("Disc image fixture: {}",exception.what());return false;}
 }
 }
