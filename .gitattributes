@@ -1,7 +1,7 @@
 # Unified diffs use a single space for empty context lines.
 patches/*.patch whitespace=-blank-at-eol
 
-# Keep generated license checksums stable on Windows checkouts.
+# Preserve exact notice bytes and stable Cargo.lock checksums.
 runtime/**/Cargo.lock text eol=lf
-docs/licenses/*.txt text eol=lf
+docs/licenses/*.txt -text whitespace=cr-at-eol
 docs/licenses/rust-dependencies.json text eol=lf
