@@ -63,8 +63,14 @@ uncompressed hashing pass; an archive uses its own import receipt rather than
 resuming an ISO receipt. Tests cover raw/compressed blocks, cross-block reads,
 extended names, empty files, wrapped trees, a contained ISO, checksum failures,
 malformed/truncated metadata, cancellation and failed-decode cache recovery.
-Retail-data archives still need validation. Nested compressed disc containers
-and Wii archive mounts are not implemented. This reader is not in demo.3.
+On 2026-11-12 a private archive generated from the owned USA/Europe EM2
+reference passed native checksum verification and a full read-only comparison:
+all 2,325 files and 6,975,770,804 file bytes matched. The archive was
+6,518,365,763 bytes and exercised compression/file offsets above 4 GiB. It was
+built by a private Python format writer; archives from third-party producers and
+other game builds still need testing. This comparison verifies archive contents,
+not a full setup/gameplay run. Nested compressed disc containers and Wii archive
+mounts are not implemented. This reader is not in demo.3.
 
 Development source also mounts extracted EM1 Wii discs directly. In the Wii
 image picker, choose **Use an extracted game folder instead**. Select the disc
