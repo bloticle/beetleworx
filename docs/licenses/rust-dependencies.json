@@ -1,7 +1,7 @@
 {
   "format": 1,
-  "cargo_lock_sha256": "02bdb1a75734ab87e71daf720cfcfc52342fc094394642688b84908cf852f632",
-  "notices_sha256": "f20920d2d7fa0fb92e5be0824b8dab872658d54b7091d365dd94cb6176245573",
+  "cargo_lock_sha256": "126fa566df0a5bb5c7ef13c3ee0919934da1bad4a7602958821345accddea5f5",
+  "notices_sha256": "261f75fa9f267393f26dfd636e3ebcab0d4f137cac57d480891ced6ab521c866",
   "packages": [
     {
       "name": "adler",
@@ -430,6 +430,23 @@
       }
     },
     {
+      "name": "crc32fast",
+      "version": "1.5.5",
+      "declared_license": "MIT OR Apache-2.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "package_checksum": "2b929dd2a135771f40afabd1073f85eed59c800b7c61901e5c254270497dad64",
+      "notices": [
+        {
+          "file": "LICENSE-APACHE",
+          "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08"
+        },
+        {
+          "file": "LICENSE-MIT",
+          "sha256": "61d383b05b87d78f94d2937e2580cce47226d17823c0430fbcad09596537efcf"
+        }
+      ]
+    },
+    {
       "name": "crossbeam-deque",
       "version": "0.8.8",
       "declared_license": "MIT OR Apache-2.0",
@@ -847,6 +864,19 @@
       ]
     },
     {
+      "name": "lzma-rust2",
+      "version": "0.25.0",
+      "declared_license": "Apache-2.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "package_checksum": "ef1d73c59a56771343712b22ea5615092c612c16ba291c0979e3105dfeec4890",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "sha256": "43070e2d4e532684de521b885f385d0841030efa2b1a20bafb76133a5e1379c1"
+        }
+      ]
+    },
+    {
       "name": "memchr",
       "version": "2.8.3",
       "declared_license": "Unlicense OR MIT",
@@ -1227,6 +1257,19 @@
         {
           "file": "LICENSE-MIT",
           "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+        }
+      ]
+    },
+    {
+      "name": "sevenz-rust2",
+      "version": "0.25.0",
+      "declared_license": "Apache-2.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "package_checksum": "e5e465701779cbc6d0d10cf907f175035cfdd50b8d3cb628d7f1f435ef02972f",
+      "notices": [
+        {
+          "file": "LICENSE",
+          "sha256": "43070e2d4e532684de521b885f385d0841030efa2b1a20bafb76133a5e1379c1"
         }
       ]
     },

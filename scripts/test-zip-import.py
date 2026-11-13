@@ -147,6 +147,7 @@ try:
         run(name, make(root / (name + ".zip"), **options), iso=options.get("iso", False))
     run("resume-deflate", root / "deflate.zip", resume="deflate")
     run("misnamed-extension", make(root / "zip-with-zar-extension.zar"))
+    run("seven-extension", make(root / "zip-with-seven-extension.7z"))
     reordered = bytearray((root / "deflate.zip").read_bytes())
     with zipfile.ZipFile(io.BytesIO(reordered)) as archive:
         start = archive.start_dir

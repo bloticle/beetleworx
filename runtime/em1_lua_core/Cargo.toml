@@ -13,6 +13,8 @@ mlua = { version = "=0.11.6", default-features = false, features = ["lua51", "ve
 nod = "=1.4.4"
 chd = { version = "=0.4.0", features = ["verify_block_crc"] }
 
+sevenz-rust2 = { version = "=0.25.0", default-features = false }
+
 [profile.release]
 panic = "unwind"
 codegen-units = 8

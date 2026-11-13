@@ -4,6 +4,7 @@
 #include "svod_image.h"
 #include "zar_image.h"
 #include "zip_image.h"
+#include "seven_image.h"
 #include <windows.h>
 #include <winioctl.h>
 #include <bcrypt.h>
@@ -93,7 +94,9 @@ struct Image {
         std::string archive_error;
         const bool zar_magic=BE32(trailer.data())==0x61bf3a01 && BE32(trailer.data()+4)==0x169f52d6;
         if(zar_magic){archive=ZarImage::Open(path,archive_error,archive_progress);Require(bool(archive),archive_error.c_str());}
+        else if(std::memcmp(header.data(),"7z\xbc\xaf\x27\x1c",6)==0){archive=SevenImage::Open(path,archive_error,archive_progress);Require(bool(archive),archive_error.c_str());}
         else if(U32(header.data())==0x04034b50 || CompareStringOrdinal(path.extension().c_str(),-1,L".zip",-1,TRUE)==CSTR_EQUAL){archive=ZipImage::Open(path,archive_error,archive_progress);Require(bool(archive),archive_error.c_str());}
+        else if(CompareStringOrdinal(path.extension().c_str(),-1,L".7z",-1,TRUE)==CSTR_EQUAL){archive=SevenImage::Open(path,archive_error,archive_progress);Require(bool(archive),archive_error.c_str());}
         else if(CompareStringOrdinal(path.extension().c_str(),-1,L".zar",-1,TRUE)==CSTR_EQUAL){archive=ZarImage::Open(path,archive_error,archive_progress);Require(bool(archive),archive_error.c_str());}
         if(archive){size=archive->Size();archive_tree=true;const ArchiveFile* single=nullptr;size_t count=0;for(const auto& entry:archive->Files())if(!entry.directory){single=&entry;++count;}
             if(count==1){auto extension=fs::path(single->path).extension().wstring();if(CompareStringOrdinal(extension.c_str(),-1,L".iso",-1,TRUE)==CSTR_EQUAL || CompareStringOrdinal(extension.c_str(),-1,L".xiso",-1,TRUE)==CSTR_EQUAL || CompareStringOrdinal(extension.c_str(),-1,L".img",-1,TRUE)==CSTR_EQUAL || CompareStringOrdinal(extension.c_str(),-1,L".bin",-1,TRUE)==CSTR_EQUAL){archive_tree=false;archive_base=single->offset;size=single->size;}}return;

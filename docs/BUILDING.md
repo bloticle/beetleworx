@@ -1,6 +1,6 @@
 # Building Beetleworx
 
-Use a Windows x64 development machine with PowerShell 7, Visual Studio C++ build tools and a Windows SDK, CMake, Python 3.11 or newer, Java, 7-Zip, and Rust with the MSVC toolchain. Install the [ReXGlue 0.1 SDK](https://github.com/rexglue/rexglue-sdk) locally and pass its directory to the build script.
+Use a Windows x64 development machine with PowerShell 7, Visual Studio C++ build tools and a Windows SDK, CMake, Python 3.11 or newer, Java, 7-Zip, and Rust 1.93 or newer with the MSVC toolchain. Install the [ReXGlue 0.1 SDK](https://github.com/rexglue/rexglue-sdk) locally and pass its directory to the build script.
 
 ```powershell
 git clone --recurse-submodules https://github.com/bloticle/beetleworx.git

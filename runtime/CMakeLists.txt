@@ -216,7 +216,7 @@ target_sources(EM2Recomp PRIVATE online_notice.cpp)
 target_sources(EM2Recomp PRIVATE content_setup.cpp)
 target_sources(EM2Recomp PRIVATE disc_image.cpp)
 target_sources(EM2Recomp PRIVATE svod_image.cpp)
-target_sources(EM2Recomp PRIVATE zar_image.cpp zip_image.cpp)
+target_sources(EM2Recomp PRIVATE zar_image.cpp zip_image.cpp seven_image.cpp)
 target_sources(EM2Recomp PRIVATE online_lobby.cpp)
 target_sources(EM2Recomp PRIVATE online_content_root.cpp rex_content/content_manager.cpp)
 add_dependencies(EM2Recomp em2_kernel_library)
@@ -430,6 +430,21 @@ if(EXISTS "${EM2_GENERATED}/../tests/instructions.cpp")
         --exe "$<TARGET_FILE:EM2Recomp>" --work "${CMAKE_CURRENT_BINARY_DIR}/split-iso-tests"
         --report "${CMAKE_CURRENT_BINARY_DIR}/split-iso-import-results.json")
     set_tests_properties(split-iso-content-import PROPERTIES TIMEOUT 300)
+    # The independent 7z producer is only a developer-test dependency.
+    set(EM2_SEVEN_TEST_MODULES "" CACHE PATH "Optional Python module directory containing py7zr for 7z fixture tests")
+    execute_process(COMMAND "${Python3_EXECUTABLE}" -c "import sys; sys.path.insert(0, sys.argv[1]); import py7zr" "${EM2_SEVEN_TEST_MODULES}"
+        RESULT_VARIABLE EM2_SEVEN_TEST_AVAILABLE OUTPUT_QUIET ERROR_QUIET)
+    if(EM2_SEVEN_TEST_AVAILABLE EQUAL 0)
+        set(EM2_SEVEN_TEST_ARGS)
+        if(EM2_SEVEN_TEST_MODULES)
+            list(APPEND EM2_SEVEN_TEST_ARGS --modules "${EM2_SEVEN_TEST_MODULES}")
+        endif()
+        add_test(NAME seven-content-import COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/test-seven-import.py"
+            --exe "$<TARGET_FILE:EM2Recomp>" --work "${CMAKE_CURRENT_BINARY_DIR}/seven-tests"
+            --report "${CMAKE_CURRENT_BINARY_DIR}/seven-import-results.json" ${EM2_SEVEN_TEST_ARGS})
+        set_tests_properties(seven-content-import PROPERTIES TIMEOUT 300)
+    endif()
 endif()
 target_sources(EM2Recomp PRIVATE renderer_storage.cpp)
 

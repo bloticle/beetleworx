@@ -125,7 +125,37 @@ can affect timing. The new path removes one complete 8.61 GB archive read.
 The full read-only comparison also passed after the change. This does not
 establish a complete setup/gameplay run from that archive or compatibility
 with every ZIP producer/build. Run `ctest -R zip-content-import` in the runtime
-build directory for the 26 independent fixture cases. This is not in demo.3.
+build directory for the 27 independent fixture cases. This is not in demo.3.
+
+Development setup also reads single-volume 7z archives through pinned
+`sevenz-rust2` 0.25.0 linked into `beetleworx.exe`. Copy, LZMA and LZMA2 streams,
+including BCJ-filtered content, are enabled. Archives can contain an extracted
+EM2 tree (optionally wrapped in a folder) or a single raw ISO. Decoder CRC
+checks finish before final extraction; SHA-256 of the original container owns
+import/resume receipts. Source files remain read-only.
+
+Solid streams decode sequentially into one Windows temporary cache, enabling
+later random/backward file reads. The cache is opened with delete-on-close and
+is removed on success, failure or cancellation. Setup needs temporary space
+for the declared unpacked bytes as well as space for the final game folder;
+it checks temporary free space before decoding. Limits are 16 GiB for the
+container and unpacked output, 100,000 entries, and 64 MiB of retained path
+metadata. The decoder uses a 128 MiB limit for each header buffer and
+individual dictionary/model; this is not a total process-memory cap. Encrypted
+headers/content, anti-items, links, duplicate/conflicting paths and unsafe
+paths are rejected. Multi-volume 7z and optional codecs such as PPMd/BZip2 are
+not enabled. This addition is not in demo.3; retail-sized 7z archives still
+need validation.
+
+The independent fixture suite covers solid and multiple-block decoding, the
+three enabled codecs and BCJ, plain/encoded headers, Unicode wrappers, contained
+ISOs, resume/source preservation, corrupt CRCs/truncation, unsafe/duplicate/link
+entries, encryption rejection, oversized dictionaries, cancellation during
+decoding, and temporary-cache cleanup. For development tests only, install
+`py7zr==1.1.3` into the build's Python environment and reconfigure CMake. The
+`seven-content-import` test is registered when that module is importable;
+`EM2_SEVEN_TEST_MODULES` can point to an isolated module directory instead.
+The game does not need Python, py7zr or a separate 7-Zip executable at runtime.
 
 Development source also mounts extracted EM1 Wii discs directly. In the Wii
 image picker, choose **Use an extracted game folder instead**. Select the disc
@@ -157,8 +187,7 @@ result proves that every file discovered by the native disc parser has matching
 length and contents in the reference; it does not prove executable compatibility
 or successful gameplay. Missing or different reference files fail verification.
 
-7z/RAR wrappers, legacy
-NKit conversions remain unfinished. File-container support also does not make
+RAR wrappers and legacy NKit conversions remain unfinished. File-container support also does not make
 changed executable code compatible with the existing static translation.
 
 On 2026-11-12 the read-only verifier compared the available USA/Europe EM2
@@ -171,6 +200,7 @@ Format references: [maxcso](https://github.com/unknownbrackets/maxcso),
 [XbWrite split-image conventions](https://github.com/PlayingKarrde/XbWrite),
 [chd-rs](https://github.com/SnowflakePowered/chd-rs),
 [ZIP specification](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT),
+[sevenz-rust2](https://github.com/hasenbanck/sevenz-rust/tree/v0.25.0),
 [ZArchive reader/writer reference](https://github.com/Exzap/ZArchive/tree/965b66c8d67b6b7e30fd63b3b75aa91a99ff303b),
 [nod](https://github.com/encounter/nod/tree/v1.4.4),
 [Xenia SVOD reader](https://github.com/xenia-project/xenia/blob/master/src/xenia/vfs/devices/stfs_container_device.cc),
