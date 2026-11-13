@@ -19,9 +19,26 @@ containers containing identical logical disc bytes. Original images are never
 written. Real retail compressed Xbox images still need validation. These new
 Xbox readers are not included in demo.3 and no further binary release is implied.
 
+Developers can compare every game file in an image against a known extracted
+copy without importing or launching gameplay. Use the same game executable:
+
+```powershell
+.\beetleworx.exe --em2_test_xbox_disc="D:\Games\EM2.iso" --em2_test_xbox_reference="D:\Games\EM2-extracted" --em2_user_data_directory="D:\Checks\EM2" --log_file="D:\Checks\EM2.log"
+```
+
+Both the source image and reference files are opened read-only. A successful
+result proves that every file discovered by the native disc parser has matching
+length and contents in the reference; it does not prove executable compatibility
+or successful gameplay. Missing or different reference files fail verification.
+
 CHD, GOD/SVOD, CCI, ZAR, ZIP/7z/RAR wrappers, extracted Wii folders and legacy
 NKit conversions remain unfinished. File-container support also does not make
 changed executable code compatible with the existing static translation.
+
+On 2026-11-12 the read-only verifier compared the available USA/Europe EM2
+Xbox 360 ISO with its extracted reference: all 2,325 files and 6,975,770,804
+file bytes matched at partition offset `0x02080000`. This establishes real-disc
+coverage for that ISO, alongside the synthetic compressed-container tests.
 
 Format references: [maxcso](https://github.com/unknownbrackets/maxcso),
 [nod](https://github.com/encounter/nod/tree/v1.4.4).

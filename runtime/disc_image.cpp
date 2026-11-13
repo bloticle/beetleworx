@@ -231,6 +231,23 @@ bool ImportXbox360Disc(const fs::path& path,const fs::path& destination,const Di
     }catch(const Canceled&){error.clear();return false;}catch(const std::exception& exception){error=exception.what();return false;}
 }
 
+bool VerifyXbox360Disc(const fs::path& path,const fs::path& reference,std::string& error) {
+    try {
+        error.clear();Image image(path);const auto plan=Plan(image);std::vector<uint8_t> buffer(1024*1024);
+        Require(fs::is_directory(reference),"Choose an existing extracted reference folder");
+        REXLOG_INFO("Read-only Xbox disc comparison: {} entries, {} file bytes",plan.files.size(),plan.total);
+        uint64_t bytes=0,files=0;
+        for(const auto& file:plan.files){
+            if(file.directory)continue;
+            try{Require(ExistingMatches(image,file,reference/fs::path(file.path),buffer),"Reference file is missing");}
+            catch(const std::exception& problem){throw Failure(file.path+": "+problem.what());}
+            bytes+=file.size;++files;
+        }
+        REXLOG_INFO("Read-only Xbox disc comparison passed: {} files, {} bytes; partition {:#x}; compressed {}",files,bytes,plan.partition,image.compressed);
+        return true;
+    }catch(const std::exception& problem){error=problem.what();REXLOG_ERROR("Xbox disc comparison: {}",error);return false;}
+}
+
 bool TestDiscImageImport(const fs::path& root) {
     try {
         Require(!fs::exists(root),"Disc image fixture directory already exists.");fs::create_directories(root);
@@ -254,6 +271,9 @@ bool TestDiscImageImport(const fs::path& root) {
         Require(!ImportXbox360Disc(source,target,[](std::wstring_view stage,uint64_t done,uint64_t){return stage!=L"Extracting game files" || done==0;},error) && error.empty(),"ISO cancellation failed.");
         Require(!ImportXbox360Disc(root/"layout1.iso",target,{},error) && !error.empty(),"A different image resumed an owned partial extraction.");
         Require(ImportXbox360Disc(source,target,{},error) && ImportXbox360Disc(source,target,{},error),"ISO extraction/resume failed.");
+        Require(VerifyXbox360Disc(source,target,error),"Read-only reference verification failed");
+        const auto absent=root/"absent-reference";
+        Require(!VerifyXbox360Disc(source,absent,error) && !fs::exists(absent),"Reference verification created a missing folder");
         std::ifstream raw_file(source,std::ios::binary);const std::vector<uint8_t> raw(std::istreambuf_iterator<char>(raw_file),{});
         auto compressed_fixture=[&](const fs::path& path,unsigned version,unsigned shift,bool zso,bool lz4){
             constexpr size_t block=4096;const auto count=(raw.size()+block-1)/block;
@@ -280,6 +300,7 @@ bool TestDiscImageImport(const fs::path& root) {
             Require(decoded==raw && Plan(compressed).partition==0,"CSO/ZSO block decoding changed logical ISO bytes or file tables");
             std::array<uint8_t,4125> crossing{};compressed.Read(2040,crossing);Require(std::equal(crossing.begin(),crossing.end(),raw.begin()+2040),"CSO cross-block reads differ");
             Require(ImportXbox360Disc(path,target,{},error),"Equivalent CSO/ZSO failed verified ISO extraction/resume");
+            Require(VerifyXbox360Disc(path,target,error),"Compressed disc reference verification failed");
         }
         {const auto bad=root/"bad-index.cso";compressed_fixture(bad,1,0,false,false);std::fstream change(bad,std::ios::binary|std::ios::in|std::ios::out);change.seekp(24);const char zero[4]{};change.write(zero,4);change.close();
             bool rejected=false;try{Image malformed(bad);}catch(const Failure&){rejected=true;}Require(rejected,"Overlapping CSO header/index accepted");}

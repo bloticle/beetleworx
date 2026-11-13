@@ -219,6 +219,8 @@ REXCVAR_DEFINE_STRING(em2_identity_checkpoint_directory,"","Debug","Frozen check
 REXCVAR_DEFINE_STRING(em2_content_directory,"","Debug","Override the staged content view for isolated game testing");
 REXCVAR_DEFINE_STRING(em1_source_rvz,"","Compatibility","Optional original Epic Mickey Wii RVZ mounted read-only at em1:; scene playback support is incomplete");
 REXCVAR_DEFINE_STRING(em2_test_em1_disc,"","Debug","Compare multi-format Wii reader against the existing source adapter without starting gameplay");
+REXCVAR_DEFINE_STRING(em2_test_xbox_disc,"","Debug","Read-only comparison of an Xbox disc image against an extracted reference folder");
+REXCVAR_DEFINE_STRING(em2_test_xbox_reference,"","Debug","Extracted game folder for the read-only Xbox disc comparison");
 REXCVAR_DEFINE_STRING(em2_user_data_directory,"","Debug","Override save/settings directory for isolated game testing");
 
 REXCVAR_DECLARE(bool,em2_online_auto_continue);
@@ -456,6 +458,11 @@ public:
         if(!REXCVAR_GET(em2_analyze_shadow_shader_path).empty()) {
             const std::filesystem::path output=REXCVAR_GET(em2_analyze_shadow_shader_path);
             const bool success=output.is_absolute() && em2::TestNativeShadowShader(output);
+            spdlog::shutdown();ExitProcess(success?0:1);
+        }
+        if(!REXCVAR_GET(em2_test_xbox_disc).empty()){
+            const auto path=[](const std::string& s){return std::filesystem::path(std::u8string(s.begin(),s.end()));};
+            std::string error;const bool success=em2::VerifyXbox360Disc(path(REXCVAR_GET(em2_test_xbox_disc)),path(REXCVAR_GET(em2_test_xbox_reference)),error);
             spdlog::shutdown();ExitProcess(success?0:1);
         }
         if(!REXCVAR_GET(em2_test_em1_disc).empty()){
