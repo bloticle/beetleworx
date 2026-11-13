@@ -65,7 +65,7 @@ def make_iso():
 results = []
 
 
-def run(name, path, good=True, iso=False, resume=None, identity_source=None):
+def run(name, path, good=True, iso=False, resume=None, identity_source=None, extra_env=None):
     source_hash = hashlib.sha256(path.read_bytes()).digest()
     destination = root / ((resume or name) + "-output")
     log = root / (name + ".log")
@@ -75,6 +75,7 @@ def run(name, path, good=True, iso=False, resume=None, identity_source=None):
                f"--em2_user_data_directory={root / (name + '-profile')}",
                f"--log_file={log}"]
     process = subprocess.run(command, cwd=exe.parent, timeout=90,
+                             env={**os.environ, **(extra_env or {})},
                              creationflags=0x08000000 if os.name == "nt" else 0,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     text = log.read_text(errors="replace") if log.exists() else ""
@@ -120,7 +121,11 @@ def make(path, *, method=None, prefix="", iso=False, encoded=True, password=None
     return path
 
 try:
-    before_cache = set(Path(tempfile.gettempdir()).glob("beetleworx-7z-*.tmp"))
+    def cache_files():
+        return (set(Path(tempfile.gettempdir()).glob("beetleworx-7z-*.tmp")) |
+                set(exe.parent.glob("beetleworx-7z-*.tmp")) |
+                set(root.rglob("beetleworx-7z-*.tmp")))
+    before_cache = cache_files()
     cases = [
         ("lzma2-solid", {}),
         ("copy", {"method": [{"id": py7zr.FILTER_COPY}]}),
@@ -135,6 +140,10 @@ try:
     for name, options in cases:
         run(name, make(root / (name + ".7z"), **options), iso=options.get("iso", False))
     run("resume-solid", root / "lzma2-solid.7z", resume="lzma2-solid")
+    unavailable_temp = root / "missing-temp"
+    fallback_env = {"TMP": str(unavailable_temp), "TEMP": str(unavailable_temp)}
+    run("cache-fallback", root / "lzma2-solid.7z", extra_env=fallback_env)
+    assert not unavailable_temp.exists(), "The importer created the nonexistent temporary folder"
     run("misnamed", make(root / "archive.zip"))
     run("unicode-source", make(root / "\u00c9pic Mickey.7z"))
     for name in ["traversal", "duplicate", "symlink"]:
@@ -219,10 +228,11 @@ try:
     path = root / "bad-data-crc.7z"
     path.write_bytes(broken)
     run("bad-data-crc", path, False)
+    run("bad-crc-cache-fallback", path, False, extra_env=fallback_env)
     path = root / "truncated.7z"
     path.write_bytes(original[:-10])
     run("truncated", path, False)
-    assert set(Path(tempfile.gettempdir()).glob("beetleworx-7z-*.tmp")) == before_cache, "7z cache leaked after success/failure"
+    assert cache_files() == before_cache, "7z cache leaked after success/failure/cancellation"
     if args.report:
         args.report.write_text(json.dumps({"result": "PASS", "cases": results}, indent=2))
     if not args.keep:

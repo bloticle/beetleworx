@@ -141,26 +141,46 @@ extraction. A byte-identical single-file archive and volume set share the same
 resume identity. Missing/empty volumes, an out-of-range selected part and an
 excess 129th part are rejected.
 
-Solid streams decode sequentially into one Windows temporary cache, enabling
-later random/backward file reads. The cache is opened with delete-on-close and
-is removed on success, failure or cancellation. Setup needs temporary space
-for the declared unpacked bytes as well as space for the final game folder;
-it checks temporary free space before decoding. Limits are 16 GiB for the
+Solid streams decode sequentially into one temporary cache file, enabling
+later random/backward file reads. Setup tries Windows temp, the Beetleworx
+executable folder, then the archive folder, using a writable location with
+enough free space. The cache is opened with delete-on-close and is removed on
+success, failure or cancellation. Source archive bytes remain read-only even
+when a new cache file temporarily uses their folder. Setup needs temporary
+space for the declared unpacked bytes as well as space for the final game
+folder; it checks cache free space before decoding. Limits are 16 GiB for the
 container and unpacked output, 100,000 entries, and 64 MiB of retained path
 metadata. The decoder uses a 128 MiB limit for each header buffer and
 individual dictionary/model; this is not a total process-memory cap. Encrypted
 headers/content, anti-items, links, duplicate/conflicting paths and unsafe
 paths are rejected. Optional codecs such as PPMd/BZip2 are not enabled. This
-addition is not in demo.3; retail-sized 7z archives still need validation.
+addition is not in demo.3.
 
-The 39-case independent fixture suite covers solid and multiple-block decoding, the
+On 2026-11-12 a minimal three-volume 7z COPY fixture containing the owned
+8,738,846,720-byte retail ISO passed full native CRC validation and comparison
+with the extracted game: all 2,325 files and 6,975,770,804 game bytes matched.
+The first/last volumes held the 32-byte signature and 58-byte plain end header;
+the middle volume was a hard link to the original ISO, avoiding another ROM
+copy. Framing was checked against the official 7z format, with small-fixture
+CRC and full-size metadata independently parsed by py7zr. The native test
+selected the last volume and read the complete archive through the decoder.
+Windows temp had approximately 2.10 GB free, so setup automatically created the
+8.74 GB cache beside the executable on D:. Cache growth beyond 4 GiB and its
+deletion after comparison were observed. This verifies real-data COPY decoding,
+large volume/cache offsets and low-space fallback. It does not establish a
+full setup/gameplay run or retail-sized LZMA/LZMA2 validation.
+
+The 41-case independent fixture suite covers solid and multiple-block decoding, the
 three enabled codecs and BCJ, plain/encoded headers, Unicode wrappers, contained
 ISOs, resume/source preservation, corrupt CRCs/truncation, unsafe/duplicate/link
 entries, encryption rejection, oversized dictionaries, cancellation during
 decoding, and temporary-cache cleanup. Multipart cases split the signature and
 end header, use tiny final fragments, select first/later/128th volumes, resume
 between volume sets and single files, reject missing/corrupt/empty/excess parts,
-and cancel during multipart decoding. For development tests only, install
+and cancel during multipart decoding. Cache fallback is also exercised with
+an unavailable Windows-temp path, for both successful import and a later CRC
+failure; cleanup checks cover all cache locations. For development tests only,
+install
 `py7zr==1.1.3` into the build's Python environment and reconfigure CMake. The
 `seven-content-import` test is registered when that module is importable;
 `EM2_SEVEN_TEST_MODULES` can point to an isolated module directory instead.
@@ -211,6 +231,7 @@ Format references: [maxcso](https://github.com/unknownbrackets/maxcso),
 [ZIP specification](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT),
 [sevenz-rust2](https://github.com/hasenbanck/sevenz-rust/tree/v0.25.0),
 [7-Zip split-volume reader](https://github.com/ip7z/7zip/blob/main/CPP/7zip/Archive/SplitHandler.cpp),
+[7z format specification](https://github.com/ip7z/7zip/blob/main/DOC/7zFormat.txt),
 [ZArchive reader/writer reference](https://github.com/Exzap/ZArchive/tree/965b66c8d67b6b7e30fd63b3b75aa91a99ff303b),
 [nod](https://github.com/encounter/nod/tree/v1.4.4),
 [Xenia SVOD reader](https://github.com/xenia-project/xenia/blob/master/src/xenia/vfs/devices/stfs_container_device.cc),

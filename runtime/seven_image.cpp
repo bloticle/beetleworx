@@ -25,23 +25,32 @@ struct SevenSource {
 struct Temporary {
  HANDLE value=INVALID_HANDLE_VALUE;
  ~Temporary(){if(value!=INVALID_HANDLE_VALUE)CloseHandle(value);}
- void Create(uint64_t size){std::wstring directory(32768,L'\0');const auto count=GetTempPathW(DWORD(directory.size()),directory.data());Require(count && count<directory.size(),"Cannot locate the temporary cache folder");directory.resize(count);
-  ULARGE_INTEGER available{};Require(GetDiskFreeSpaceExW(directory.c_str(),&available,nullptr,nullptr) && available.QuadPart>=size,"Not enough space in the Windows temporary folder to unpack this 7z archive");
-  for(unsigned attempt=0;attempt<8 && value==INVALID_HANDLE_VALUE;++attempt){std::array<uint8_t,16> random{};Require(BCryptGenRandom(nullptr,random.data(),ULONG(random.size()),BCRYPT_USE_SYSTEM_PREFERRED_RNG)>=0,"Cannot create a unique 7z cache name");std::wstring name=directory+L"beetleworx-7z-";for(auto b:random){name+=L"0123456789abcdef"[b>>4];name+=L"0123456789abcdef"[b&15];}name+=L".tmp";
-   value=CreateFileW(name.c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_TEMPORARY|FILE_FLAG_DELETE_ON_CLOSE,nullptr);
-  }Require(value!=INVALID_HANDLE_VALUE,"Cannot create the temporary 7z cache");
+ void Create(uint64_t size,const std::filesystem::path& source){
+  std::vector<std::filesystem::path> directories;
+  std::wstring path(32768,L'\0');auto count=GetTempPathW(DWORD(path.size()),path.data());if(count && count<path.size())directories.emplace_back(path.substr(0,count));
+  path.assign(32768,L'\0');count=GetModuleFileNameW(nullptr,path.data(),DWORD(path.size()));if(count && count<path.size())directories.push_back(std::filesystem::path(path.substr(0,count)).parent_path());
+  directories.push_back(std::filesystem::absolute(source).parent_path());
+  for(const auto& directory:directories){
+   ULARGE_INTEGER available{};if(!GetDiskFreeSpaceExW(directory.c_str(),&available,nullptr,nullptr) || available.QuadPart<size)continue;
+   for(unsigned attempt=0;attempt<8;++attempt){std::array<uint8_t,16> random{};Require(BCryptGenRandom(nullptr,random.data(),ULONG(random.size()),BCRYPT_USE_SYSTEM_PREFERRED_RNG)>=0,"Cannot create a unique 7z cache name");std::wstring name=L"beetleworx-7z-";for(auto b:random){name+=L"0123456789abcdef"[b>>4];name+=L"0123456789abcdef"[b&15];}name+=L".tmp";
+    value=CreateFileW((directory/name).c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_TEMPORARY|FILE_FLAG_DELETE_ON_CLOSE,nullptr);
+    if(value!=INVALID_HANDLE_VALUE)return;
+    if(GetLastError()!=ERROR_FILE_EXISTS && GetLastError()!=ERROR_ALREADY_EXISTS)break;
+   }
+  }
+  throw std::runtime_error("Cannot create the 7z cache. Check free space and write permissions in Windows temp, the Beetleworx folder, or the archive folder.");
  }
 };
 std::string Lower(std::string s){for(auto& c:s)if(c>='A' && c<='Z')c+=32;return s;}
 }
 struct SevenImage::Impl {
- SevenSource source;Temporary temporary;std::array<uint8_t,32> identity{};std::vector<ArchiveFile> files;
+ SevenSource source;std::filesystem::path source_path;Temporary temporary;std::array<uint8_t,32> identity{};std::vector<ArchiveFile> files;
  std::map<std::string,std::pair<ArchiveFile,bool>> tree;std::function<bool(uint64_t,uint64_t)> progress;
  uint64_t size=0,total=0,remaining=0,path_bytes=0,next_progress=0,progress_total=UINT64_MAX;bool canceled=false;std::string failure;
  bool Notify(uint64_t done,uint64_t all){if(progress && (all!=progress_total || done>=next_progress || done==all)){progress_total=all;next_progress=done+1024*1024;if(!progress(done,all)){canceled=true;return false;}}return true;}
  template<class F> static int Callback(void* value,F action){auto& self=*static_cast<Impl*>(value);try{return action(self)?1:0;}catch(const std::exception& e){self.failure=e.what();return 0;}catch(...){self.failure="7z source/output callback failed";return 0;}}
  static int SourceRead(void* value,uint64_t at,uint8_t* data,size_t length){return Callback(value,[&](Impl& s){s.source.Read(at,std::span(data,length));return true;});}
- static int Begin(void* value,uint64_t total){return Callback(value,[&](Impl& s){s.total=total;Require(total<=16ull*1024*1024*1024,"7z output exceeds the setup budget");if(!s.Notify(s.source.size,s.source.size+total))return false;s.temporary.Create(total);return true;});}
+ static int Begin(void* value,uint64_t total){return Callback(value,[&](Impl& s){s.total=total;Require(total<=16ull*1024*1024*1024,"7z output exceeds the setup budget");if(!s.Notify(s.source.size,s.source.size+total))return false;s.temporary.Create(total,s.source_path);return true;});}
  static int Entry(void* value,const uint8_t* name,size_t length,uint64_t bytes,int directory){return Callback(value,[&](Impl& s){Require(!s.remaining && length && length<=32768,"Invalid 7z entry boundary");std::string path(reinterpret_cast<const char*>(name),length);size_t at=0;
   for(;;){const auto end=path.find('/',at);const bool leaf=end==std::string::npos;const auto part=leaf?path:path.substr(0,end);const bool dir=!leaf || directory;const auto key=Lower(part);auto found=s.tree.find(key);
    if(found==s.tree.end()){Require(s.tree.size()<100000 && part.size()<=64*1024*1024-s.path_bytes,"7z path metadata exceeds the setup budget");s.path_bytes+=part.size();s.tree.emplace(key,std::make_pair(ArchiveFile{part,leaf?s.size:0,leaf?bytes:0,dir},leaf));}
@@ -50,7 +59,7 @@ struct SevenImage::Impl {
   }s.remaining=bytes;return s.Notify(s.source.size+s.size,s.source.size+s.total);});}
  static int Data(void* value,const uint8_t* data,size_t length){return Callback(value,[&](Impl& s){Require(length<=65536 && length<=s.remaining && length<=s.total-s.size,"7z data exceeds its declared size");if(!s.Notify(s.source.size+s.size,s.source.size+s.total))return false;DWORD written=0;
   Require(WriteFile(s.temporary.value,data,DWORD(length),&written,nullptr) && written==length,"Could not write the temporary 7z cache; check free disk space");s.size+=length;s.remaining-=length;return true;});}
- Impl(const std::filesystem::path& path,const std::function<bool(uint64_t,uint64_t)>& callback):source(path),progress(callback){Require(source.size>=32 && source.size<=16ull*1024*1024*1024,"Invalid 7z container size");
+ Impl(const std::filesystem::path& path,const std::function<bool(uint64_t,uint64_t)>& callback):source(path),source_path(path),progress(callback){Require(source.size>=32 && source.size<=16ull*1024*1024*1024,"Invalid 7z container size");
   Hash hash;std::vector<uint8_t> buffer(1024*1024);for(uint64_t at=0;at<source.size;){if(!Notify(at,source.size))throw Canceled{};const auto n=size_t(std::min<uint64_t>(buffer.size(),source.size-at));source.Read(at,std::span(buffer).first(n));hash.Add(std::span(buffer).first(n));at+=n;}identity=hash.Finish();
   std::array<uint8_t,2048> error{};const auto result=bw_seven_unpack(source.size,this,SourceRead,Begin,Entry,Data,error.data(),error.size());
   if(canceled)throw Canceled{};Require(result==0,failure.empty()?reinterpret_cast<const char*>(error.data()):failure.c_str());Require(!remaining && size==total,"7z cache did not receive all declared data");for(auto& [key,value]:tree)files.push_back(std::move(value.first));tree.clear();if(!Notify(source.size+size,source.size+size))throw Canceled{};
