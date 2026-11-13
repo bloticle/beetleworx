@@ -485,7 +485,7 @@ public:
         }
         if(REXCVAR_GET(em2_test_content_setup)){
             const auto root=exe_dir/("content-setup-test-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-            bool success=em2::TestContentSetup(root/"setup") && em2::TestContentLibraryPersistence(root/"library") && em2::TestContentPatches(root/"patches");
+            bool success=em2::TestContentSetup(root/"setup") && em2::TestContentLibraryPersistence(root/"library") && em2::TestContentPatches(root/"patches") && em2::TestDiscImageImport(root/"disc-image");
             const auto patch_directory=REXCVAR_GET(em2_test_content_patch_directory);
             if(success && !patch_directory.empty()){
                 for(const auto* name:em2::kPatchedGameArchives){

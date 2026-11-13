@@ -154,7 +154,7 @@ fs::path ChooseSource() {
             dialog->SetOkButtonLabel(folders?L"Use game folder":L"Use disc image");
             auto* events=new SourcePickerEvents;DWORD cookie=0;
             if(!folders) {
-                const COMDLG_FILTERSPEC filter{L"Xbox 360 disc image (*.iso)",L"*.iso"};dialog->SetFileTypes(1,&filter);
+                const COMDLG_FILTERSPEC filters[]={{L"Xbox 360 disc images",L"*.iso;*.xiso;*.cso;*.zso;*.img;*.bin"},{L"All files",L"*.*"}};dialog->SetFileTypes(2,filters);
                 IFileDialogCustomize* customize=nullptr;
                 if(SUCCEEDED(dialog->QueryInterface(IID_PPV_ARGS(&customize)))){customize->AddPushButton(100,L"Use an extracted game folder instead");customize->Release();}
                 dialog->Advise(events,&cookie);
@@ -228,7 +228,8 @@ bool PrepareGameContent(const fs::path& executable_directory,fs::path& game,cons
         if(!explicit_game && !remembered.empty() && OriginalFolder(remembered))game=remembered;
         auto extract_image=[&] {
             auto extension=game.extension().wstring();for(auto& ch:extension)if(ch>=L'A' && ch<=L'Z')ch+=32;
-            if(!fs::is_regular_file(game) || extension!=L".iso")return true;
+            if(!fs::is_regular_file(game))return true;
+            if(extension==L".xex" && OriginalFolder(game.parent_path())){game=game.parent_path();return true;}
             if(!interactive){error="Disc-image import is available during normal setup. Diagnostics require an already prepared content folder.";return false;}
             const auto image=game,destination=executable_directory/"game-data";bool extracted=false;
             std::thread importer([&]{

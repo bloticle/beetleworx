@@ -1,4 +1,6 @@
 #include "disc_image.h"
+#include "em1_inflate.h"
+#include "em1_deflate.h"
 #include <windows.h>
 #include <winioctl.h>
 #include <bcrypt.h>
@@ -24,22 +26,72 @@ struct Canceled{};
 struct Handle {HANDLE value=INVALID_HANDLE_VALUE;~Handle(){if(value!=INVALID_HANDLE_VALUE)CloseHandle(value);}};
 uint16_t U16(const uint8_t* p){return uint16_t(p[0])|uint16_t(p[1])<<8;}
 uint32_t U32(const uint8_t* p){return uint32_t(p[0])|uint32_t(p[1])<<8|uint32_t(p[2])<<16|uint32_t(p[3])<<24;}
+uint64_t U64(const uint8_t* p){return uint64_t(U32(p))|uint64_t(U32(p+4))<<32;}
 uint32_t BE32(const uint8_t* p){return uint32_t(p[0])<<24|uint32_t(p[1])<<16|uint32_t(p[2])<<8|uint32_t(p[3]);}
 void Require(bool value,const char* error){if(!value)throw Failure(error);}
 void Progress(const DiscImportProgress& callback,std::wstring_view stage,uint64_t done,uint64_t total){if(callback && !callback(stage,done,total))throw Canceled{};}
 struct Image {
-    Handle file;uint64_t size=0;
+    Handle file;uint64_t size=0,physical_size=0;unsigned version=0,shift=0;bool compressed=false,lz4=false;
+    uint32_t block_size=0,cached=UINT32_MAX;std::vector<uint32_t> index;std::vector<uint8_t> cache;
+    void Physical(uint64_t offset,std::span<uint8_t> bytes){
+        Require(offset<=physical_size && bytes.size()<=physical_size-offset,"Compressed image block extends outside its container");
+        LARGE_INTEGER position{};position.QuadPart=LONGLONG(offset);Require(SetFilePointerEx(file.value,position,nullptr,FILE_BEGIN),"Could not seek in the disc image");
+        DWORD read=0;Require(bytes.size()<=MAXDWORD && ReadFile(file.value,bytes.data(),DWORD(bytes.size()),&read,nullptr) && read==bytes.size(),"Could not read disc image bytes");
+    }
+    uint64_t Position(size_t i)const{return uint64_t(index[i]&0x7FFFFFFF)<<shift;}
     explicit Image(const fs::path& path) {
         // Deny writers while validating, hashing and extracting this image.
         file.value=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
         LARGE_INTEGER length{};Require(file.value!=INVALID_HANDLE_VALUE && GetFileSizeEx(file.value,&length),"Could not open the disc image. Close any app writing it and try again.");
-        size=uint64_t(length.QuadPart);Require(size>=0x10800 && size<=16ull*1024*1024*1024,"The file is not a supported Xbox 360 disc image (expected an uncompressed .iso).");
+        size=physical_size=uint64_t(length.QuadPart);Require(size>=24 && size<=16ull*1024*1024*1024,"Invalid Xbox disc image size");
+        std::array<uint8_t,24> header{};Physical(0,header);
+        compressed=std::equal(header.begin(),header.begin()+4,"CISO") || std::equal(header.begin(),header.begin()+4,"ZISO");
+        if(!compressed){Require(size>=0x10800,"The disc image is too short");return;}
+        lz4=header[0]=='Z';version=header[20];shift=header[21];block_size=U32(header.data()+16);size=U64(header.data()+8);
+        const auto start=U32(header.data()+4)?U32(header.data()+4):24;
+        Require(version<=2 && (!lz4 || version<=1) && shift<=16 && block_size>=2048 && block_size<=1024*1024 && !(block_size&(block_size-1)) &&
+            size>=0x10800 && size<=16ull*1024*1024*1024 && !(size%2048) && start>=24 && start<=4096,"Unsupported CSO/ZSO header, version or block size");
+        const auto count=(size+block_size-1)/block_size+1;Require(count*4<=64*1024*1024 && start+count*4<=physical_size,"Invalid CSO block index bounds");
+        std::vector<uint8_t> bytes(size_t(count*4));Physical(start,bytes);index.resize(size_t(count));
+        for(size_t i=0;i<index.size();++i)index[i]=U32(bytes.data()+i*4);
+        Require(Position(0)>=start+count*4,"CSO payload overlaps its index");
+        for(size_t i=1;i<index.size();++i)Require(Position(i)>Position(i-1) && Position(i)<=physical_size &&
+            Position(i)-Position(i-1)<=uint64_t(block_size)*2+(uint64_t(1)<<shift),"Invalid CSO block extent or nonmonotonic index");
     }
     bool Contains(uint64_t offset,uint64_t length)const{return offset<=size && length<=size-offset;}
     void Read(uint64_t offset,std::span<uint8_t> bytes) {
         Require(Contains(offset,bytes.size()),"The disc image is truncated or contains an invalid file extent.");
+        if(compressed){size_t copied=0;while(copied<bytes.size()){
+            const auto block=uint32_t(offset/block_size);const auto within=size_t(offset%block_size);
+            if(cached!=block){const auto length=size_t(Position(block+1)-Position(block));const auto minimum=size_t(std::min<uint64_t>(block_size,size-uint64_t(block)*block_size));
+                const bool plain=version==2?length>=block_size:bool(index[block]&0x80000000u);
+                cache.assign(block_size,0);
+                if(plain){Require(length>=minimum,"Short uncompressed CSO block");Physical(Position(block),std::span(cache).first(minimum));cache.resize(minimum);}
+                else{std::vector<uint8_t> encoded(length);Physical(Position(block),encoded);size_t produced=0;std::string error;
+                    const bool use_lz4=lz4 || (version==2 && (index[block]&0x80000000u));
+                    if(use_lz4)produced=DecodeLz4(encoded,cache,minimum,(size_t(1)<<shift)-1);
+                    else{const auto decoded=em1::InflateDiscBlock(encoded,cache,minimum,(size_t(1)<<shift)-1,produced,error);Require(decoded,error.c_str());}
+                    cache.resize(produced);
+                }cached=block;
+            }
+            Require(within<cache.size(),"Missing decompressed CSO bytes");const auto count=std::min(bytes.size()-copied,cache.size()-within);
+            std::copy_n(cache.begin()+within,count,bytes.begin()+copied);copied+=count;offset+=count;
+        }return;}
         LARGE_INTEGER position{};position.QuadPart=LONGLONG(offset);Require(SetFilePointerEx(file.value,position,nullptr,FILE_BEGIN),"Could not seek in the disc image.");
         DWORD read=0;Require(bytes.size()<=MAXDWORD && ReadFile(file.value,bytes.data(),DWORD(bytes.size()),&read,nullptr) && read==bytes.size(),"Could not read the disc image.");
+    }
+    static size_t DecodeLz4(std::span<const uint8_t> input,std::span<uint8_t> output,size_t minimum,size_t padding){
+        size_t at=0,written=0;
+        auto length=[&](size_t n){if(n==15){uint8_t extra;do{Require(at<input.size(),"Truncated LZ4 length");extra=input[at++];Require(n<=output.size() && extra<=output.size()-n,"Oversized LZ4 length");n+=extra;}while(extra==255);}return n;};
+        while(at<input.size()){
+            if(written>=minimum && input.size()-at<=padding)return written;
+            const auto token=input[at++];const auto literals=length(token>>4);
+            Require(literals<=input.size()-at && literals<=output.size()-written,"LZ4 literal exceeds disc block");std::copy_n(input.begin()+at,literals,output.begin()+written);at+=literals;written+=literals;
+            if(at==input.size() || (written>=minimum && input.size()-at<=padding)){Require(written>=minimum,"Short LZ4 disc block");return written;}
+            Require(input.size()-at>=2,"Truncated LZ4 match");const auto distance=U16(input.data()+at);at+=2;const auto match=length(token&15)+4;
+            Require(distance && distance<=written && match<=output.size()-written,"Invalid LZ4 match distance/length");
+            for(size_t i=0;i<match;++i)output[written+i]=output[written+i-distance];written+=match;
+        }Require(written>=minimum,"Incomplete LZ4 disc block");return written;
     }
 };
 std::string Lower(std::string text){for(auto& c:text)if(c>='A' && c<='Z')c+=32;return text;}
@@ -202,9 +254,42 @@ bool TestDiscImageImport(const fs::path& root) {
         Require(!ImportXbox360Disc(source,target,[](std::wstring_view stage,uint64_t done,uint64_t){return stage!=L"Extracting game files" || done==0;},error) && error.empty(),"ISO cancellation failed.");
         Require(!ImportXbox360Disc(root/"layout1.iso",target,{},error) && !error.empty(),"A different image resumed an owned partial extraction.");
         Require(ImportXbox360Disc(source,target,{},error) && ImportXbox360Disc(source,target,{},error),"ISO extraction/resume failed.");
+        std::ifstream raw_file(source,std::ios::binary);const std::vector<uint8_t> raw(std::istreambuf_iterator<char>(raw_file),{});
+        auto compressed_fixture=[&](const fs::path& path,unsigned version,unsigned shift,bool zso,bool lz4){
+            constexpr size_t block=4096;const auto count=(raw.size()+block-1)/block;
+            std::vector<uint8_t> cso(24+(count+1)*4,0);
+            auto word=[&](size_t at,uint32_t n){for(unsigned i=0;i<4;++i)cso[at+i]=uint8_t(n>>(8*i));};
+            std::copy_n(zso?"ZISO":"CISO",4,cso.begin());word(4,version==1 && !zso?0:24);word(8,uint32_t(raw.size()));word(16,block);cso[20]=uint8_t(version);cso[21]=uint8_t(shift);
+            const auto alignment=size_t(1)<<shift;cso.resize((cso.size()+alignment-1)&~(alignment-1));
+            for(size_t b=0;b<count;++b){std::vector<uint8_t> bytes(block,0);std::copy_n(raw.begin()+b*block,std::min(block,raw.size()-b*block),bytes.begin());std::vector<uint8_t> packed;
+                if(lz4 || zso){
+                    if(std::all_of(bytes.begin(),bytes.end(),[&](auto v){return v==bytes[0];})){
+                        packed={0x1f,bytes[0],1,0};size_t extra=block-25;while(extra>=255){packed.push_back(255);extra-=255;}packed.push_back(uint8_t(extra));packed.push_back(0x50);packed.insert(packed.end(),5,bytes[0]);
+                    }
+                }else{const auto zlib=em1::DeflateNativePakResource(bytes);packed.assign(zlib.begin()+2,zlib.end()-4);}
+                // Include raw blocks too; v2 identifies them by stored extent.
+                const bool plain=packed.empty() || packed.size()+alignment>=block || b%3==0;
+                const auto flags=version==2?((lz4 && !plain)?0x80000000u:0u):(plain?0x80000000u:0u);
+                word(24+b*4,uint32_t(cso.size()>>shift)|flags);const auto& data=plain?bytes:packed;cso.insert(cso.end(),data.begin(),data.end());cso.resize((cso.size()+alignment-1)&~(alignment-1));
+            }
+            word(24+count*4,uint32_t(cso.size()>>shift));std::ofstream out(path,std::ios::binary);out.write(reinterpret_cast<const char*>(cso.data()),cso.size());
+        };
+        for(unsigned mode=0;mode<4;++mode){const auto path=root/("compressed"+std::to_string(mode)+(mode==0?".img":mode==3?".zso":".cso"));
+            compressed_fixture(path,mode==0 || mode==3?1:2,mode==2?9:mode==1?2:0,mode==3,mode>=2);
+            Image compressed(path);std::vector<uint8_t> decoded(raw.size());compressed.Read(0,decoded);
+            Require(decoded==raw && Plan(compressed).partition==0,"CSO/ZSO block decoding changed logical ISO bytes or file tables");
+            std::array<uint8_t,4125> crossing{};compressed.Read(2040,crossing);Require(std::equal(crossing.begin(),crossing.end(),raw.begin()+2040),"CSO cross-block reads differ");
+            Require(ImportXbox360Disc(path,target,{},error),"Equivalent CSO/ZSO failed verified ISO extraction/resume");
+        }
+        {const auto bad=root/"bad-index.cso";compressed_fixture(bad,1,0,false,false);std::fstream change(bad,std::ios::binary|std::ios::in|std::ios::out);change.seekp(24);const char zero[4]{};change.write(zero,4);change.close();
+            bool rejected=false;try{Image malformed(bad);}catch(const Failure&){rejected=true;}Require(rejected,"Overlapping CSO header/index accepted");}
+        for(const auto& bad:std::vector<std::vector<uint8_t>>{{0x10,'a',0,0},{0x10,'a',2,0},{0xf0,255,255},{0x10,'a',1}}){
+            std::array<uint8_t,32> decoded{};bool rejected=false;try{Image::DecodeLz4(bad,decoded,16,0);}catch(const Failure&){rejected=true;}
+            Require(rejected,"Malformed LZ4 distance, length or truncated match accepted");
+        }
         std::ifstream stream(target/"packfiles"/"level.pak",std::ios::binary);Require(std::string(std::istreambuf_iterator<char>(stream),{})=="level-data","Extracted ISO contents differ.");
         Require(!fs::exists(root/"escape"),"Unsafe ISO path escaped extraction.");
-        REXLOG_INFO("Native ISO importer passed: four XDVDFS partition bases, traversal/cycle/title rejection, streaming extraction/cancel, SHA-256-owned resume and byte-exact files (synthetic images; retail ISO still needs validation)");return true;
+        REXLOG_INFO("Native disc importer passed: four XDVDFS bases, CSO1/2 DEFLATE and LZ4/ZSO, raw/partial/aligned/cross-block decoding, malformed index, title/path rejection and equivalent-container SHA-256 resume (synthetic images; retail compressed images still need validation)");return true;
     }catch(const std::exception& exception){REXLOG_ERROR("Disc image fixture: {}",exception.what());return false;}
 }
 }

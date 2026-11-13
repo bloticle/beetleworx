@@ -54,4 +54,15 @@ bool InflateZlib(std::span<const uint8_t> compressed,
   error.clear();
   return true;
 }
+bool InflateDiscBlock(std::span<const uint8_t> compressed,std::span<uint8_t> output,size_t minimum,
+                      size_t padding,size_t& produced,std::string& error){
+  produced=0;
+  if(compressed.empty() || compressed.size()>4*1024*1024 || output.empty() || output.size()>1024*1024 || minimum>output.size() || padding>65535){error="Invalid compressed disc block bounds";return false;}
+  Allocator allocator;z_stream stream{};stream.opaque=&allocator;stream.zalloc=Allocate;stream.zfree=Free;
+  if(inflateInit2(&stream,-15)!=Z_OK){error="Cannot initialize disc DEFLATE decoder";return false;}
+  struct End{z_stream& s;~End(){inflateEnd(&s);}}end{stream};
+  stream.next_in=const_cast<Bytef*>(compressed.data());stream.avail_in=uInt(compressed.size());stream.next_out=output.data();stream.avail_out=uInt(output.size());
+  if(inflate(&stream,Z_FINISH)!=Z_STREAM_END || stream.total_out<minimum || stream.avail_in>padding){error="Invalid disc DEFLATE block or output length";return false;}
+  produced=stream.total_out;error.clear();return true;
+}
 }  // namespace em2::em1
