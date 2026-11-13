@@ -6,7 +6,7 @@ The original RVZ mount and embedded reader have been compared against the same
 owned disc: full file inventory and sampled beginning/end bytes match. This
 does not establish full campaign compatibility or retail testing of each format.
 
-Development source additionally reads Xbox CSO v1/v2, ZSO and CCI directly, with
+Development source additionally reads Xbox CSO v1/v2, ZSO, CCI and standalone CHD directly, with
 bounded DEFLATE and LZ4 decoding and a single decompressed-block cache. It
 recognizes containers by their contents. Raw images named `.xiso`, `.img` or
 `.bin` work through the same XDVDFS parser. Choosing `default.xex` inside a
@@ -19,6 +19,16 @@ created. It checks header/index extents, raw sector lengths, compressed padding
 and missing middle parts. The current bounded reader accepts up to 32 parts.
 Tests cover mixed raw/LZ4 sectors, padding, split-boundary reads and equivalent
 ISO/CCI import resume. Retail CCI images still need validation.
+
+CHD decoding is linked into the same executable through pinned `chd` 0.4.0.
+It exposes flat Xbox logical disc bytes directly to setup without an intermediate
+ISO. The bridge bounds hunk/map/metadata sizes, verifies stored hunk CRCs, and
+resolves self references without recursive decoding. Tests cover raw CHD v5,
+DEFLATE CHD v3, valid self references, cross-hunk and partial-final-hunk reads,
+ISO/CHD resume, bad CRCs, cycles, oversized maps and required-parent rejection.
+Retail CHDs and the other decoder codecs still need validation. Parent-dependent
+CHDs and CD-sector/audio layouts are not accepted; this reader is for Xbox
+images and is not a Wii CHD mount. These additions are not included in demo.3.
 
 Development source also mounts extracted EM1 Wii discs directly. In the Wii
 image picker, choose **Use an extracted game folder instead**. Select the disc
@@ -48,7 +58,7 @@ result proves that every file discovered by the native disc parser has matching
 length and contents in the reference; it does not prove executable compatibility
 or successful gameplay. Missing or different reference files fail verification.
 
-CHD, GOD/SVOD, ZAR, ZIP/7z/RAR wrappers, legacy
+GOD/SVOD, ZAR, ZIP/7z/RAR wrappers, legacy
 NKit conversions remain unfinished. File-container support also does not make
 changed executable code compatible with the existing static translation.
 
@@ -59,4 +69,5 @@ coverage for that ISO, alongside the synthetic compressed-container tests.
 
 Format references: [maxcso](https://github.com/unknownbrackets/maxcso),
 [CCI reference format](https://github.com/Team-Resurgent/libCCI/blob/main/FORMAT.md),
+[chd-rs](https://github.com/SnowflakePowered/chd-rs),
 [nod](https://github.com/encounter/nod/tree/v1.4.4).

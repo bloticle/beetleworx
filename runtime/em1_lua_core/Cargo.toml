@@ -11,6 +11,7 @@ crate-type = ["staticlib", "rlib"]
 unluac = { version = "=1.4.3", default-features = false }
 mlua = { version = "=0.11.6", default-features = false, features = ["lua51", "vendored", "send"] }
 nod = "=1.4.4"
+chd = { version = "=0.4.0", features = ["verify_block_crc"] }
 
 [profile.release]
 panic = "unwind"

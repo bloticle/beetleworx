@@ -1,0 +1,77 @@
+[
+  {
+    "package": "chd",
+    "version": "0.4.0",
+    "repository": "https://github.com/SnowflakePowered/chd-rs",
+    "git_revision": "fcab65a097299f077aae1ac2158ac055c6a8815d",
+    "path_in_vcs": "chd-rs",
+    "files": [
+      {
+        "file": "chd-LICENSE.txt",
+        "sha256": "5e43cc088d55f3740675ae6cb74f1fb69c62958ff6c3ac043ae649281785e788",
+        "source": "https://raw.githubusercontent.com/SnowflakePowered/chd-rs/fcab65a097299f077aae1ac2158ac055c6a8815d/LICENSE.md"
+      }
+    ]
+  },
+  {
+    "package": "crc-catalog",
+    "version": "2.5.0",
+    "repository": "https://github.com/akhilles/crc-catalog.git",
+    "git_revision": "ed4ad631f22b05055c21a3a4127eb7cf6d75bb62",
+    "path_in_vcs": "",
+    "files": [
+      {
+        "file": "crc-catalog-Apache-2.0.txt",
+        "sha256": "d3cdb764b98283ee7c3a3cea8d374e2a2957322374378d1f3263f4d512741fc3",
+        "source": "https://raw.githubusercontent.com/akhilles/crc-catalog/ed4ad631f22b05055c21a3a4127eb7cf6d75bb62/LICENSES/Apache-2.0.txt"
+      },
+      {
+        "file": "crc-catalog-MIT.txt",
+        "sha256": "5ef8fcfb6cccec8fcae043c834099a60c8b7406408db576e026d2b7e67dc5cf5",
+        "source": "https://raw.githubusercontent.com/akhilles/crc-catalog/ed4ad631f22b05055c21a3a4127eb7cf6d75bb62/LICENSES/MIT.txt"
+      }
+    ]
+  },
+  {
+    "package": "zrip-core",
+    "version": "0.11.1",
+    "repository": "https://github.com/paddor/zrip",
+    "git_revision": "d11b8eeb63e705f8f01d693d0f22e82d9a00c360",
+    "path_in_vcs": "crates/core",
+    "files": [
+      {
+        "file": "zrip-core-LICENSE.txt",
+        "sha256": "c401ab3834bcd60cfaf717b5977d9ba89199f86e111375e0e268878fbb1cb221",
+        "source": "https://raw.githubusercontent.com/paddor/zrip/d11b8eeb63e705f8f01d693d0f22e82d9a00c360/LICENSE"
+      }
+    ]
+  },
+  {
+    "package": "zrip-decode",
+    "version": "0.8.13",
+    "repository": "https://github.com/paddor/zrip",
+    "git_revision": "4a2c5f35df39bb766dea6d71f0109bacaf8cb3d9",
+    "path_in_vcs": "crates/decode",
+    "files": [
+      {
+        "file": "zrip-decode-LICENSE.txt",
+        "sha256": "c401ab3834bcd60cfaf717b5977d9ba89199f86e111375e0e268878fbb1cb221",
+        "source": "https://raw.githubusercontent.com/paddor/zrip/4a2c5f35df39bb766dea6d71f0109bacaf8cb3d9/LICENSE"
+      }
+    ]
+  },
+  {
+    "package": "zrip-encode",
+    "version": "0.9.5",
+    "repository": "https://github.com/paddor/zrip",
+    "git_revision": "03cadc88db917a3a0932c31081a45ae3f4e28ef8",
+    "path_in_vcs": "crates/encode",
+    "files": [
+      {
+        "file": "zrip-encode-LICENSE.txt",
+        "sha256": "c401ab3834bcd60cfaf717b5977d9ba89199f86e111375e0e268878fbb1cb221",
+        "source": "https://raw.githubusercontent.com/paddor/zrip/03cadc88db917a3a0932c31081a45ae3f4e28ef8/LICENSE"
+      }
+    ]
+  }
+]

@@ -3,5 +3,5 @@ patches/*.patch whitespace=-blank-at-eol
 
 # Preserve exact notice bytes and stable Cargo.lock checksums.
 runtime/**/Cargo.lock text eol=lf
-docs/licenses/*.txt -text whitespace=cr-at-eol
+docs/licenses/*.txt -text -whitespace
 docs/licenses/rust-dependencies.json text eol=lf

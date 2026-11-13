@@ -59,6 +59,21 @@ def generate():
             files=[ROOT/'docs/licenses'/('nod-'+name+'.txt') for name in ('LICENSE-MIT','LICENSE-APACHE')]
             shared_from={'package':'nod','version':package['version'],'git_revision':revision}
         if not files:
+            record_file=ROOT/'docs/licenses/workspace-notices.json'
+            workspace_records=json.loads(record_file.read_text(encoding='utf-8')) if record_file.exists() else []
+            record=next((r for r in workspace_records if r['package']==package['name'] and r['version']==package['version']),None)
+            if record:
+                source=json.loads((directory/'.cargo_vcs_info.json').read_text())
+                if source['git']['sha1']!=record['git_revision'] or source['path_in_vcs']!=record['path_in_vcs'] or package['repository']!=record['repository']:
+                    raise ValueError(f"Workspace notice provenance changed: {package['name']}")
+                files=[]
+                for notice in record['files']:
+                    path=ROOT/'docs/licenses'/notice['file']
+                    if path.name!=notice['file'] or digest(path.read_bytes())!=notice['sha256']:
+                        raise ValueError(f"Workspace notice changed: {package['name']}")
+                    files.append(path)
+                shared_from={'package':package['name'],'version':package['version'],'git_revision':record['git_revision']}
+        if not files:
             raise ValueError(f"Missing notices: {package['name']} {package['version']}")
         sources = []
         for path in files:

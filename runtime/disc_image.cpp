@@ -15,6 +15,11 @@
 #include <stdexcept>
 #include <vector>
 #include <rex/logging.h>
+extern "C" {
+void* bw_chd_open(const uint8_t*,size_t,uint64_t*,uint8_t*,size_t);
+void bw_chd_close(void*);
+int bw_chd_read(void*,uint64_t,uint8_t*,size_t,uint8_t*,size_t);
+}
 
 namespace em2 {
 namespace {
@@ -34,6 +39,7 @@ void Progress(const DiscImportProgress& callback,std::wstring_view stage,uint64_
 struct Image {
     Handle file;uint64_t size=0,physical_size=0;unsigned version=0,shift=0;bool compressed=false,lz4=false,cci=false;
     std::vector<std::unique_ptr<Image>> parts;std::vector<uint64_t> part_starts;
+    std::unique_ptr<void,void(*)(void*)> chd{nullptr,bw_chd_close};
     uint32_t block_size=0,cached=UINT32_MAX;std::vector<uint32_t> index;std::vector<uint8_t> cache;
     void Physical(uint64_t offset,std::span<uint8_t> bytes){
         Require(offset<=physical_size && bytes.size()<=physical_size-offset,"Compressed image block extends outside its container");
@@ -47,6 +53,11 @@ struct Image {
         LARGE_INTEGER length{};Require(file.value!=INVALID_HANDLE_VALUE && GetFileSizeEx(file.value,&length),"Could not open the disc image. Close any app writing it and try again.");
         size=physical_size=uint64_t(length.QuadPart);Require(size>=24 && size<=16ull*1024*1024*1024,"Invalid Xbox disc image size");
         std::array<uint8_t,24> header{};Physical(0,header);
+        if(std::equal(header.begin(),header.begin()+8,"MComprHD")){
+            const auto encoded=path.u8string();std::array<uint8_t,1024> error{};
+            chd.reset(bw_chd_open(reinterpret_cast<const uint8_t*>(encoded.data()),encoded.size(),&size,error.data(),error.size()));
+            Require(bool(chd),reinterpret_cast<const char*>(error.data()));compressed=true;return;
+        }
         cci=std::equal(header.begin(),header.begin()+4,"CCIM");
         if(cci){
             std::array<uint8_t,32> full{};Physical(0,full);compressed=lz4=true;version=1;shift=2;block_size=2048;size=U64(full.data()+8);
@@ -92,6 +103,7 @@ struct Image {
     bool Contains(uint64_t offset,uint64_t length)const{return offset<=size && length<=size-offset;}
     void Read(uint64_t offset,std::span<uint8_t> bytes) {
         Require(Contains(offset,bytes.size()),"The disc image is truncated or contains an invalid file extent.");
+        if(chd){std::array<uint8_t,1024> error{};const auto result=bw_chd_read(chd.get(),offset,bytes.data(),bytes.size(),error.data(),error.size());Require(result==0,reinterpret_cast<const char*>(error.data()));return;}
         if(!parts.empty()){size_t copied=0;while(copied<bytes.size()){
             const auto i=size_t(std::upper_bound(part_starts.begin(),part_starts.end(),offset)-part_starts.begin()-1);
             const auto local=offset-part_starts[i],count=size_t(std::min<uint64_t>(bytes.size()-copied,parts[i]->size-local));
@@ -375,6 +387,33 @@ bool TestDiscImageImport(const fs::path& root) {
         {Image malformed(bad_cci);std::array<uint8_t,2048> bytes{};malformed.Read(0x10000,bytes);
             bool rejected=false;try{malformed.Read(2048,bytes);}catch(const Failure&){rejected=true;}Require(rejected,"CCI invalid block padding accepted");
             malformed.Read(0x10000,bytes);Require(std::equal(bytes.begin(),bytes.end(),raw.begin()+0x10000),"Failed compressed decode poisoned a previously cached sector");}
+        auto chd_fixture=[&](const fs::path& path,bool legacy,int invalid){
+            constexpr size_t hunk=4096;const auto count=(raw.size()+hunk-1)/hunk;
+            std::vector<uint8_t> container(legacy?120+count*16+16:hunk+count*hunk,0);
+            auto be=[&](size_t at,uint64_t n,unsigned length){for(unsigned i=0;i<length;++i)container[at+i]=uint8_t(n>>(8*(length-1-i)));};
+            std::copy_n("MComprHD",8,container.begin());be(8,legacy?120:124,4);be(12,legacy?3:5,4);
+            if(legacy){be(16,invalid==2?1:0,4);be(20,1,4);be(24,count,4);be(28,raw.size(),8);be(76,hunk,4);std::copy_n("EndOfListCookie\0",16,container.begin()+120+count*16);}
+            else{be(32,raw.size(),8);be(40,124,8);be(56,hunk,4);be(60,2048,4);if(invalid==2)container[104]=1;}
+            for(size_t b=0;b<count;++b){std::vector<uint8_t> bytes(hunk,0);std::copy_n(raw.begin()+b*hunk,std::min(hunk,raw.size()-b*hunk),bytes.begin());
+                if(!legacy){const bool zero=b%3 && std::all_of(bytes.begin(),bytes.end(),[](uint8_t v){return v==0;});be(124+b*4,zero?0:b+1,4);std::copy(bytes.begin(),bytes.end(),container.begin()+hunk+b*hunk);continue;}
+                const auto encoded=em1::DeflateNativePakResource(bytes);const auto payload=std::span(encoded).subspan(2,encoded.size()-6);const bool packed=payload.size()<hunk;
+                uint32_t crc=0xffffffff;for(auto byte:bytes){crc^=byte;for(unsigned bit=0;bit<8;++bit)crc=(crc>>1)^((crc&1)?0xedb88320:0);}crc=~crc;
+                const auto row=120+b*16;be(row,container.size(),8);be(row+8,crc^(invalid==1 && b==0?1u:0u),4);const auto length=packed?payload.size():bytes.size();be(row+12,length&65535,2);container[row+14]=uint8_t(length>>16);container[row+15]=packed?1:2;
+                if((invalid==3 && b==0) || (invalid==4 && b==1)){be(row,0,8);container[row+15]=4;}
+                const auto data=packed?payload:std::span<const uint8_t>(bytes);container.insert(container.end(),data.begin(),data.end());
+            }
+            if(invalid==5){const auto at=container.size();container.resize(at+16,0);be(legacy?36:48,at,8);be(at+8,at,8);}
+            if(invalid==6){be(16,0x7a6c6962,4);be(124,0x40000000,4);}
+            std::ofstream out(path,std::ios::binary);out.write(reinterpret_cast<const char*>(container.data()),container.size());
+        };
+        for(bool legacy:{false,true}){const auto path=root/(legacy?"deflate-v3.chd":"raw-v5.chd");chd_fixture(path,legacy,0);
+            Image image(path);std::vector<uint8_t> decoded(raw.size());image.Read(0,decoded);Require(decoded==raw,"CHD hunk decoding changed logical bytes");
+            std::array<uint8_t,4125> crossing{};image.Read(4083,crossing);Require(std::equal(crossing.begin(),crossing.end(),raw.begin()+4083),"CHD cross-hunk read differs");
+            Require(ImportXbox360Disc(path,target,{},error) && VerifyXbox360Disc(path,target,error),"CHD extraction or verified resume failed");
+        }
+        for(int invalid:{1,2,3,5,6}){const auto path=root/("bad"+std::to_string(invalid)+".chd");chd_fixture(path,invalid!=6,invalid);bool rejected=false;
+            try{Image malformed(path);std::array<uint8_t,4096> decoded{};malformed.Read(0,decoded);}catch(const Failure&){rejected=true;}Require(rejected,"CHD accepted corrupt CRC, required parent or cyclic self reference");}
+        {const auto path=root/"self-ref.chd";chd_fixture(path,true,4);Image image(path);std::vector<uint8_t> decoded(raw.size());image.Read(0,decoded);Require(decoded==raw,"Valid CHD self reference decoded incorrectly");}
         {const auto bad=root/"bad-index.cso";compressed_fixture(bad,1,0,false,false);std::fstream change(bad,std::ios::binary|std::ios::in|std::ios::out);change.seekp(24);const char zero[4]{};change.write(zero,4);change.close();
             bool rejected=false;try{Image malformed(bad);}catch(const Failure&){rejected=true;}Require(rejected,"Overlapping CSO header/index accepted");}
         for(const auto& bad:std::vector<std::vector<uint8_t>>{{0x10,'a',0,0},{0x10,'a',2,0},{0xf0,255,255},{0x10,'a',1}}){
@@ -383,7 +422,7 @@ bool TestDiscImageImport(const fs::path& root) {
         }
         std::ifstream stream(target/"packfiles"/"level.pak",std::ios::binary);Require(std::string(std::istreambuf_iterator<char>(stream),{})=="level-data","Extracted ISO contents differ.");
         Require(!fs::exists(root/"escape"),"Unsafe ISO path escaped extraction.");
-        REXLOG_INFO("Native disc importer passed: four XDVDFS bases, CSO1/2 DEFLATE and LZ4/ZSO, single/split CCI, raw/partial/aligned/cross-block decoding, malformed index/padding/missing parts, title/path rejection and equivalent-container SHA-256 resume (synthetic images; retail compressed images still need validation)");return true;
+        REXLOG_INFO("Native disc importer passed: four XDVDFS bases, CSO1/2 DEFLATE and LZ4/ZSO, single/split CCI, raw V5 and DEFLATE V3 CHD, cross-block reads, malformed index/padding/missing parts/CRC/parent/cycle rejection and equivalent-container SHA-256 resume (synthetic images; retail compressed images still need validation)");return true;
     }catch(const std::exception& exception){REXLOG_ERROR("Disc image fixture: {}",exception.what());return false;}
 }
 }
