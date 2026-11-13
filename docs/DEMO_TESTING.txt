@@ -2,7 +2,7 @@ PUBLIC TESTING DEMO
 
 Included: Epic Mickey 2 gameplay, native PC settings and control rebinding,
 single-player character switching, and an Epic Mickey Wii courtyard exploration
-preview using your original RVZ image. Mouse controls are on by default.
+preview using your original Wii disc image. Mouse controls are on by default.
 Sprint, dash and ground-pound are enabled for new profiles and configurable in
 the native movement menu. Saved ability choices remain in effect on later runs.
 
@@ -49,3 +49,6 @@ user_data backup. An imported EM2 game-data folder can be reused through the
 extracted-folder setup option.
 
 EMR movement animations: @llenarox on Discord.
+
+This update adds resource-based regional archive patching and accepts media-ID/ratings differences when the decoded executable is identical. Builds with changed executable code still require a matching port. Wii source mounting supports RVZ, WIA, ISO/GCM, WBFS, CISO, GCZ and NFS through an embedded reader. Some formats have not yet had full-game testing; Xbox compressed containers and legacy NKit conversions remain incomplete.
+The reported zero-byte native cleanup crash has a targeted guard against inserting an already-unmapped pointer into the allocator. The original caller has not yet been reproduced.

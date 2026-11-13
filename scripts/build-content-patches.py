@@ -109,6 +109,11 @@ def encode(source, target):
 
 
 def decode(source, patch):
+    if patch[:8] == b'EM2DP02\0':
+        packed, resources = struct.unpack_from('<QQ', patch, 96)
+        if not packed or not resources or 112+packed >= len(patch):
+            raise ValueError('Invalid regional patch envelope')
+        return decode(source, MAGIC+patch[8:96]+patch[112:112+packed])
     if patch[:8] != MAGIC or len(patch) < 97:
         raise ValueError('Invalid patch')
     source_size, target_size, command_size = struct.unpack_from('<QQQ', patch, 8)
@@ -145,6 +150,36 @@ def decode(source, patch):
     return bytes(output)
 
 
+def regional_patch(source_path, target, expected_files, pak):
+    original = {name.lower(): (blob, kind) for name, blob, kind in pak.read_pak(source_path)}
+    endian = '>' if target[:4] == b' KAP' else '<'
+    header, relative = struct.unpack_from(endian+'II', target, 12)
+    offset = header+relative
+    stored = []
+    for i, (name, blob, kind) in enumerate(expected_files):
+        _, packed, aligned = struct.unpack_from(endian+'III', target, header+4+i*24)
+        stored.append((name, blob, kind, target[offset:offset+packed]))
+        offset += aligned
+    records = []
+    for i, (name, blob, kind, packed) in enumerate(stored):
+        key=name.lower()
+        if original.get(key)==(blob,kind): continue
+        mode=0 if key in original else 1
+        anchor='' if not mode else next((n.lower() for n, *_ in stored[i+1:] if n.lower() in original),'*')
+        records.append((mode,name,anchor,len(blob),kind,packed))
+    target_names={name.lower() for name, *_ in stored}
+    for name in original.keys()-target_names:
+        records.append((2,name,'',0,b'\0'*4,b''))
+    result=bytearray(b'EM2RP01\0'+struct.pack('<I',len(records)))
+    for mode,name,anchor,size,kind,packed in records:
+        result.extend(struct.pack('<I',mode))
+        for value in (name,anchor):
+            encoded=value.encode('utf-8');result.extend(struct.pack('<I',len(encoded))+encoded)
+        result.extend(struct.pack('<II',size,len(packed))+kind+packed)
+    if len(result)>MAX_FILE: raise ValueError('Regional patch exceeds native budget')
+    return bytes(result),len(records)
+
+
 def main():
     root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
@@ -160,6 +195,9 @@ def main():
         source = source_path.read_bytes()
         target, expected_files, pak = preserve_unchanged_resources(source_path, input_path)
         patch, copied = encode(source, target)
+        resources, edits = regional_patch(source_path,target,expected_files,pak)
+        packed=patch[96:]
+        patch=b'EM2DP02\0'+patch[8:96]+struct.pack('<QQ',len(packed),len(resources))+packed+zlib.compress(resources,9)
         destination = args.output/(name+'.em2patch')
         temporary = destination.with_suffix('.tmp')
         temporary.write_bytes(patch)
@@ -173,6 +211,8 @@ def main():
             input_sha256=hashlib.sha256(input_path.read_bytes()).hexdigest(),
             output_sha256=hashlib.sha256(target).hexdigest(), patch_sha256=hashlib.sha256(patch).hexdigest(),
             original_bytes=len(source), output_bytes=len(target), patch_bytes=len(patch), copied_original_bytes=copied))
+        report['archives'][-1]['resource_edits']=edits
+        report['archives'][-1]['regional_patch_format']='EM2RP01'
         print(f'{name}: {len(target):,} output bytes -> {len(patch):,} patch bytes; {copied:,} reused from original', flush=True)
     (args.output/'manifest.json').write_text(json.dumps(report, indent=2)+'\n', encoding='utf-8')
 

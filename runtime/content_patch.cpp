@@ -1,5 +1,6 @@
 #include "content_patch.h"
 #include "content_setup.h"
+#include "content_resource_patch.h"
 #include "em1_inflate.h"
 #include "em1_deflate.h"
 #include <windows.h>
@@ -16,6 +17,8 @@ namespace {
 namespace fs=std::filesystem;
 constexpr size_t maximum_file=64*1024*1024,maximum_commands=96*1024*1024,header_size=96;
 constexpr std::array<uint8_t,8> magic={'E','M','2','D','P','0','1',0};
+bool Header(std::span<const uint8_t> patch){return patch.size()>header_size &&
+    std::equal(magic.begin(),magic.begin()+6,patch.begin()) && (patch[6]=='1' || patch[6]=='2') && !patch[7];}
 void Require(bool valid,const char* error){if(!valid)throw std::runtime_error(error);}
 uint64_t U64(std::span<const uint8_t> bytes,size_t offset){
     Require(offset<=bytes.size() && bytes.size()-offset>=8,"Truncated content patch");
@@ -44,7 +47,20 @@ bool DecodeContentPatch(std::span<const uint8_t> original,std::span<const uint8_
     try {
         output.clear();
         Require(original.size()<=maximum_file && patch.size()>header_size && patch.size()<=maximum_file,"Invalid content patch size");
-        Require(std::equal(magic.begin(),magic.end(),patch.begin()),"Unsupported content patch version");
+        Require(Header(patch),"Unsupported content patch version");
+        if(patch[6]=='2'){
+            const auto packed=U64(patch,96),resource_size=U64(patch,104);
+            Require(patch.size()>112 && packed && packed<=patch.size()-112 && resource_size && resource_size<=maximum_file,"Invalid regional patch envelope");
+            const auto source_hash=Hash(original);
+            if(original.size()==U64(patch,8) && std::equal(source_hash.begin(),source_hash.end(),patch.begin()+32)){
+                std::vector<uint8_t> classic(patch.begin(),patch.begin()+96);classic[6]='1';
+                classic.insert(classic.end(),patch.begin()+112,patch.begin()+112+size_t(packed));return DecodeContentPatch(original,classic,output,error);
+            }
+            std::vector<uint8_t> resources(size_t(resource_size),uint8_t(0));
+            if(!em1::InflateZlib(patch.subspan(112+size_t(packed)),resources,error))return false;
+            output=ApplyRegionalResourcePatch(original,resources);error.clear();
+            REXLOG_INFO("Regional archive patch applied by asset name; original localized resources preserved");return true;
+        }
         const auto source_size=U64(patch,8),target_size=U64(patch,16),command_size=U64(patch,24);
         Require(source_size==original.size() && target_size && target_size<=maximum_file && command_size && command_size<=maximum_commands,"Invalid content patch dimensions");
         const auto source_hash=Hash(original);
@@ -78,7 +94,7 @@ bool ApplyContentPatch(const fs::path& original,const fs::path& patch,const fs::
         const auto input_path=fs::weakly_canonical(original),output_path=fs::weakly_canonical(destination);
         Require(CompareStringOrdinal(input_path.c_str(),-1,output_path.c_str(),-1,TRUE)!=CSTR_EQUAL,"Patched content must be stored separately from original game files");
         const auto delta=Read(patch,maximum_file);
-        Require(delta.size()>header_size && std::equal(magic.begin(),magic.end(),delta.begin()),"Invalid content patch header");
+        Require(Header(delta),"Invalid content patch header");
         // A previous complete reconstruction can be reused after an update or
         // interrupted setup. Always verify its bytes, never just its existence.
         if(fs::is_regular_file(destination)){
@@ -104,6 +120,7 @@ bool ApplyContentPatch(const fs::path& original,const fs::path& patch,const fs::
 }
 bool TestContentPatches(const fs::path& root){
     try {
+        Require(TestRegionalResourcePatches(),"Regional resource patch regression failed");
         Require(!fs::exists(root),"Patch fixture path already exists");fs::create_directories(root);
         const std::vector<uint8_t> original={'a','b','c','d','e','f'},target={'d','e','f','X','Y','a','b','c'};
         std::vector<uint8_t> commands{0};Put64(commands,3);Put64(commands,3);commands.push_back(1);Put64(commands,2);commands.insert(commands.end(),{'X','Y'});commands.push_back(0);Put64(commands,0);Put64(commands,3);

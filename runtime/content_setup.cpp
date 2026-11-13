@@ -70,7 +70,7 @@ fs::path ChooseEm1Source(){
             DWORD options=0;dialog->GetOptions(&options);
             dialog->SetOptions(options|FOS_FILEMUSTEXIST|FOS_PATHMUSTEXIST|FOS_FORCEFILESYSTEM|FOS_NOCHANGEDIR);
             dialog->SetTitle(L"Add Epic Mickey (Wii) to your game library");
-            const COMDLG_FILTERSPEC filter={L"Epic Mickey Wii disc image (*.rvz)",L"*.rvz"};dialog->SetFileTypes(1,&filter);
+            const COMDLG_FILTERSPEC filters[]={{L"Wii disc images",L"*.rvz;*.iso;*.gcm;*.wia;*.wbfs;*.ciso;*.gcz;*.nfs"},{L"All files",L"*.*"}};dialog->SetFileTypes(2,filters);
             if(SUCCEEDED(dialog->Show(nullptr))){
                 IShellItem* item=nullptr;
                 if(SUCCEEDED(dialog->GetResult(&item))){PWSTR path=nullptr;

@@ -14,6 +14,13 @@
 #include <span>
 #include <stdexcept>
 #include <unordered_map>
+extern "C" {
+void* em1_disc_open(const uint8_t*,size_t,uint8_t*,size_t);
+void em1_disc_close(void*);
+size_t em1_disc_count(void*,uint8_t*);
+int em1_disc_info(void*,size_t,uint8_t*,size_t,uint64_t*);
+int em1_disc_read(void*,size_t,uint64_t,uint8_t*,size_t,uint8_t*,size_t);
+}
 
 namespace em2::em1 {
 namespace {
@@ -137,8 +144,13 @@ struct RvzSource::Impl {
   std::filesystem::file_time_type modified;
   std::ifstream file;
   uint64_t size = 0;
-  uint32_t chunk = 0;
+  uint32_t chunk = 0, compression = 5;
+  Bytes Decode(std::span<const uint8_t> source,size_t maximum){
+    if(!compression){Check(source.size()<=maximum,"Uncompressed RVZ block exceeds its bounds");return Bytes(source.begin(),source.end());}
+    return Decompress(source,maximum);
+  }
   std::string disc_id, identity;
+  std::unique_ptr<void,void(*)(void*)> generic{nullptr,em1_disc_close};
   std::vector<Partition> partitions;
   std::vector<Group> groups;
   size_t game_partition = 0;
@@ -175,7 +187,7 @@ struct RvzSource::Impl {
       Check(stored <= chunk + 131072, "Oversized RVZ compressed group");
       bytes = ReadAt(uint64_t(entry.offset) * 4, stored);
       const bool compressed = bool(entry.size >> 31);
-      if (compressed) bytes = Decompress(bytes, chunk + 131072);
+      if (compressed) bytes = Decode(bytes, chunk + 131072);
       Check(bytes.size() >= 2, "Missing Wii hash exception list");
       const auto exceptions = (uint32_t(bytes[0]) << 8) | bytes[1];
       Check(exceptions <= 3328, "Invalid Wii hash exception count");
@@ -264,10 +276,24 @@ struct RvzSource::Impl {
     }
     return result;
   }
-  explicit Impl(const std::filesystem::path& image)
+  explicit Impl(const std::filesystem::path& image,bool other_format=false)
       : image_path(image), modified(std::filesystem::last_write_time(image)), file(image, std::ios::binary) {
     Check(bool(file), "Cannot open original RVZ read-only");
     size = std::filesystem::file_size(image);
+    if(other_format){
+      const auto path=image.u8string();std::array<uint8_t,1024> error{};
+      generic.reset(em1_disc_open(reinterpret_cast<const uint8_t*>(path.data()),path.size(),error.data(),error.size()));
+      Check(bool(generic),reinterpret_cast<const char*>(error.data()));std::array<uint8_t,6> id{};
+      const auto count=em1_disc_count(generic.get(),id.data());Check(count>0 && count<=100000,"Invalid Wii disc file count");
+      disc_id.assign(id.begin(),id.end());
+      for(size_t i=0;i<count;++i){std::array<uint8_t,2049> name{};uint64_t bytes=0;
+        Check(em1_disc_info(generic.get(),i,name.data(),name.size(),&bytes)==0,"Could not read Wii disc directory");
+        const auto key=Key(reinterpret_cast<const char*>(name.data()));Check(ranges.emplace(key,Range{i,bytes}).second,"Duplicate Wii disc file");files.push_back({key,bytes});
+      }
+      auto fingerprint=ReadAt(0,std::min<uint64_t>(size,4096));const auto canonical=std::filesystem::weakly_canonical(image).generic_u8string();
+      fingerprint.insert(fingerprint.end(),canonical.begin(),canonical.end());const auto stamp=std::to_string(modified.time_since_epoch().count());fingerprint.insert(fingerprint.end(),stamp.begin(),stamp.end());
+      identity="em1-disc-v1:"+Hex(Hash(fingerprint,BCRYPT_SHA256_ALGORITHM,32));return;
+    }
     const auto header = ReadAt(0, 0x48);
     Check(std::equal(header.begin(), header.begin() + 4, std::array<uint8_t, 4>{'R','V','Z',1}.begin()) &&
           MatchesHash(std::span(header).first(0x34), std::span(header).subspan(0x34, 20)), "Invalid RVZ primary header");
@@ -278,7 +304,8 @@ struct RvzSource::Impl {
     Check(iso_size >= 0x8000 && iso_size <= 16ull * 1024 * 1024 * 1024, "Invalid Wii logical disc size");
     const auto second = ReadAt(0x48, second_size);
     Check(MatchesHash(second, std::span(header).subspan(16, 20)), "Invalid RVZ disc-header checksum");
-    Check(U32(second) == 2 && U32(second, 4) == 5, "Only Zstd Wii RVZ is supported by this source adapter");
+    compression=U32(second,4);
+    Check(U32(second) == 2 && (compression==0 || compression==5), "This Wii RVZ compression is unsupported. Use an RVZ with Zstd or no compression.");
     chunk = U32(second, 12);
     Check(chunk >= 0x8000 && chunk <= 0x200000 && !(chunk & (chunk - 1)), "Unsupported RVZ chunk size");
     disc_id.assign(reinterpret_cast<const char*>(second.data() + 16), 6);
@@ -290,7 +317,7 @@ struct RvzSource::Impl {
     Check(group_count > 0 && group_count <= 1000000 && compressed <= 16 * 1024 * 1024,
           "Invalid RVZ group-table size");
     const auto packed_groups = ReadAt(U64(second, 200), compressed);
-    const auto raw_groups = Decompress(packed_groups, size_t(group_count) * 12);
+    const auto raw_groups = Decode(packed_groups, size_t(group_count) * 12);
     Check(raw_groups.size() == size_t(group_count) * 12, "RVZ group-table length mismatch");
     groups.reserve(group_count);
     for (size_t i = 0; i < group_count; ++i) {
@@ -345,10 +372,21 @@ struct RvzSource::Impl {
 RvzSource::RvzSource(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 RvzSource::~RvzSource() = default;
 std::unique_ptr<RvzSource> RvzSource::Open(const std::filesystem::path& image, std::string& error) {
-  try { auto result = std::unique_ptr<RvzSource>(new RvzSource(std::make_unique<Impl>(image))); error.clear(); return result; }
+  try {std::unique_ptr<Impl> impl;try{impl=std::make_unique<Impl>(image);}catch(const std::exception&){impl=std::make_unique<Impl>(image,true);}
+    auto result = std::unique_ptr<RvzSource>(new RvzSource(std::move(impl))); error.clear(); return result; }
   catch (const std::exception& exception) { error = exception.what(); return {}; }
 }
 const std::string& RvzSource::DiscId() const { return impl_->disc_id; }
+bool RvzSource::TestGenericSource(const std::filesystem::path& image,std::string& error){
+  try{auto original=Open(image,error);Check(bool(original),error.c_str());
+    RvzSource generic(std::make_unique<Impl>(image,true));Check(original->DiscId()==generic.DiscId(),"Disc IDs differ between source adapters");
+    auto expected=original->Files(),actual=generic.Files();auto less=[](const auto& a,const auto& b){return a.path<b.path;};std::sort(expected.begin(),expected.end(),less);std::sort(actual.begin(),actual.end(),less);
+    Check(expected.size()==actual.size(),"Disc file counts differ between adapters");for(size_t i=0;i<expected.size();++i)Check(expected[i].path==actual[i].path && expected[i].size==actual[i].size,"Disc filesystem differs between adapters");
+    for(size_t sample=0;sample<17 && !expected.empty();++sample){const auto& f=expected[sample*(expected.size()-1)/16];const auto n=std::min<uint64_t>(128,f.size);
+      for(const auto offset:{uint64_t(0),f.size-n}){Bytes a,b;Check(original->ReadFileRange(f.path,offset,n,a,error),error.c_str());Check(generic.ReadFileRange(f.path,offset,n,b,error),error.c_str());Check(a==b,"Disc reader returned different file bytes");}}
+    error.clear();return true;
+  }catch(const std::exception& e){error=e.what();return false;}
+}
 const std::string& RvzSource::SourceIdentity() const { return impl_->identity; }
 const std::vector<RvzFile>& RvzSource::Files() const { return impl_->files; }
 bool RvzSource::ReadFile(std::string_view path, std::vector<uint8_t>& output, std::string& error) {
@@ -368,6 +406,9 @@ bool RvzSource::ReadFileRange(std::string_view path, uint64_t offset, uint64_t l
     const auto found = impl_->ranges.find(Key(path));
     Check(found != impl_->ranges.end(), "File absent from EM1 source mount");
     Check(offset <= found->second.size && length <= found->second.size - offset, "Read outside EM1 source file");
+    if(impl_->generic){Check(length<=256*1024*1024,"Oversized EM1 disc read");Bytes bytes(size_t(length),uint8_t(0));std::array<uint8_t,1024> message{};
+      Check(em1_disc_read(impl_->generic.get(),size_t(found->second.offset),offset,bytes.data(),bytes.size(),message.data(),message.size())==0,reinterpret_cast<const char*>(message.data()));
+      output=std::move(bytes);error.clear();return true;}
     auto data = impl_->ReadPartition(impl_->game_partition, found->second.offset + offset, length);
     output = std::move(data); error.clear(); return true;
   } catch (const std::exception& exception) { error = exception.what(); return false; }

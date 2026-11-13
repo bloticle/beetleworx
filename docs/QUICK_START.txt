@@ -3,7 +3,7 @@ BEETLEWORX - PUBLIC TESTING DEMO
 1. Extract the complete release folder somewhere writable.
 2. Open beetleworx.exe and choose the game you want to play.
 3. Select your Epic Mickey 2 Xbox 360 ISO or extracted game folder when asked.
-   For the Epic Mickey compatibility preview, also select your Wii RVZ image.
+   For the Epic Mickey compatibility preview, also select your Wii disc image (RVZ, ISO, WIA, WBFS, CISO, GCZ or NFS).
 
 Everything runs from this executable. No developer tools or command lines are
 needed. The first import may take a while and displays progress. Canceling is

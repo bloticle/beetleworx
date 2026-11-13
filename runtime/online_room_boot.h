@@ -16,8 +16,9 @@ public:
     ~OnlineRoomBoot();
     OnlineRoomBoot(const OnlineRoomBoot&)=delete;
     OnlineRoomBoot& operator=(const OnlineRoomBoot&)=delete;
-    // Configure before starting workers; the same limit must be negotiated by
-    // every peer. One preserves the synchronous completion policy.
+    // Optional explicit policy before workers. Hosts default to8; joining adopts
+    // the invitation automatically unless an explicit override must match.
+    // One preserves synchronous completion and legacy invitation compatibility.
     bool SetGameplayVerificationWindow(uint8_t completed_worlds);
     bool Host(BootPaths,const std::filesystem::path& frozen_checkpoint,
         std::string listen_address,std::string advertised_address,uint8_t gameplay_capacity,

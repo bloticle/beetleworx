@@ -12,37 +12,42 @@ namespace em2::net {
 namespace {
 constexpr std::string_view alphabet="ABCDEFGHIJKLMNOPQRSTUVWXYZ234567",prefix="EM2-";
 template<class T> bool Nonzero(const T& bytes){return std::any_of(bytes.begin(),bytes.end(),[](auto v){return v!=0;});}
-bool Valid(const Invite& invite){return invite.port && invite.input_delay<=12 &&
+bool Valid(const Invite& invite){return invite.port && invite.input_delay<=12 && invite.verification_window>=1 && invite.verification_window<=8 &&
     invite.first_tick<=UINT64_MAX-invite.input_delay && Nonzero(invite.session) && ParseNumericAddress(invite.address).has_value();}
 uint32_t Checksum(std::span<const uint8_t> bytes) {
     uint32_t crc=0xFFFFFFFF;
     for(auto byte:bytes){crc^=byte;for(unsigned bit=0;bit<8;++bit)crc=(crc>>1)^((crc&1)?0xEDB88320u:0);}
     return ~crc;
 }
+std::string EncodePayload(std::span<const uint8_t> bytes){
+    std::string text(prefix);uint32_t accumulator=0;unsigned bits=0;
+    for(auto byte:bytes){accumulator=(accumulator<<8)|byte;bits+=8;while(bits>=5){bits-=5;text+=alphabet[(accumulator>>bits)&31];}}
+    if(bits)text+=alphabet[(accumulator<<(5-bits))&31];return text;
+}
+
 char Upper(char c){return c>='a'&&c<='z'?char(c-'a'+'A'):c;}
 bool Space(char c){return c==' '||c=='\r'||c=='\n'||c=='\t';}
 }
 std::optional<std::string> EncodeInvite(const Invite& invite) {
     if(!Valid(invite))return {};
     const auto address=*ParseNumericAddress(invite.address);
-    std::vector<uint8_t> bytes(address.ipv6()?48:36);size_t at=0;
+    const bool extended=invite.verification_window>1;
+    std::vector<uint8_t> bytes((address.ipv6()?48:36)+(extended?1:0));size_t at=0;
     auto put=[&](uint64_t value,unsigned count){for(unsigned i=count;i;--i)bytes[at++]=uint8_t(value>>((i-1)*8));};
-    put(address.ipv6()?2:1,1);for(unsigned i=0;i<(address.ipv6()?16u:4u);++i)put(address.bytes()[i],1);put(invite.port,2);
-    for(auto byte:invite.session)put(byte,1);put(invite.first_tick,8);put(invite.input_delay,1);
+    put((address.ipv6()?2:1)+(extended?2:0),1);for(unsigned i=0;i<(address.ipv6()?16u:4u);++i)put(address.bytes()[i],1);put(invite.port,2);
+    for(auto byte:invite.session)put(byte,1);put(invite.first_tick,8);put(invite.input_delay,1);if(extended)put(invite.verification_window,1);
     put(Checksum(std::span(bytes).first(bytes.size()-4)),4);
-    std::string text(prefix);uint32_t accumulator=0;unsigned bits=0;
-    for(auto byte:bytes){accumulator=(accumulator<<8)|byte;bits+=8;while(bits>=5){bits-=5;text+=alphabet[(accumulator>>bits)&31];}}
-    if(bits)text+=alphabet[(accumulator<<(5-bits))&31];
-    return text;
+    return EncodePayload(bytes);
 }
 std::optional<Invite> DecodeInvite(std::string_view text) {
     // Bound the input before trimming, allocation or any parsing.
     if(text.size()>128)return {};
     while(!text.empty() && Space(text.front()))text.remove_prefix(1);
     while(!text.empty() && Space(text.back()))text.remove_suffix(1);
-    if(text.size()!=62 && text.size()!=81)return {};
+    if(text.size()!=62 && text.size()!=64 && text.size()!=81 && text.size()!=83)return {};
     for(size_t i=0;i<prefix.size();++i)if(Upper(text[i])!=prefix[i])return {};
-    std::vector<uint8_t> bytes(text.size()==81?48:36);size_t at=0;uint32_t accumulator=0;unsigned bits=0;
+    const auto payload_size=text.size()==62?36:text.size()==64?37:text.size()==81?48:49;
+    std::vector<uint8_t> bytes(payload_size);size_t at=0;uint32_t accumulator=0;unsigned bits=0;
     for(char c:text.substr(prefix.size())) {
         const auto digit=alphabet.find(Upper(c));if(digit==std::string_view::npos)return {};
         accumulator=(accumulator<<5)|uint32_t(digit);bits+=5;
@@ -51,9 +56,10 @@ std::optional<Invite> DecodeInvite(std::string_view text) {
     if(at!=bytes.size() || (accumulator&((1u<<bits)-1)))return {};
     at=0;auto get=[&](unsigned count){uint64_t value=0;while(count--)value=(value<<8)|bytes[at++];return value;};
     const auto version=get(1);
-    if(version!=(bytes.size()==48?2u:1u))return {};
+    const bool extended=version==3 || version==4,ipv6=version==2 || version==4;
+    if(version<1 || version>4 || bytes.size()!=size_t((ipv6?48:36)+(extended?1:0)))return {};
     Invite invite;
-    if(version==1) {
+    if(!ipv6) {
         for(unsigned i=0;i<4;++i){if(i)invite.address+='.';invite.address+=std::to_string(get(1));}
     } else {
         // Reconstruct a numeric string before applying the shared endpoint
@@ -69,6 +75,7 @@ std::optional<Invite> DecodeInvite(std::string_view text) {
     }
     invite.port=uint16_t(get(2));for(auto& byte:invite.session)byte=uint8_t(get(1));
     invite.first_tick=get(8);invite.input_delay=uint8_t(get(1));
+    if(extended){invite.verification_window=uint8_t(get(1));if(invite.verification_window<2)return {};}
     if(get(4)!=Checksum(std::span(bytes).first(bytes.size()-4)) || !Valid(invite))return {};
     return invite;
 }
@@ -101,6 +108,27 @@ bool TestOnlineInvites() {
         auto damaged=*code6;damaged[i]=c;
         if(!check(!DecodeInvite(damaged),"every one-character IPv6 invitation corruption rejected"))return false;
     }
+    auto unpack=[](std::string_view code){std::vector<uint8_t> bytes;uint32_t value=0;unsigned bits=0;
+        for(char digit:code.substr(4)){value=(value<<5)|uint32_t(alphabet.find(digit));bits+=5;if(bits>=8){bits-=8;bytes.push_back(uint8_t(value>>bits));}}return bytes;};
+    auto reseal=[](std::vector<uint8_t> bytes){const auto crc=Checksum(std::span(bytes).first(bytes.size()-4));
+        for(unsigned i=0;i<4;++i)bytes[bytes.size()-4+i]=uint8_t(crc>>((3-i)*8));return EncodePayload(bytes);};
+    for(unsigned window=2;window<=8;++window)for(bool ipv6_address:{false,true}){
+        auto modern=ipv6_address?ipv6:invite;modern.verification_window=uint8_t(window);
+        const auto code=EncodeInvite(modern);
+        if(!check(code && code->size()==(ipv6_address?83u:64u) && DecodeInvite(*code)==modern,
+            "every bounded verification window roundtrips with IPv4 and IPv6"))return false;
+        auto broken=*code;broken[12]=broken[12]=='A'?'B':'A';
+        if(!check(!DecodeInvite(broken) && !DecodeInvite(*code+"A"),"modern invite corruption and extended framing rejected"))return false;
+        const auto payload=unpack(*code);
+        for(unsigned invalid_window:{0u,1u,9u,255u}){auto invalid_payload=payload;invalid_payload[invalid_payload.size()-5]=uint8_t(invalid_window);
+            if(!check(!DecodeInvite(reseal(invalid_payload)),"valid CRC cannot permit out-of-range or noncanonical new-version window"))return false;}
+        for(unsigned version:{0u,5u,255u}){auto invalid_payload=payload;invalid_payload[0]=uint8_t(version);
+            if(!check(!DecodeInvite(reseal(invalid_payload)),"valid CRC cannot permit unsupported invitation versions"))return false;}
+        auto old_version=payload;old_version[0]=ipv6_address?2:1;
+        if(!check(!DecodeInvite(reseal(old_version)),"old invitation version cannot consume modern window payload length"))return false;
+    }
+    for(unsigned invalid_window:{0u,9u}){auto invalid_window_invite=invite;invalid_window_invite.verification_window=uint8_t(invalid_window);
+        if(!check(!EncodeInvite(invalid_window_invite),"invalid window rejected before encoding"))return false;}
     auto expanded=ipv6;expanded.address="2001:0DB8:0000:0000:0000:0000:0000:1234";
     if(!check(EncodeInvite(expanded)==code6,"expanded uppercase IPv6 uses canonical binary invitation"))return false;
     for(const auto address:{"::","ff02::1","fe80::1","fe80::1%3","::ffff:127.0.0.1","::127.0.0.1","[::1]","::1:41036","2001:db8::1::2"}) {
@@ -167,6 +195,6 @@ bool TestOnlineInvites() {
         if(!check(host.state()==State::Error || client.state()==State::Error,"invitation cannot bypass build/content/checkpoint compatibility checks"))return false;
         host.Disconnect();client.Disconnect();
     }
-    REXLOG_INFO("Online invite tests passed: serialization, typo rejection, endpoint bounds, preserved local identities, OS nonces and real socket handshake");return true;
+    REXLOG_INFO("Online invite tests passed: old/new window serialization, typo rejection, endpoint bounds, preserved local identities, OS nonces and real socket handshake");return true;
 }
 }

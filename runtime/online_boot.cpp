@@ -110,6 +110,7 @@ bool OnlineBoot::Host(BootPaths paths,const fs::path& source,std::string listen,
     if(!bound || !target || bound->ipv6()!=target->ipv6())return false;
     std::array<uint8_t,16> nonce{};
     if(!NewSessionNonce(nonce))return false;
+    p.status.error.clear();
     p.host=true;p.paths=std::move(paths);p.listen=std::move(listen);p.advertised=std::move(advertised);p.port=port;p.delay=delay;
     p.status.state=BootState::Preparing;p.status.user_data=p.paths.new_user_data;
     if(p.paths.startup_policy==StartupPolicy::NativeMenu){
@@ -141,6 +142,8 @@ bool OnlineBoot::Host(BootPaths paths,const fs::path& source,std::string listen,
 bool OnlineBoot::Join(BootPaths paths,std::string text) {
     auto& p=*impl_;if(p.status.state!=BootState::Idle)return false;
     const auto invite=DecodeInvite(text);if(!invite)return false;
+    if(invite->verification_window!=1){p.status.error="This invitation requires the larger online Room mode; the legacy two-player connection supports verification window1 only.";return false;}
+    p.status.error.clear();
     p.host=false;p.paths=std::move(paths);p.invitation=invite;p.status.state=BootState::Preparing;p.status.user_data=p.paths.new_user_data;
     const auto copied=p.paths;const auto step=p.step;const auto token=p.stop.get_token();const auto initialization=ConfiguredNativeInitializationPolicy();
     p.preparation=std::async(std::launch::async,[copied,initialization,step,token]{return Prepare(copied,{},false,2,initialization,{},step,token);});return true;
@@ -232,6 +235,11 @@ bool TestOnlineBoot(const fs::path& root) {
         std::optional<BootResult> host_result,client_result;
         {
             OnlineBoot host,client;
+            Invite modern{"127.0.0.1",41036};modern.session[0]=1;modern.verification_window=8;
+            const auto modern_code=EncodeInvite(modern);
+            if(!check(modern_code && !client.Join(paths("unsupported-window"),*modern_code) && client.status().state==BootState::Idle &&
+                client.status().error.find("Room")!=std::string::npos && !fs::exists(base/"unsupported-window"),
+                "legacy session rejects modern Room window before workers or save IO with actionable error"))return false;
             if(!check(!client.Join(paths("invalid"),"invalid invitation") && client.status().state==BootState::Idle &&
                 !host.Host(paths("bad-address"),base/"frozen","invalid","127.0.0.1"),"invalid invitations/endpoints rejected before I/O"))return false;
             if(!check(!host.Host(paths("bad-delay"),base/"frozen","127.0.0.1","127.0.0.1",0,13) &&

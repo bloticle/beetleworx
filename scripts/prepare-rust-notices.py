@@ -51,6 +51,13 @@ def generate():
             files = [parent_dir / "LICENSE"]
             shared_from = {"package": parent["name"], "version": parent["version"],
                            "git_revision": source["git"]["sha1"]}
+        if not files and package['name']=='nod' and package['version']=='1.4.4':
+            source=json.loads((directory/'.cargo_vcs_info.json').read_text())
+            revision='df8ab228c8a8e8f906048daddc3ea07f43f18a5c'
+            if source['git']['sha1']!=revision or source['path_in_vcs']!='nod' or package['repository']!='https://github.com/encounter/nod':
+                raise ValueError('nod workspace license provenance changed')
+            files=[ROOT/'docs/licenses'/('nod-'+name+'.txt') for name in ('LICENSE-MIT','LICENSE-APACHE')]
+            shared_from={'package':'nod','version':package['version'],'git_revision':revision}
         if not files:
             raise ValueError(f"Missing notices: {package['name']} {package['version']}")
         sources = []

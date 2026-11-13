@@ -10,15 +10,22 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <stdexcept>
 REXCVAR_DECLARE(bool,em2_private_profile);
 REXCVAR_DECLARE(bool,em2_trace_online_observations);
 REXCVAR_DECLARE(std::string,em2_room_probe_role);
 REXCVAR_DEFINE_UINT32(em2_behavior_trace_start_tick,0,"Debug","Private Room chooser trace begins at this agreed tick; earlier ticks retain the tiny inactive path");
 REXCVAR_DEFINE_UINT32(em2_behavior_trace_dump_tick,0xFFFFFFFFu,"Debug","Private Room chooser history snapshot after this completed tick; maximum disables scheduled snapshots");
+REXCVAR_DEFINE_STRING(em2_behavior_motion_guid,"","Debug","Optional private Motion trace GUID as exactly 32 hexadecimal digits; empty records bounded all actors");
 PPC_EXTERN_FUNC(__imp__sub_828D00F0);
 PPC_EXTERN_FUNC(__imp__sub_829886D8);
 PPC_EXTERN_FUNC(__imp__sub_828CB0E0);
 PPC_EXTERN_FUNC(__imp__sub_829A5140);
+PPC_EXTERN_FUNC(__imp__sub_82788C00);
+PPC_EXTERN_FUNC(__imp__sub_8278D158);
+PPC_EXTERN_FUNC(__imp__sub_8278E8E0);
+PPC_EXTERN_FUNC(__imp__sub_82477A88);
+PPC_EXTERN_FUNC(__imp__sub_8294D008);
 namespace {
 struct HostState {unsigned csr=_mm_getcsr();DWORD error=GetLastError();~HostState(){_mm_setcsr(csr);SetLastError(error);}};
 struct Preserve {
@@ -70,9 +77,45 @@ struct ChildRecord {
     std::array<uint32_t,4> guid{};std::array<uint32_t,56> before{},after{};
     std::array<uint32_t,7> clocks_before{},clocks_after{};ChildView view_before{},view_after{};
 };
-struct Frame {uint64_t tick=0;unsigned count=0,dropped=0,state_count=0,state_dropped=0,range_count=0,range_dropped=0,child_count=0,child_dropped=0;bool valid=false,published=false;
-    std::array<Record,32> records{};std::array<StateRecord,32> states{};std::array<RangeRecord,64> ranges{};std::array<ChildRecord,64> children{};};
-struct Ring {std::array<Frame,4> frames{};unsigned next=0;Frame* current=nullptr;};
+struct MotionView {
+    bool readable=false;uint32_t entity=0,physics=0,activation=0xFFFFFFFF,controller=0,native_state=0xFFFFFFFF,attribute=0,attribute_value=0;
+    uint32_t owner92=0xFFFFFFFF,owner93=0xFFFFFFFF;
+    std::array<uint32_t,4> guid{};std::array<uint32_t,3> position{},body_velocity{};
+    bool positioned=false,body_velocity_readable=false;
+    std::array<uint32_t,100> words{};std::array<uint32_t,32> controller_words{};std::array<uint32_t,7> clocks{};
+    // Motion byte52, list548/count552, flags704/957, timer884,
+    // attribute108, selected speed-value bits and list-first-value bits.
+    std::array<uint32_t,9> branch{};std::array<uint32_t,20> speed_words{};bool speed_readable=false,speed_value_readable=false;
+};
+enum class MotionStage:uint32_t {Ordinary=0,Physics=1,Dispatch=2,VelocityWrite=3,LaunchAction=4};
+struct MotionRecord {
+    uint64_t order=0;uint32_t caller=0,motion=0,thread=0;bool agreed=false,returned=false;
+    MotionStage stage=MotionStage::Physics;
+    uint64_t f1=0;std::array<uint64_t,4> args{};uint32_t result=0;
+    std::array<uint32_t,4> input_velocity{};std::array<uint32_t,12> parents{};
+    uint32_t action=0,action_delta=0;std::array<uint32_t,44> action_before{},action_after{};
+    std::array<uint32_t,2> child_before{},child_after{};
+    MotionView before{},after{};
+};
+struct MotionSetRecord {
+    uint64_t order=0;uint32_t caller=0,motion=0,thread=0,next=0,previous=0;bool agreed=false,returned=false;
+    MotionView before{},after{};
+};
+struct Frame {uint64_t tick=0,motion_order=0;unsigned count=0,dropped=0,state_count=0,state_dropped=0,range_count=0,range_dropped=0,child_count=0,child_dropped=0,motion_count=0,motion_dropped=0,set_count=0,set_dropped=0;bool valid=false,published=false;
+    std::array<Record,32> records{};std::array<StateRecord,32> states{};std::array<RangeRecord,64> ranges{};std::array<ChildRecord,64> children{};
+    std::array<MotionRecord,128> motions{};std::array<MotionSetRecord,64> sets{};};
+// A filtered actor can leave the failure ring long before RNG notices its
+// changed physical state. Retain original before/after views without logging
+// in the running tick. Never allocate this extension for an all-actor trace.
+struct MotionTrajectory {
+    struct Entry {uint64_t tick=0;MotionRecord record;};
+    std::array<Entry,2048> entries{};
+    size_t next=0,count=0;bool published=false;
+    void Push(uint64_t tick,const MotionRecord& record){
+        entries[next]={tick,record};next=(next+1)%entries.size();count=std::min(count+1,entries.size());published=false;
+    }
+};
+struct Ring {std::array<Frame,4> frames{};unsigned next=0;uint32_t filtered_motion=0;Frame* current=nullptr;std::unique_ptr<MotionTrajectory> trajectory;};
 thread_local std::unique_ptr<Ring> history;
 thread_local Record* active=nullptr;
 thread_local uint32_t active_state_action=0;
@@ -84,6 +127,50 @@ void Entity(uint32_t context,uint32_t& entity,std::array<uint32_t,4>& guid,uint8
 void StateClocks(std::array<uint32_t,7>& out,uint8_t* base){
     constexpr std::array<uint32_t,7> addresses{0x833FCA60,0x833FCA64,0x833FCA68,0x833FCA6C,0x833D04D8,0x833D04DC,0x833D04E0};
     for(unsigned i=0;i<addresses.size();++i)out[i]=Word(addresses[i],base);
+}
+MotionView ReadMotionView(uint32_t motion,uint8_t* base){
+    MotionView v;v.readable=Words(motion,v.words,base);StateClocks(v.clocks,base);
+    if(!v.readable)return v;
+    const auto owner=v.words[12];
+    if(owner && uint64_t(owner)+108<=UINT32_MAX && Word(owner+8,base)==0x8208D908){
+        v.entity=owner+8;Words(owner+12,v.guid,base);
+        if(Readable(owner+92,2,base)){v.owner92=PPC_LOAD_U8(owner+92);v.owner93=PPC_LOAD_U8(owner+93);}
+        if(Readable(0x833DBC3C,1,base)){
+            const auto types=Word(v.entity+88,base),components=Word(v.entity+36,base);const auto type=PPC_LOAD_U8(0x833DBC3C);
+            if(types && uint64_t(types)+type<=UINT32_MAX && Readable(types+type,1,base)){
+                const auto slot=PPC_LOAD_U8(types+type);
+                if(slot!=255 && components && uint64_t(components)+4ull*slot<=UINT32_MAX){const auto face=Word(components+4*slot,base);
+                    if(face>=8 && uint64_t(face)+176<=UINT32_MAX)v.positioned=Words(face-8+172,v.position,base);}
+            }
+        }
+    }
+    v.physics=v.words[20];
+    if(v.physics && uint64_t(v.physics)+180<=UINT32_MAX && Readable(v.physics,180,base)){
+        v.activation=PPC_LOAD_U8(v.physics+145);v.controller=Word(v.physics+176,base);Words(v.controller,v.controller_words,base);
+        // ORIGINAL82EB8D50 resolves this object's+16 then returns its+432 velocity.
+        const auto body=Word(v.controller+16,base);
+        if(body && uint64_t(body)+444<=UINT32_MAX)v.body_velocity_readable=Words(body+432,v.body_velocity,base);
+    }
+    const auto context=v.words[23];
+    if(context && uint64_t(context)+20<=UINT32_MAX && Readable(context+16,4,base))v.native_state=PPC_LOAD_U32(context+16);
+    v.attribute=v.words[29];
+    if(v.attribute && uint64_t(v.attribute)+76<=UINT32_MAX)v.attribute_value=Word(v.attribute+72,base);
+    if(uint64_t(motion)+958<=UINT32_MAX){
+        v.branch[0]=Readable(motion+52,1,base)?PPC_LOAD_U8(motion+52):0xFFFFFFFF;
+        v.branch[1]=Word(motion+548,base);v.branch[2]=Word(motion+552,base);
+        v.branch[3]=Readable(motion+704,1,base)?PPC_LOAD_U8(motion+704):0xFFFFFFFF;
+        v.branch[4]=Readable(motion+957,1,base)?PPC_LOAD_U8(motion+957):0xFFFFFFFF;
+        v.branch[5]=Word(motion+884,base);v.branch[6]=v.words[27];
+        v.speed_readable=Words(v.branch[6],v.speed_words,base);
+        if(v.branch[1] && uint64_t(v.branch[1])+8<=UINT32_MAX)v.branch[8]=Word(v.branch[1]+4,base);
+        // ORIGINAL82787440: positive override count selects list+4;
+        // otherwise82886D68(attribute108) returns attribute+72, or native0.
+        uint32_t speed_address=0x82002060;
+        if(int32_t(v.branch[2])>0){if(v.branch[1] && uint64_t(v.branch[1])+8<=UINT32_MAX)speed_address=v.branch[1]+4;else speed_address=0;}
+        else if(v.branch[6]){if(uint64_t(v.branch[6])+76<=UINT32_MAX)speed_address=v.branch[6]+72;else speed_address=0;}
+        v.speed_value_readable=Readable(speed_address,4,base);v.branch[7]=Word(speed_address,base);
+    }
+    return v;
 }
 ChildView ReadChildView(const std::array<uint32_t,56>& words,uint8_t* base){
     ChildView view;view.buffer=words[49];Words(view.buffer,view.buffer_words,base);
@@ -138,7 +225,7 @@ void em2::net::BeginNativeBehaviorTraceTick(uint64_t tick) noexcept{
         const auto dump_tick=REXCVAR_GET(em2_behavior_trace_dump_tick);
         if(dump_tick!=0xFFFFFFFFu && tick && tick-1==dump_tick)DumpNativeBehaviorTrace();
         if(!history)history=std::make_unique<Ring>();
-        auto& frame=history->frames[history->next++%history->frames.size()];frame.tick=tick;frame.count=frame.dropped=frame.state_count=frame.state_dropped=frame.range_count=frame.range_dropped=frame.child_count=frame.child_dropped=0;frame.valid=true;frame.published=false;history->current=&frame;
+        auto& frame=history->frames[history->next++%history->frames.size()];frame.tick=tick;frame.motion_order=0;frame.count=frame.dropped=frame.state_count=frame.state_dropped=frame.range_count=frame.range_dropped=frame.child_count=frame.child_dropped=frame.motion_count=frame.motion_dropped=frame.set_count=frame.set_dropped=0;frame.valid=true;frame.published=false;history->current=&frame;
     }catch(...){}
 }
 void em2::net::ResetNativeBehaviorTrace() noexcept{HostState preserve;history.reset();active=nullptr;active_state_action=0;}
@@ -157,6 +244,31 @@ namespace {
 bool CaptureAllowed() noexcept{
     HostState preserve;
     try{uint64_t tick=0;return Enabled() && em2::CurrentAgreedSimulationTick(tick) && history && history->current && history->current->tick==tick;}catch(...){return false;}
+}
+bool MotionGuidMatches(uint32_t motion,uint8_t* base){
+    const auto& requested=REXCVAR_GET(em2_behavior_motion_guid);
+    if(requested.empty())return true;
+    struct Cached {std::string text;bool valid=false;std::array<uint32_t,4> guid{};};
+    static thread_local Cached cached;
+    if(cached.text!=requested){
+        cached.text=requested;cached.valid=requested.size()==32;cached.guid={};
+        for(size_t i=0;cached.valid && i<requested.size();++i){
+            const auto c=requested[i];const int digit=c>='0' && c<='9'?c-'0':c>='a' && c<='f'?c-'a'+10:c>='A' && c<='F'?c-'A'+10:-1;
+            if(digit<0){cached.valid=false;break;}cached.guid[i/8]=(cached.guid[i/8]<<4)|uint32_t(digit);
+        }
+    }
+    if(!cached.valid || !motion || uint64_t(motion)+52>UINT32_MAX)return false;
+    em2::GuestReadBatch reads;
+    const auto owner=Word(motion+48,base);
+    if(!owner || uint64_t(owner)+28>UINT32_MAX || Word(owner+8,base)!=0x8208D908)return false;
+    std::array<uint32_t,4> guid{};
+    return Words(owner+12,guid,base) && guid==cached.guid;
+}
+bool MotionCaptureAllowed(uint32_t motion,uint8_t* base) noexcept{
+    HostState preserve;
+    // A between-tick call belongs to the last ring slot ONLY on this same
+    // thread. No history is created for workers or before the requested tick.
+    try{return Enabled() && history && history->current && history->current->valid && !history->current->published && MotionGuidMatches(motion,base);}catch(...){return false;}
 }
 void CommitRecord(const Record& record){if(history && history->current){auto& frame=*history->current;
     if(frame.count<frame.records.size())frame.records[frame.count++]=record;else ++frame.dropped;}}
@@ -223,6 +335,90 @@ __declspec(noinline) void TraceChild(PPCContext& ctx,uint8_t* base){
     }catch(...){}};
     try{__imp__sub_829A5140(ctx,base);}catch(...){commit(false);throw;}commit(true);
 }
+__declspec(noinline) void TraceMotion(PPCContext& ctx,uint8_t* base,PPCFunc* original,MotionStage stage,uint32_t observed_motion=0){
+    MotionRecord record;bool capture=false;
+    {Preserve preserve(&ctx);try{em2::GuestReadBatch reads;auto& frame=*history->current;
+        if(frame.motion_count==frame.motions.size())++frame.motion_dropped;
+        else{capture=true;record.stage=stage;record.order=++frame.motion_order;record.caller=uint32_t(ctx.lr);record.motion=observed_motion?observed_motion:ctx.r3.u32;record.thread=GetCurrentThreadId();
+            record.agreed=em2::InAgreedSimulationTick();record.f1=ctx.f1.u64;record.args={ctx.r4.u64,ctx.r5.u64,ctx.r6.u64,ctx.r7.u64};record.before=ReadMotionView(record.motion,base);
+            if(!REXCVAR_GET(em2_behavior_motion_guid).empty())history->filtered_motion=record.motion;
+            if(stage==MotionStage::VelocityWrite){
+                Words(ctx.r4.u32&~15u,record.input_velocity,base);auto stack=ctx.r1.u32;
+                for(auto& address:record.parents){const auto parent=Word(stack,base);
+                    if(parent<=stack || parent-stack>65536)break;address=Word(parent-8,base);stack=parent;}
+            }
+            if(stage==MotionStage::LaunchAction){
+                record.action=ctx.r3.u32;record.action_delta=Word(ctx.r4.u32+4,base);Words(record.action,record.action_before,base);
+                if(record.action_before[1])Words(record.action_before[1],record.child_before,base);
+            }
+        }
+    }catch(...){capture=false;}}
+    const auto commit=[&](bool returned){if(!capture)return;Preserve preserve(&ctx);try{em2::GuestReadBatch reads;record.returned=returned;record.result=ctx.r3.u32;record.after=ReadMotionView(record.motion,base);
+        if(stage==MotionStage::LaunchAction){Words(record.action,record.action_after,base);if(record.action_after[1])Words(record.action_after[1],record.child_after,base);}
+        auto& frame=*history->current;if(frame.motion_count<frame.motions.size())frame.motions[frame.motion_count++]=record;else ++frame.motion_dropped;
+        if(!REXCVAR_GET(em2_behavior_motion_guid).empty()){
+            if(!history->trajectory)history->trajectory=std::make_unique<MotionTrajectory>();
+            history->trajectory->Push(frame.tick,record);
+        }
+    }catch(...){}};
+    try{original(ctx,base);}catch(...){commit(false);throw;}commit(true);
+}
+__declspec(noinline) void TraceMotionSet(PPCContext& ctx,uint8_t* base){
+    MotionSetRecord record;bool capture=false;
+    {Preserve preserve(&ctx);try{em2::GuestReadBatch reads;auto& frame=*history->current;
+        if(frame.set_count==frame.sets.size())++frame.set_dropped;
+        else{capture=true;record.order=++frame.motion_order;record.caller=uint32_t(ctx.lr);record.motion=ctx.r3.u32;record.thread=GetCurrentThreadId();
+            record.agreed=em2::InAgreedSimulationTick();record.next=ctx.r4.u32;record.previous=ctx.r5.u32;record.before=ReadMotionView(record.motion,base);}
+    }catch(...){capture=false;}}
+    const auto commit=[&](bool returned){if(!capture)return;Preserve preserve(&ctx);try{em2::GuestReadBatch reads;record.returned=returned;record.after=ReadMotionView(record.motion,base);
+        auto& frame=*history->current;if(frame.set_count<frame.sets.size())frame.sets[frame.set_count++]=record;else ++frame.set_dropped;
+    }catch(...){}};
+    try{__imp__sub_82788C00(ctx,base);}catch(...){commit(false);throw;}commit(true);
+}
+void DumpMotionView(uint64_t tick,uint64_t order,const char* kind,unsigned phase,const MotionView& v){
+    REXLOG_INFO("Native behavior motion view: tick {} order {} kind {} phase {} readable {} entity {:08X} GUID [{}] owner92/93 {}/{} positioned {} position [{}] physics {:08X} activation {} controller {:08X} native-state {} attribute {:08X} value {:08X} body-velocity-readable {} body-velocity [{}] words [{}] controller-words [{}] clocks [{}]",
+        tick,order,kind,phase,v.readable,v.entity,Hex(v.guid),v.owner92,v.owner93,v.positioned,Hex(v.position),v.physics,v.activation,v.controller,v.native_state,v.attribute,v.attribute_value,v.body_velocity_readable,Hex(v.body_velocity),Hex(v.words),Hex(v.controller_words),Hex(v.clocks));
+    REXLOG_INFO("Native behavior motion branch: tick {} order {} kind {} phase {} fields [{}] speed-value-readable {} speed-readable {} speed-words [{}]",tick,order,kind,phase,Hex(v.branch),v.speed_value_readable,v.speed_readable,Hex(v.speed_words));
+}
+}
+void em2::net::RunNativeMotionTrace(PPCContext& ctx,uint8_t* base,PPCFunc* original){
+    if(!original)throw std::invalid_argument("Native Motion trace requires its original callback");
+    if(!MotionCaptureAllowed(ctx.r3.u32,base)){original(ctx,base);return;}TraceMotion(ctx,base,original,MotionStage::Physics);
+}
+namespace {
+uint32_t FilteredVelocityMotion(uint32_t interface_address,uint8_t* base) noexcept{
+    HostState preserve;
+    try{
+        if(!history || !history->filtered_motion || !MotionCaptureAllowed(history->filtered_motion,base))return 0;
+        em2::GuestReadBatch reads;const auto motion=history->filtered_motion;
+        const auto physics=Word(motion+80,base),controller=physics?Word(physics+176,base):0;
+        const auto body=controller?Word(controller+16,base):0;
+        // Read-only confirmed native proxy layout: virtual slot60 on its +224
+        // interface writes the vector at interface+208 == body+432.
+        return body && uint64_t(body)+224==interface_address && Word(body,base)==0x82030384 &&
+            Word(interface_address,base)==0x8202E5CC?motion:0;
+    }catch(...){return 0;}
+}
+uint32_t FilteredLaunchMotion(uint32_t action,uint32_t context,uint8_t* base) noexcept{
+    HostState preserve;
+    try{
+        if(!history || !history->filtered_motion || !MotionCaptureAllowed(history->filtered_motion,base))return 0;
+        em2::GuestReadBatch reads;const auto motion=history->filtered_motion;
+        if(!Readable(action,176,base) || Word(Word(action,base)+72,base)!=0x82998D00)return 0;
+        const auto controller=Word(context,base),owner=Word(motion+48,base);
+        return controller && owner && Word(controller+60,base)==owner?motion:0;
+    }catch(...){return 0;}
+}
+}
+PPC_FUNC_IMPL(sub_82477A88){
+    const auto motion=FilteredVelocityMotion(ctx.r3.u32,base);
+    if(!motion){__imp__sub_82477A88(ctx,base);return;}
+    TraceMotion(ctx,base,__imp__sub_82477A88,MotionStage::VelocityWrite,motion);
+}
+PPC_FUNC_IMPL(sub_8294D008){
+    const auto motion=FilteredLaunchMotion(ctx.r3.u32,ctx.r4.u32,base);
+    if(!motion){__imp__sub_8294D008(ctx,base);return;}
+    TraceMotion(ctx,base,__imp__sub_8294D008,MotionStage::LaunchAction,motion);
 }
 PPC_FUNC_IMPL(sub_828D00F0){
     if(!CaptureAllowed()){__imp__sub_828D00F0(ctx,base);return;}
@@ -231,14 +427,41 @@ PPC_FUNC_IMPL(sub_828D00F0){
 PPC_FUNC_IMPL(sub_829886D8){if(!CaptureAllowed()){__imp__sub_829886D8(ctx,base);return;}TraceState(ctx,base);}
 PPC_FUNC_IMPL(sub_828CB0E0){if(!CaptureAllowed()){__imp__sub_828CB0E0(ctx,base);return;}TraceRange(ctx,base);}
 PPC_FUNC_IMPL(sub_829A5140){if(!CaptureAllowed()){__imp__sub_829A5140(ctx,base);return;}TraceChild(ctx,base);}
+PPC_FUNC_IMPL(sub_82788C00){if(!MotionCaptureAllowed(ctx.r3.u32,base)){__imp__sub_82788C00(ctx,base);return;}TraceMotionSet(ctx,base);}
+PPC_FUNC_IMPL(sub_8278D158){if(!MotionCaptureAllowed(ctx.r3.u32,base)){__imp__sub_8278D158(ctx,base);return;}TraceMotion(ctx,base,__imp__sub_8278D158,MotionStage::Ordinary);}
+PPC_FUNC_IMPL(sub_8278E8E0){if(!MotionCaptureAllowed(ctx.r3.u32,base)){__imp__sub_8278E8E0(ctx,base);return;}TraceMotion(ctx,base,__imp__sub_8278E8E0,MotionStage::Dispatch);}
 void em2::net::DumpNativeBehaviorTrace() noexcept{
     HostState preserve;
-    try{if(!history)return;std::array<Frame*,4> frames{};for(unsigned i=0;i<frames.size();++i)frames[i]=&history->frames[i];
+    try{if(!history)return;
+        if(auto* trajectory=history->trajectory.get();trajectory && !trajectory->published){
+            trajectory->published=true;
+            std::array<const MotionTrajectory::Entry*,2048> entries{};
+            for(size_t i=0;i<trajectory->count;++i)entries[i]=&trajectory->entries[i];
+            std::sort(entries.begin(),entries.begin()+trajectory->count,[](const auto* a,const auto* b){
+                return a->tick!=b->tick?a->tick<b->tick:a->record.order<b->record.order;
+            });
+            REXLOG_INFO("Native filtered motion trajectory: retained {}, capacity {}",trajectory->count,entries.size());
+            for(size_t i=0;i<trajectory->count;++i){const auto& entry=*entries[i];const auto& r=entry.record;
+                REXLOG_INFO("Native trajectory update: tick {} order {} stage {} caller {:08X} agreed {} f1 {:016X} args [{}] returned {}",
+                    entry.tick,r.order,uint32_t(r.stage),r.caller,r.agreed,r.f1,Hex(r.args),r.returned);
+                if(r.stage==MotionStage::VelocityWrite)REXLOG_INFO("Native trajectory velocity writer: tick {} order {} input [{}] parents [{}]",entry.tick,r.order,Hex(r.input_velocity),Hex(r.parents));
+                if(r.stage==MotionStage::LaunchAction)REXLOG_INFO("Native trajectory launch action: tick {} order {} action {:08X} delta {:08X} before [{}] after [{}] child-before [{}] child-after [{}]",entry.tick,r.order,r.action,r.action_delta,Hex(r.action_before),Hex(r.action_after),Hex(r.child_before),Hex(r.child_after));
+                DumpMotionView(entry.tick,r.order,"trajectory",0,r.before);DumpMotionView(entry.tick,r.order,"trajectory",1,r.after);
+            }
+        }
+        std::array<Frame*,4> frames{};for(unsigned i=0;i<frames.size();++i)frames[i]=&history->frames[i];
         std::sort(frames.begin(),frames.end(),[](const auto* a,const auto* b){return a->tick<b->tick;});
         for(auto* frame:frames)if(frame->valid && !frame->published){frame->published=true;
             REXLOG_INFO("Native behavior failure history: tick {}, records {}, dropped {}",frame->tick,frame->count,frame->dropped);
             REXLOG_INFO("Native behavior state history: tick {}, states {}, dropped {}, ranges {}, dropped {}",frame->tick,frame->state_count,frame->state_dropped,frame->range_count,frame->range_dropped);
             REXLOG_INFO("Native behavior child history: tick {}, children {}, dropped {}",frame->tick,frame->child_count,frame->child_dropped);
+            REXLOG_INFO("Native behavior motion history: tick {}, updates {}, dropped {}, setters {}, dropped {}",frame->tick,frame->motion_count,frame->motion_dropped,frame->set_count,frame->set_dropped);
+            for(unsigned n=0;n<frame->motion_count;++n){const auto& r=frame->motions[n];
+                REXLOG_INFO("Native behavior motion update: tick {} order {} stage {} caller {:08X} motion {:08X} thread {} agreed {} f1 {:016X} args [{}] returned {} result {:08X}",frame->tick,r.order,uint32_t(r.stage),r.caller,r.motion,r.thread,r.agreed,r.f1,Hex(r.args),r.returned,r.result);
+                DumpMotionView(frame->tick,r.order,"update",0,r.before);DumpMotionView(frame->tick,r.order,"update",1,r.after);}
+            for(unsigned n=0;n<frame->set_count;++n){const auto& r=frame->sets[n];
+                REXLOG_INFO("Native behavior motion setter: tick {} order {} caller {:08X} motion {:08X} thread {} agreed {} next {} previous {} returned {}",frame->tick,r.order,r.caller,r.motion,r.thread,r.agreed,r.next,r.previous,r.returned);
+                DumpMotionView(frame->tick,r.order,"setter",0,r.before);DumpMotionView(frame->tick,r.order,"setter",1,r.after);}
             for(unsigned n=0;n<frame->child_count;++n){const auto& r=frame->children[n];
                 REXLOG_INFO("Native behavior child: tick {} index {} caller {:08X} action {:08X} context {:08X} controller {:08X} dt {:08X} entity {:08X} GUID [{}] f1 {:016X} returned {} result {:08X} before [{}] after [{}] clocks-before [{}] clocks-after [{}]",
                     frame->tick,n,r.caller,r.action,r.context,r.controller,r.dt,r.entity,Hex(r.guid),r.f1,r.returned,r.result,Hex(r.before),Hex(r.after),Hex(r.clocks_before),Hex(r.clocks_after));

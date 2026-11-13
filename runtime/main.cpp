@@ -29,9 +29,11 @@
 #include "scene_lighting_settings.h"
 #include "hdr_presenter.h"
 #include "simulation.h"
+#include "online_input_clock.h"
 #include "online_native_triggers.h"
 #include "online_button_actions.h"
-#include "online_input_clock.h"
+#include "native_launch_defaults.h"
+#include "native_character_physics.h"
 #include "skinning.h"
 #include "mickey_ears.h"
 #include "render_options.h"
@@ -86,8 +88,6 @@
 #include "online_actor_input.h"
 #include "online_local_movement.h"
 #include "online_local_jump.h"
-#include "native_launch_defaults.h"
-#include "native_character_physics.h"
 #include "online_basic_input_test.h"
 #include "online_room_boot.h"
 #include "online_room_bootstrap.h"
@@ -218,6 +218,7 @@ REXCVAR_DEFINE_STRING(em2_checkpoint_install_directory,"","Debug","Optional new 
 REXCVAR_DEFINE_STRING(em2_identity_checkpoint_directory,"","Debug","Frozen checkpoint directory for online file identity verification");
 REXCVAR_DEFINE_STRING(em2_content_directory,"","Debug","Override the staged content view for isolated game testing");
 REXCVAR_DEFINE_STRING(em1_source_rvz,"","Compatibility","Optional original Epic Mickey Wii RVZ mounted read-only at em1:; scene playback support is incomplete");
+REXCVAR_DEFINE_STRING(em2_test_em1_disc,"","Debug","Compare multi-format Wii reader against the existing source adapter without starting gameplay");
 REXCVAR_DEFINE_STRING(em2_user_data_directory,"","Debug","Override save/settings directory for isolated game testing");
 
 REXCVAR_DECLARE(bool,em2_online_auto_continue);
@@ -457,6 +458,10 @@ public:
             const bool success=output.is_absolute() && em2::TestNativeShadowShader(output);
             spdlog::shutdown();ExitProcess(success?0:1);
         }
+        if(!REXCVAR_GET(em2_test_em1_disc).empty()){
+            std::string error;const bool success=em2::em1::RvzSource::TestGenericSource(std::filesystem::path(std::u8string(REXCVAR_GET(em2_test_em1_disc).begin(),REXCVAR_GET(em2_test_em1_disc).end())),error);
+            REXLOG_INFO("Multi-format Wii source comparison: {} {}",success,error);spdlog::shutdown();ExitProcess(success?0:1);
+        }
         if (REXCVAR_GET(em2_test_lowering)) {
             if (!em2::HasLoweringTests) REXLOG_ERROR("Generated instruction fixtures are unavailable; generate them before building");
             const auto success=em2::TestLowering();
@@ -468,7 +473,7 @@ public:
             const bool created=CreateDirectoryW(fixture.c_str(),nullptr)!=0;
             if(created)em2::LoadControls(fixture/"controls");
             bool success=false;
-            try{success=created && TestStartupCallbackReports(fixture/"callback-reports") && em2::net::TestNativeInputClock() && em2::net::TestNativeTriggers() && em2::net::TestNativeButtonActions() && em2::net::TestOnlineRoom() && em2::net::TestOnlineRoomBoot(fixture/"boot") && em2::net::TestRoomBootstrapGate() && em2::net::TestNativeRoomSession() && em2::net::TestNativeWorldInitializationSeed() && em2::TestNativeLaunchDefaults() && em2::TestNativeCharacterPhysics() && em2::net::TestNativeLocalMovement() && em2::net::TestNativeLocalJump() && em2::net::TestNativeRetailInput() && em2::net::TestNativeGenericBasicInput() && em2::net::TestOwnedActorInput() && em2::TestCanonicalNativeJoin();}
+            try{success=created && TestStartupCallbackReports(fixture/"callback-reports") && em2::net::TestOnlineInvites() && em2::net::TestLANDiscovery() && em2::TestNativeLaunchDefaults() && em2::TestNativeCharacterPhysics() && em2::net::TestNativeInputClock() && em2::net::TestNativeTriggers() && em2::net::TestNativeButtonActions() && em2::net::TestOnlineRoom() && em2::net::TestOnlineRoomBoot(fixture/"boot") && em2::net::TestRoomBootstrapGate() && em2::net::TestNativeRoomSession() && em2::net::TestNativeWorldInitializationSeed() && em2::net::TestNativeLocalMovement() && em2::net::TestNativeLocalJump() && em2::net::TestNativeRetailInput() && em2::net::TestNativeGenericBasicInput() && em2::net::TestOwnedActorInput() && em2::TestCanonicalNativeJoin();}
             catch(const std::exception& error){REXLOG_ERROR("Focused online regression threw: {}",error.what());}
             catch(...){REXLOG_ERROR("Focused online regression threw a non-standard exception");}
             if(created){std::error_code cleanup_error;std::filesystem::remove_all(fixture,cleanup_error);}
@@ -514,7 +519,7 @@ public:
             std::string em1_collision_error;
             const auto em1_collision_ok=em2::em1::TestLevelPartitionClassification(em1_collision_error) && em2::em1::TestKeyframeColorEvaluator(em1_collision_error) && em2::em1::TestNifContainerCompatibility(em1_collision_error) && em2::em1::TestEm1HavokCollision(em1_collision_error) && em2::em1::TestNifFixedPointUvPromotion(em1_collision_error) && em2::em1::TestPortableBcPixels(em1_collision_error) && em2::em1::TestPreviewDiffusePeState(em1_collision_error) && em2::em1::TestLevelOriginalScriptLibrary() && em2::em1::TestLevelOriginalAudioOwnership();
             if(!em1_collision_ok)REXLOG_ERROR("EM1 compatibility regression: {}",em1_collision_error);
-            const auto success=em1_collision_ok && TestStartupCallbackReports(test_dir/"callback-reports") && em2::net::TestLobbyNameInput() && em2::net::TestOnlineSession() && em2::net::TestNativeInputClock() && em2::net::TestNativeTriggers() && em2::net::TestNativeButtonActions() && em2::net::TestOnlineRoom() && em2::TestNativeLaunchDefaults() && em2::TestNativeCharacterPhysics() && em2::net::TestNativeLocalMovement() && em2::net::TestNativeLocalJump() && em2::net::TestNativeRetailInput() && em2::net::TestNativeGenericBasicInput() && em2::net::TestOwnedActorInput() && em2::net::TestOnlineGameplay() && em2::TestNativePlayerActions() && em2::TestCanonicalNativeJoin() && em2::TestNativePlayerSpawn() && em2::TestRenderOptions() && em2::TestRenderLogFilter() && em2::TestNativeRenderSampler(test_dir/"native-samples.tsv") && em2::TestNativePropertyLookup() && em2::TestNativeBindingCache() && em2::TestNativeVisibilityScan() && em2::TestNativeRegisterBank() && em2::TestNativeShaderUpload() && em2::TestNativeMemoryCopy() && em2::TestNativeVideoBlocks() && em2::TestNativeSkinning() && em2::TestNativeCameraTiming() && em2::TestNativeCameraProjection() && em2::TestSceneDrawInputs() && em2::TestSimulation() && em2::TestGpuCommandProfiling() && em2::TestTransferScissors() && em2::TestStencilZeroProof() && em2::TestFencedScratchCache() && settings_ok && controls_ok && lowering_ok;
+            const auto success=em1_collision_ok && TestStartupCallbackReports(test_dir/"callback-reports") && em2::TestNativeLaunchDefaults() && em2::TestNativeCharacterPhysics() && em2::net::TestNativeInputClock() && em2::net::TestNativeTriggers() && em2::net::TestNativeButtonActions() && em2::net::TestLobbyNameInput() && em2::net::TestOnlineSession() && em2::net::TestOnlineRoom() && em2::net::TestNativeLocalMovement() && em2::net::TestNativeLocalJump() && em2::net::TestNativeRetailInput() && em2::net::TestNativeGenericBasicInput() && em2::net::TestOwnedActorInput() && em2::net::TestOnlineGameplay() && em2::TestNativePlayerActions() && em2::TestCanonicalNativeJoin() && em2::TestNativePlayerSpawn() && em2::TestRenderOptions() && em2::TestRenderLogFilter() && em2::TestNativeRenderSampler(test_dir/"native-samples.tsv") && em2::TestNativePropertyLookup() && em2::TestNativeBindingCache() && em2::TestNativeVisibilityScan() && em2::TestNativeRegisterBank() && em2::TestNativeShaderUpload() && em2::TestNativeMemoryCopy() && em2::TestNativeVideoBlocks() && em2::TestNativeSkinning() && em2::TestNativeCameraTiming() && em2::TestNativeCameraProjection() && em2::TestSceneDrawInputs() && em2::TestSimulation() && em2::TestGpuCommandProfiling() && em2::TestTransferScissors() && em2::TestStencilZeroProof() && em2::TestFencedScratchCache() && settings_ok && controls_ok && lowering_ok;
             spdlog::shutdown();
             ExitProcess(success?0:1);
         }
@@ -534,7 +539,9 @@ public:
         if(em2::PublicDemoBuild() && !GetArgument("game_directory"))game_dir.clear();
         em2::LoadPCSettings(user_data);
         em2::LoadControls(user_data);
-        em2::InitializeContentLibrary(user_data);
+        // The EM1 preview has its own campaign profile, but shares the main
+        // library marker selected in the opening chooser.
+        em2::InitializeContentLibrary(em2::Em1DemoSession() && user_data.filename()=="em1-preview"?user_data.parent_path():user_data);
         em2::InitializeEngineWorkbench(user_data);em2::InitializeGameplayMods(user_data);
         em2::ApplyPublicDemoSettings();
         if(!shader_storage_test){

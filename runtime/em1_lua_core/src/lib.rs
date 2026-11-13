@@ -15,6 +15,7 @@ mod callback_calls;
 mod prefab_data;
 mod source_vector;
 mod source_map;
+mod disc_images;
 
 const MAX_CHUNK: usize = 1024 * 1024;
 const MAX_SOURCE: usize = 4 * 1024 * 1024;

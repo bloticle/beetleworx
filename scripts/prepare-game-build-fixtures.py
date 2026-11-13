@@ -32,12 +32,21 @@ entry = same.copy()
 entry[headers[0x00010100] + 3] ^= 4
 imports = same.copy()
 imports[word(headers[0x000103FF]) + 4] ^= 1
+regional=same.copy()
+regional[word(headers[0x00040006])] ^= 1
+if 0x00040310 in headers: regional[word(headers[0x00040310])] ^= 1
+assert game_check.execution_profile(regional)==profile
+wrong_title=same.copy()
+wrong_title[word(headers[0x00040006])+12] ^= 1
+assert game_check.execution_profile(wrong_title)!=profile
 assert game_check.execution_profile(entry) != profile
 assert game_check.execution_profile(imports) != profile
 args.output.mkdir(parents=True, exist_ok=True)
 for name, data in {
     "original.xex": source,
     "same-image.xex": same,
+    "regional-metadata.xex": regional,
+    "wrong-title.xex": wrong_title,
     "altered-image.xex": altered,
     "altered-entry.xex": entry,
     "altered-imports.xex": imports,

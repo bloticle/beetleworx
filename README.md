@@ -8,7 +8,7 @@ The demo includes Epic Mickey 2 gameplay and an experimental Epic Mickey compati
 
 1. Download the `Beetleworx-PublicDemo` ZIP under Assets on the [release page](https://github.com/Bloticle/beetleworx/releases) and extract it somewhere writable.
 2. Open `beetleworx.exe`. Select your Epic Mickey 2 Xbox 360 disc image or extracted game folder when prompted.
-3. To try the Epic Mickey preview, also select your Wii RVZ disc image. Both modes need the Epic Mickey 2 files.
+3. To try the Epic Mickey preview, also select your Wii disc image (RVZ, ISO, WIA, WBFS, CISO, GCZ or NFS). Both modes need the Epic Mickey 2 files.
 
 The native Options menu includes graphics settings, control rebinding, mouse and cursor controls, and movement tuning. The demo has single-player character switching, sprint, dash, and ground pound. It also includes options for Gremlin dialogue names and Mickey's original ink drips; the ink assets come from the mounted Wii disc. Press backtick and open **Levels** to browse and try levels from either game. Epic Mickey level compatibility varies by area.
 
@@ -22,7 +22,7 @@ Use **Support & Updates** to review and save a diagnostic report before opening 
 - **Graphics and performance:** HDR and experimental scene lighting are held back from the demo. They need stable transitions and broader GPU testing. Distance-based shadows, upscaling, shader preparation, and high-resolution performance need further validation and tuning.
 - **Movement abilities:** The imported Rebrushed clips are for Mickey. Oswald uses his existing animations. Movement, landing damage, and animation transitions need testing across 3D areas, 2D sections, and the two games.
 - **Modding:** Runtime texture and model swaps from standard file formats, mods that ship only changed assets, and an in-game entity and asset inspector are planned.
-- **Setup and updates:** EM2 setup supports uncompressed Xbox 360 disc images and extracted folders; EM1 uses RVZ. Other container formats and more hardware configurations still need coverage. The first demo has no earlier public build to exercise the full live update path.
+- **Setup and updates:** EM2 setup supports uncompressed Xbox 360 disc images and extracted folders; EM1 accepts RVZ, ISO/GCM, WIA, WBFS, CISO, GCZ and NFS through an embedded reader. Regional asset archives are patched by resource name; matching decoded executable code is still required. Xbox compressed containers, legacy NKit conversions, and more hardware configurations still need coverage. The first demo has no earlier public build to exercise the full live update path.
 
 If an update is interrupted and the game no longer opens, extract a fresh release ZIP. Keep `user_data` for your saves and settings and `game-data` for any disc files imported by setup.
 

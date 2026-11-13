@@ -30,6 +30,7 @@
 #include "native_character_physics.h"
 #include <rex/cvar.h>
 REXCVAR_DEFINE_BOOL(em2_trace_online_random_owners,false,"Debug","Capture bounded owner registers and parent stacks for online CRT diagnostics; requires observation tracing");
+REXCVAR_DEFINE_BOOL(em2_trace_online_lua_owners,false,"Debug","Private bounded Lua random-source and early-wait capture without per-tick clock logging; requires observation tracing");
 REXCVAR_DEFINE_UINT32(em2_trace_online_random_start_tick,0,"Debug","First of two agreed ticks to capture bounded CRT events for online observation tracing");
 #include <rex/logging.h>
 #include <rex/kernel/kernel_state.h>
@@ -704,6 +705,29 @@ ScriptRandomOwner TraceScriptRandomOwner(uint8_t* base,const PPCContext& ctx,siz
         break;
     }
     return owner;
+}
+bool TestScriptRandomOwner(){
+    struct HostState {DWORD error=GetLastError();unsigned csr=_mm_getcsr();~HostState(){SetLastError(error);_mm_setcsr(csr);}}host;
+    auto* base=static_cast<uint8_t*>(VirtualAlloc(nullptr,65536,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));if(!base)return false;
+    struct Release{uint8_t* base;~Release(){VirtualFree(base,0,MEM_RELEASE);}}release{base};
+    PPCContext ctx{};ctx.r31.u64=0x2000;ctx.r1.u64=0x8000;
+    PPC_STORE_U32(0x200C,0x3000);PPC_STORE_U32(0x2014,0x3010);PPC_STORE_U32(0x3010,0x4008);
+    PPC_STORE_U32(0x4004,9);PPC_STORE_U32(0x4000,0x5000);PPC_STORE_U32(0x5008,0x5100);
+    PPC_STORE_U32(0x5128,0x5200);PPC_STORE_U32(0x5218,0x5300);PPC_STORE_U32(0x5200,449);
+    constexpr char source[]="@fixture/script.lua";PPC_STORE_U32(0x5304,sizeof(source)-1);std::memcpy(base+0x530C,source,sizeof(source));
+    PPC_STORE_U32(0x8000,0x8100);PPC_STORE_U32(0x80F8,0x8273DA80);
+    const auto saved=ctx;const auto bytes=std::vector<uint8_t>(base,base+65536);
+    const auto owner=TraceScriptRandomOwner(base,ctx,24);
+    if(owner.event!=24 || owner.defined_line!=449 || std::strcmp(owner.source.data(),source) || owner.parents[0]!=0x8273DA80 ||
+       std::memcmp(&ctx,&saved,sizeof(ctx)) || std::memcmp(base,bytes.data(),bytes.size()))return false;
+    PPC_STORE_U32(0x2014,0x3011);
+    if(TraceScriptRandomOwner(base,ctx,25).source[0])return false;
+    PPC_STORE_U32(0x2014,0x3010);PPC_STORE_U32(0x5304,0x3FFFFFFF);
+    const auto bounded=TraceScriptRandomOwner(base,ctx,26);
+    if(std::string_view(bounded.source.data()).size()>191 || bounded.source.back())return false;
+    PPC_STORE_U32(0x5218,0xFFFFFFF0);
+    if(TraceScriptRandomOwner(base,ctx,27).source[0])return false;
+    REXLOG_INFO("Native Lua owner capture passed heap-string/call-info/stack, malformed alignment, bounded length, unreadable source and read-only context/data checks");return true;
 }
 void LogScriptRandomOwners(const RandomFailureHistory::Frame& frame) {
     for(size_t i=0;i<frame.script_count;++i){
@@ -1418,7 +1442,8 @@ void StartTick(uint8_t* base,bool agreed=false,uint64_t input_tick=0) {
     const uint64_t random_start=REXCVAR_GET(em2_trace_online_random_start_tick);
     capture_online_random=agreed && input_tick>=random_start && input_tick-random_start<2 && REXCVAR_GET(em2_trace_online_observations);
     capture_online_random_owners=capture_online_random && REXCVAR_GET(em2_trace_online_random_owners);
-    capture_script_random_owners=agreed && REXCVAR_GET(em2_trace_online_observations) && REXCVAR_GET(em2_trace_online_random_owners);
+    capture_script_random_owners=agreed && REXCVAR_GET(em2_trace_online_observations) &&
+        (input_tick<16 || REXCVAR_GET(em2_trace_online_random_owners) || REXCVAR_GET(em2_trace_online_lua_owners));
     if(agreed && REXCVAR_GET(em2_trace_online_observations)){
         if(!random_failure_history)random_failure_history=std::make_unique<RandomFailureHistory>();
         random_failure_history->Begin(input_tick);
@@ -1691,7 +1716,8 @@ PPC_FUNC_IMPL(sub_8273D880) {
     // original scheduler mutates or removes entries.
     const auto trace_begin=script_wait_trace_size;
     uint32_t trace_manager=0;
-    if(REXCVAR_GET(em2_trace_online_random_owners) && em2::net::SynchronizedSessionActive() &&
+    if((REXCVAR_GET(em2_trace_online_random_owners) || REXCVAR_GET(em2_trace_online_lua_owners) ||
+        (REXCVAR_GET(em2_trace_online_observations) && em2::InAgreedSimulationTick() && clock_input_tick<12)) && em2::net::SynchronizedSessionActive() &&
        (!em2::InAgreedSimulationTick() || clock_input_tick<12)){
         struct HostState {DWORD error=GetLastError();unsigned csr=_mm_getcsr();~HostState(){SetLastError(error);_mm_setcsr(csr);}} host_state;
         const auto manager=ctx.r3.u32;
@@ -2365,6 +2391,7 @@ bool TestSimulation() {
     if(!TestCameraPresentation())return false;
     if(!TestNativeCameraLookAction())return false;
     if(!TestRandomFailureHistory())return false;
+    if(!TestScriptRandomOwner())return false;
     if(!TestRenderProfiling() || !TestNativeClockIntervals() || !TestPreparedSkinInterpolation())return false;
     bool ok=true;
     auto check=[&](bool condition,const char* message) {

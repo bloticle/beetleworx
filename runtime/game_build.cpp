@@ -27,7 +27,7 @@ std::string Profile(std::span<const uint8_t> bytes){
     if(security<24+count*8 || uint64_t(security)+0x184>limit)throw std::runtime_error("Invalid XEX security bounds");
     const auto pages=Word(bytes,security+0x180);
     if(!pages || pages>4096 || uint64_t(security)+0x184+pages*24>limit)throw std::runtime_error("Invalid XEX page descriptors");
-    const std::string_view domain="Beetleworx-XEX-execution-v1";
+    const std::string_view domain="Beetleworx-XEX-execution-v2";
     Bytes profile(domain.begin(),domain.end());
     for(auto offset:{4u,security+4,security+0x10C,security+0x110,security+0x160})Number(profile,Word(bytes,offset));
     Number(profile,pages);
@@ -65,8 +65,11 @@ std::string Profile(std::span<const uint8_t> bytes){
         if(first<24 || first>payload_size)throw std::runtime_error("Invalid compressed XEX first block size");
     }
     for(const auto& [key,payload]:headers){
-        if(key==0x000003FF)continue;
-        Number(profile,key);Number(profile,uint32_t(payload.size()));profile.insert(profile.end(),payload.begin(),payload.end());
+        // Retail region/media branding is not executable layout. Keep title,
+        // version, imports, TLS, entry point and the exact decoded image checks.
+        if(key==0x000003FF || key==0x00040310 || key==0x000405FF || key==0x000183FF)continue;
+        const auto executable_payload=key==0x00040006?payload.subspan(4):payload;
+        Number(profile,key);Number(profile,uint32_t(executable_payload.size()));profile.insert(profile.end(),executable_payload.begin(),executable_payload.end());
     }
     return Digest(profile);
 }
@@ -98,7 +101,7 @@ bool VerifyCompatibleGameXex(rex::Runtime& runtime,const std::filesystem::path& 
 }
 bool TestCompatibleGameXex(rex::Runtime& runtime,const std::filesystem::path& root,std::string& error){
     for(const auto& [name,expected]:std::initializer_list<std::pair<const char*,bool>>{
-        {"original.xex",true},{"same-image.xex",true},{"altered-image.xex",false},
+        {"original.xex",true},{"same-image.xex",true},{"regional-metadata.xex",true},{"wrong-title.xex",false},{"altered-image.xex",false},
         {"altered-entry.xex",false},{"altered-imports.xex",false},{"truncated.xex",false}}){
         std::string reason;const auto accepted=VerifyCompatibleGameXex(runtime,root/name,reason);
         if(accepted!=expected){error=std::string(name)+": unexpected compatibility result: "+reason;return false;}

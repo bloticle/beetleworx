@@ -7,6 +7,8 @@ struct Invite {
     std::array<uint8_t,16> session{};
     uint64_t first_tick=0;
     uint8_t input_delay=2;
+    // Old invitations imply1. Room joins adopt this host-selected policy.
+    uint8_t verification_window=1;
     bool operator==(const Invite&) const=default;
 };
 // Typo checksum only: an invitation is not transport encryption/authentication.

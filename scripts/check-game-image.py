@@ -26,7 +26,7 @@ def execution_profile(data):
     pages = word(security + 0x180)
     if not pages or pages > 4096 or security + 0x184 + pages * 24 > limit:
         raise ValueError("Invalid XEX page descriptors")
-    profile = bytearray(b"Beetleworx-XEX-execution-v1")
+    profile = bytearray(b"Beetleworx-XEX-execution-v2")
     for offset in (4, security + 4, security + 0x10C, security + 0x110, security + 0x160):
         profile += struct.pack(">I", word(offset))
     profile += struct.pack(">I", pages)
@@ -49,7 +49,8 @@ def execution_profile(data):
     # Encoding changes are permitted only after exact decoded-image validation.
     # All other optional headers, including imports and TLS, remain identical.
     for key, payload in sorted(headers.items()):
-        if key != 0x000003FF:
+        if key not in (0x000003FF,0x00040310,0x000405FF,0x000183FF):
+            if key==0x00040006: payload=payload[4:]
             profile += struct.pack(">II", key, len(payload)) + payload
     return hashlib.sha256(profile).hexdigest()
 

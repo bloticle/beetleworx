@@ -80,9 +80,9 @@ struct Socket {
 };
 std::optional<LANGame> DecodeResponse(std::span<const uint8_t> bytes,const std::array<uint8_t,16>& nonce,
     const sockaddr_in& source,const std::vector<Subnet>& subnets) {
-    if(bytes.size()!=86 || !ValidHeader(bytes,2) || !std::equal(nonce.begin(),nonce.end(),bytes.begin()+8) ||
+    if((bytes.size()!=86 && bytes.size()!=88) || !ValidHeader(bytes,2) || !std::equal(nonce.begin(),nonce.end(),bytes.begin()+8) ||
         !OnLink(ntohl(source.sin_addr.s_addr),subnets))return {};
-    auto invite=DecodeInvite(std::string_view(reinterpret_cast<const char*>(bytes.data()+24),62));
+    auto invite=DecodeInvite(std::string_view(reinterpret_cast<const char*>(bytes.data()+24),bytes.size()-24));
     if(!invite || ParseNumericAddress(invite->address)->ipv6())return {};
     // Advertised Internet addresses need not work through LAN NAT hairpinning.
     // Route a discovered connection to the actual response's on-link source.
@@ -110,7 +110,8 @@ LANAdvertiser::LANAdvertiser():impl_(std::make_unique<Impl>()){}
 LANAdvertiser::~LANAdvertiser()=default;
 bool LANAdvertiser::Start(const Invite& invite,std::string_view bind_address,uint16_t port) {
     Stop();const auto code=EncodeInvite(invite);
-    if(!code || code->size()!=62){impl_->socket.error="LAN discovery advertises IPv4 hosts only";return false;}
+    const auto address=ParseNumericAddress(invite.address);
+    if(!code || !address || address->ipv6() || (code->size()!=62 && code->size()!=64)){impl_->socket.error="LAN discovery advertises IPv4 hosts only";return false;}
     if(!impl_->socket.Open(bind_address,port,false))return false;
     impl_->invitation=*code;impl_->subnets=Subnets();impl_->replies={};impl_->sent=0;impl_->window={};return true;
 }
@@ -173,6 +174,30 @@ void LANBrowser::Poll(Time now) {
 bool TestLANDiscovery() {
     auto check=[](bool value,const char* message){if(!value)REXLOG_ERROR("LAN discovery test: {}",message);return value;};
     Invite invite{"203.0.113.19",41036};invite.session[0]=7;invite.first_tick=45;invite.input_delay=3;
+    for(uint8_t window=2;window<=8;++window){
+        auto configured=invite;configured.verification_window=window;
+        LANAdvertiser room_host;LANBrowser room_browser;
+        if(!check(room_host.Start(configured,"127.0.0.1",0) &&
+            room_browser.Start({{"127.0.0.1",room_host.port()}}),"windowed Room opens bounded loopback discovery"))return false;
+        const auto until=Clock::now()+std::chrono::seconds(2);
+        do{room_browser.Poll();room_host.Poll();room_browser.Poll();
+            if(!room_browser.games().empty())break;std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }while(Clock::now()<until);
+        auto expected=configured;expected.address="127.0.0.1";
+        if(!check(room_browser.games().size()==1 && DecodeInvite(room_browser.games()[0].invitation)==expected,
+            "LAN endpoint remapping preserves each invited verification window2..8"))return false;
+        std::array<uint8_t,16> challenge{};challenge[0]=window;
+        auto packet=Header(2,challenge);const auto encoded=*EncodeInvite(configured);
+        packet.insert(packet.end(),encoded.begin(),encoded.end());
+        sockaddr_in sender{};sender.sin_family=AF_INET;sender.sin_addr.s_addr=htonl(0x7F000001);
+        if(!check(packet.size()==88 && DecodeResponse(packet,challenge,sender,{}).has_value(),"windowed response has exact bounded size"))return false;
+        for(size_t i=0;i<packet.size();++i){auto corrupt=packet;corrupt[i]^=1;
+            if(!check(!DecodeResponse(corrupt,challenge,sender,{}),"every windowed response corruption is rejected"))return false;}
+        packet.push_back(0);
+        if(!check(!DecodeResponse(packet,challenge,sender,{}),"windowed response rejects trailing byte"))return false;
+        packet.resize(87);
+        if(!check(!DecodeResponse(packet,challenge,sender,{}),"windowed response rejects truncation"))return false;
+    }
     LANAdvertiser host;LANBrowser browser;
     if(!check(host.Start(invite,"127.0.0.1",0) && host.port(),"exclusive ephemeral UDP listener"))return false;
     const auto now=Clock::now();

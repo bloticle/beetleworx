@@ -1,4 +1,5 @@
 #include "native_launch_defaults.h"
+#include "native_empty_free.h"
 #include "ppc_context.h"
 #include <rex/logging.h>
 #include <windows.h>
@@ -33,6 +34,7 @@ void OriginalFixture(PPCContext& ctx,uint8_t* base){
 PPC_FUNC_IMPL(sub_829977A8){Construct(ctx,base,__imp__sub_829977A8);}
 
 bool em2::TestNativeLaunchDefaults(){
+    if(!TestNativeEmptyFree())return false;
     struct Restore {unsigned fp=_mm_getcsr();DWORD error=GetLastError();Probe* saved=probe;
         ~Restore(){_mm_setcsr(fp);SetLastError(error);probe=saved;}}restore;
     unsigned checks=0;
