@@ -34,4 +34,6 @@ EMR movement animations: `@llenarox` on Discord.
 
 See [Building Beetleworx](docs/BUILDING.md) for prerequisites and commands. The [development notes](DEVELOPMENT.md) cover the renderer, input, and experimental online code.
 
+Development setup accepts additional Xbox containers and archives, including CSO/ZSO, CCI, standalone CHD, GOD/SVOD, ZArchive and ZIP/ZIP64, plus extracted EM1 disc folders. These readers are ahead of the public demo. See [disc format support and validation limits](docs/disc-formats-development.md) for tested cases and remaining work. Matching executable code is still required.
+
 Development builds have an intermittent startup callback crash and an online initialization divergence under investigation. Experimental online button production and delivery have passed a neutral two-instance test; live gameplay actions, aiming, actor lifecycle handling, and wider multiplayer testing remain unfinished. Online stays disabled in the public demo.

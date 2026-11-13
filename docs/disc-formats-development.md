@@ -82,13 +82,24 @@ rejected. Bounded DEFLATE checkpoints every 8 MiB allow backward/random reads
 without repeatedly decoding a large ISO from the beginning; decoder allocation
 is capped at 128 MiB. A shared read-only archive interface now serves ZIP and
 ZArchive. ZIP receipts use the verified container bytes as source ownership.
+ZIP validation walks payloads in physical order, hashing their compressed bytes
+while checking decoded CRCs. Headers, gaps and the directory are included in
+the same forward hash pass, avoiding a second full read of the archive.
 The independent Python `zipfile` regression suite covers extraction, resume,
 ZIP64, 32/64-bit streaming descriptors, empty files/directories, stored and
 deflated ISOs, checkpoint seeks, misleading extensions and corrupt inputs.
 Password-protected/multi-volume ZIPs and other ZIP compression methods are not
-implemented. Retail-data ZIP validation remains outstanding. This is not in
-demo.3. Run `ctest -R zip-content-import` in the runtime build directory to run
-the suite using the same game executable.
+implemented. On 2026-11-12 a Python-produced ZIP64 archive containing the owned
+8,738,846,720-byte retail ISO passed CRC validation and a full comparison with
+the extracted game: all 2,325 files and 6,975,770,804 game bytes matched. The
+compressed entry was 8,614,081,629 bytes, exercising real sizes and seeks above
+4 GiB. A back-to-back test of the old/new readers reduced validation plus
+filesystem preparation from 106.869 to 71.999 seconds; cache and machine load
+can affect timing. The new path removes one complete 8.61 GB archive read.
+The full read-only comparison also passed after the change. This does not
+establish a complete setup/gameplay run from that archive or compatibility
+with every ZIP producer/build. Run `ctest -R zip-content-import` in the runtime
+build directory for the 26 independent fixture cases. This is not in demo.3.
 
 Development source also mounts extracted EM1 Wii discs directly. In the Wii
 image picker, choose **Use an extracted game folder instead**. Select the disc

@@ -40,6 +40,15 @@ struct ZipImage::Impl {
  File file;Allocator allocator;std::vector<Entry> entries;std::vector<ArchiveFile> files;std::vector<std::pair<uint64_t,size_t>> starts;
  std::array<uint8_t,32> identity{};uint64_t size=0,unpacked=0;Stream decoder;z_stream& active=decoder.stream;bool& initialized=decoder.valid;bool ended=false,indexing=false;
  size_t active_entry=SIZE_MAX;uint64_t position=0,consumed=0,fed=0;uint32_t crc=0;std::array<uint8_t,65536> input{};
+ Hash* validation_hash=nullptr;const std::function<bool(uint64_t,uint64_t)>* validation_progress=nullptr;
+ uint64_t hash_cursor=0,verified_bytes=0,validation_total=0,next_progress=0;
+ void Notify(bool force=false){const auto done=hash_cursor+verified_bytes;if(validation_progress && (force || done>=next_progress)){if(*validation_progress && !(*validation_progress)(done,validation_total))throw Canceled{};next_progress=done+1024*1024;}}
+ void HashUntil(uint64_t end){Require(end>=hash_cursor,"ZIP validation attempted a backward physical read");if(end==hash_cursor)return;std::array<uint8_t,65536> gap;
+  while(hash_cursor<end){Notify();const auto n=size_t(std::min<uint64_t>(gap.size(),end-hash_cursor));file.Read(hash_cursor,std::span(gap).first(n));validation_hash->Add(std::span(gap).first(n));hash_cursor+=n;}}
+ void PayloadRead(uint64_t at,std::span<uint8_t> out){
+  if(!validation_hash){file.Read(at,out);return;}
+  HashUntil(at);Notify();file.Read(at,out);validation_hash->Add(out);hash_cursor=at+out.size();
+ }
  ~Impl()=default;
  void Reset(size_t index,const Checkpoint* point=nullptr){if(initialized)inflateEnd(&active);active={};initialized=false;active_entry=SIZE_MAX;ended=false;
   active.opaque=&allocator;active.zalloc=Allocator::Allocate;active.zfree=Allocator::Free;
@@ -48,7 +57,7 @@ struct ZipImage::Impl {
  }
  void Pump(std::span<uint8_t> out){auto& e=entries.at(active_entry);size_t done=0;
   while(done<out.size() && !ended){
-   if(!active.avail_in && fed<e.packed){const auto n=size_t(std::min<uint64_t>(input.size(),e.packed-fed));file.Read(e.data+fed,std::span(input).first(n));fed+=n;active.next_in=input.data();active.avail_in=uInt(n);}
+   if(!active.avail_in && fed<e.packed){const auto n=size_t(std::min<uint64_t>(input.size(),e.packed-fed));PayloadRead(e.data+fed,std::span(input).first(n));fed+=n;active.next_in=input.data();active.avail_in=uInt(n);}
    const auto until=stride-position%stride;const auto n=size_t(std::min<uint64_t>(out.size()-done,until));active.next_out=out.data()+done;active.avail_out=uInt(n);const auto before=active.avail_in;
    const auto result=inflate(&active,Z_NO_FLUSH);const auto made=n-active.avail_out;consumed+=before-active.avail_in;
    Require(position<=e.size && made<=e.size-position,"ZIP DEFLATE stream exceeds its declared size");crc=Crc(crc,out.subspan(done,made));done+=made;position+=made;
@@ -60,14 +69,14 @@ struct ZipImage::Impl {
   Require(done==out.size(),"Short ZIP DEFLATE output");
  }
  void Finish(){if(ended)return;auto& e=entries.at(active_entry);Require(position==e.size,"ZIP entry ended before its declared size");std::array<uint8_t,1> extra{};
-  while(!ended){if(!active.avail_in && fed<e.packed){const auto n=size_t(std::min<uint64_t>(input.size(),e.packed-fed));file.Read(e.data+fed,std::span(input).first(n));fed+=n;active.next_in=input.data();active.avail_in=uInt(n);}
+  while(!ended){if(!active.avail_in && fed<e.packed){const auto n=size_t(std::min<uint64_t>(input.size(),e.packed-fed));PayloadRead(e.data+fed,std::span(input).first(n));fed+=n;active.next_in=input.data();active.avail_in=uInt(n);}
    const auto before=active.avail_in;active.next_out=extra.data();active.avail_out=1;const auto result=inflate(&active,Z_NO_FLUSH);consumed+=before-active.avail_in;
    Require(active.avail_out==1,"ZIP DEFLATE output exceeds its declared length");Require(result==Z_OK || result==Z_STREAM_END || result==Z_BUF_ERROR,"Invalid ZIP DEFLATE ending");
    if(result==Z_STREAM_END){ended=true;Require(consumed==e.packed && ~crc==e.crc,"ZIP entry CRC or compressed length mismatch");}else Require(before!=active.avail_in,"Truncated ZIP DEFLATE ending");
   }
  }
  void ReadEntry(size_t index,uint64_t offset,std::span<uint8_t> out){auto& e=entries.at(index);Require(offset<=e.size && out.size()<=e.size-offset,"Read outside ZIP entry");
-  if(e.method==0){file.Read(e.data+offset,out);return;}
+  if(e.method==0){PayloadRead(e.data+offset,out);return;}
   const Checkpoint* point=nullptr;for(const auto& p:e.points)if(p->position<=offset)point=p.get();else break;
   if(active_entry!=index || position>offset || (point && position<point->position))Reset(index,point);
   std::array<uint8_t,65536> discard{};while(position<offset)Pump(std::span(discard).first(size_t(std::min<uint64_t>(discard.size(),offset-position))));
@@ -117,13 +126,15 @@ struct ZipImage::Impl {
    entries.push_back(std::move(entry));at+=length;
   }
   Require(at==directory.size() && size>0,"Unsupported trailing ZIP directory record or empty game archive");for(const auto& [key,value]:paths)files.push_back(value.first);
-  Hash hash;std::vector<uint8_t> buffer(1024*1024);const auto total=file.size+unpacked;
-  for(uint64_t pos=0;pos<file.size;){if(progress && !progress(pos,total))throw Canceled{};const auto n=size_t(std::min<uint64_t>(buffer.size(),file.size-pos));file.Read(pos,std::span(buffer).first(n));hash.Add(std::span(buffer).first(n));pos+=n;}identity=hash.Finish();
-  indexing=true;uint64_t done=file.size;
-  for(size_t i=0;i<entries.size();++i){auto& entry=entries[i];uint32_t sum=0xffffffff;for(uint64_t pos=0;pos<entry.size;){if(progress && !progress(done,total))throw Canceled{};const auto n=size_t(std::min<uint64_t>(buffer.size(),entry.size-pos));auto out=std::span(buffer).first(n);ReadEntry(i,pos,out);if(entry.method==0)sum=Crc(sum,out);pos+=n;done+=n;}
+  Hash hash;std::vector<uint8_t> buffer(1024*1024);validation_hash=&hash;validation_progress=&progress;validation_total=file.size+unpacked;indexing=true;
+  std::vector<size_t> physical_order;for(size_t i=0;i<entries.size();++i)physical_order.push_back(i);
+  std::sort(physical_order.begin(),physical_order.end(),[&](size_t a,size_t b){return entries[a].data<entries[b].data;});
+  // Hash headers, gaps, payloads and the central directory in their physical
+  // order while CRC validation builds seek checkpoints. Each payload is read once.
+  for(const auto i:physical_order){auto& entry=entries[i];uint32_t sum=0xffffffff;for(uint64_t pos=0;pos<entry.size;){Notify();const auto n=size_t(std::min<uint64_t>(buffer.size(),entry.size-pos));auto out=std::span(buffer).first(n);ReadEntry(i,pos,out);if(entry.method==0)sum=Crc(sum,out);pos+=n;verified_bytes+=n;}
    if(entry.method==0)Require(~sum==entry.crc,"Stored ZIP entry CRC mismatch");else if(entry.size==0){Reset(i);Finish();}
-   if(progress && !progress(done,total))throw Canceled{};
-  }indexing=false;
+   Notify();
+  }HashUntil(file.size);Notify(true);identity=hash.Finish();indexing=false;validation_hash=nullptr;validation_progress=nullptr;
  }
  void Read(uint64_t offset,std::span<uint8_t> out){Require(offset<=size && out.size()<=size-offset,"Read outside ZIP logical stream");auto it=std::upper_bound(starts.begin(),starts.end(),offset,[](uint64_t n,const auto& p){return n<p.first;});Require(it!=starts.begin(),"ZIP logical read has no file");--it;ReadEntry(it->second,offset-it->first,out);}
 };

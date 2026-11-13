@@ -43,8 +43,10 @@ class Streaming(io.BytesIO):
 
 
 def make(path, *, method=zipfile.ZIP_DEFLATED, prefix="", wide=False,
-         streaming=False, iso=False, comment=b"", special=None, directories=False):
+         streaming=False, iso=False, comment=b"", special=None, directories=False, prelude=False):
     sink = Streaming() if streaming else io.BytesIO()
+    if prelude:
+        sink.write(b"Private archive prelude\0" * 256)
     old_limit = zipfile.ZIP64_LIMIT
     if wide:
         zipfile.ZIP64_LIMIT = 0
@@ -116,6 +118,8 @@ def run(name, path, good=True, iso=False, resume=None):
         expected = {k: v for k, v in content.items() if not iso or k != "empty.bin"}
         for relative, data in expected.items():
             assert (destination / relative).read_bytes() == data, (name, relative)
+        identity = hashlib.sha256(hashlib.sha256(path.read_bytes()).digest()).hexdigest()
+        assert (destination / ".em2-iso-import/identity.txt").read_text() == identity + "\n", name
     else:
         assert not destination.exists(), (name, "malformed ZIP reached extraction")
     results.append({"name": name, "expected": "accept" if good else "reject",
@@ -135,6 +139,7 @@ try:
         ("explicit-directory", {"directories": True}),
         ("comment", {"comment": b"Native game archive regression"}),
         ("comment-end-signature", {"comment": b"PK\x05\x06" + bytes(18)}),
+        ("prefixed-zip", {"prelude": True}),
         ("stored-iso", {"method": zipfile.ZIP_STORED, "iso": True}),
         ("deflate-iso", {"iso": True}),
     ]
@@ -142,6 +147,19 @@ try:
         run(name, make(root / (name + ".zip"), **options), iso=options.get("iso", False))
     run("resume-deflate", root / "deflate.zip", resume="deflate")
     run("misnamed-extension", make(root / "zip-with-zar-extension.zar"))
+    reordered = bytearray((root / "deflate.zip").read_bytes())
+    with zipfile.ZipFile(io.BytesIO(reordered)) as archive:
+        start = archive.start_dir
+        at = start
+        records = []
+        for unused in archive.infolist():
+            length = 46 + sum(struct.unpack_from("<HHH", reordered, at + 28))
+            records.append(bytes(reordered[at:at + length]))
+            at += length
+    reordered[start:at] = b"".join(reversed(records))
+    path = root / "reordered-directory.zip"
+    path.write_bytes(reordered)
+    run("reordered-directory", path)
     for name in ["traversal", "duplicate", "symlink"]:
         run(name, make(root / (name + ".zip"), special=name), False)
     original = (root / "deflate.zip").read_bytes()
