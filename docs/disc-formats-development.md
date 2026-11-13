@@ -40,8 +40,14 @@ allocation counts may be byte-swapped or too small after trimming. Originals
 remain read-only; setup extracts the game files without creating an ISO.
 Synthetic tests cover all three layouts, two-fragment reads, folder detection,
 missing fragments and ambiguous package folders. Retail GOD packages still need
-validation. The stored SVOD SHA-1 hash tree is not verified yet; setup
-uses SHA-256 source ownership and the existing executable/build checks. GOD
+validation. The reader verifies each master hash table against the package
+root and previous-fragment link, then verifies every data hash table and block
+before exposing its bytes. Partial final blocks are hashed at their actual
+length. One verified data group is cached, and failed checks invalidate it.
+Corruption tests cover all tree layers, later fragments and cache recovery.
+This checks consistency with the declared root; Xbox package signatures are
+not authenticated. Setup also uses SHA-256 source ownership and the existing
+executable/build checks. GOD
 imports have their own source identity and do not resume an ISO import receipt.
 These additions are not included in demo.3.
 

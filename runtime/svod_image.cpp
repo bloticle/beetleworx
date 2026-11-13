@@ -3,6 +3,7 @@
 #include "svod_image.h"
 #define NOMINMAX
 #include <windows.h>
+#include <bcrypt.h>
 #include <algorithm>
 #include <stdexcept>
 #include <vector>
@@ -20,11 +21,34 @@ struct File {
  void Read(uint64_t offset,std::span<uint8_t> bytes){Require(offset<=size && bytes.size()<=size-offset && bytes.size()<=MAXDWORD,"GOD data fragment is truncated");
   LARGE_INTEGER at{};at.QuadPart=LONGLONG(offset);DWORD got=0;Require(SetFilePointerEx(handle,at,nullptr,FILE_BEGIN) && ReadFile(handle,bytes.data(),DWORD(bytes.size()),&got,nullptr) && got==bytes.size(),"Cannot read GOD data fragment");}
 };
+struct Sha1 {
+ BCRYPT_ALG_HANDLE provider=nullptr;
+ Sha1(){Require(BCryptOpenAlgorithmProvider(&provider,BCRYPT_SHA1_ALGORITHM,nullptr,0)>=0,"Cannot initialize GOD SHA-1 verification");}
+ ~Sha1(){if(provider)BCryptCloseAlgorithmProvider(provider,0);}
+ std::array<uint8_t,20> Hash(std::span<const uint8_t> data){std::array<uint8_t,20> hash{};Require(data.size()<=ULONG_MAX && BCryptHash(provider,nullptr,0,const_cast<PUCHAR>(data.data()),ULONG(data.size()),hash.data(),ULONG(hash.size()))>=0,"GOD SHA-1 verification failed");return hash;}
+ void Verify(std::span<const uint8_t> data,std::span<const uint8_t> expected,const char* error){const auto actual=Hash(data);Require(expected.size()==actual.size() && std::equal(actual.begin(),actual.end(),expected.begin()),error);}
+};
 }
 struct SvodImage::Impl {
  std::unique_ptr<File> package;std::vector<std::unique_ptr<File>> fragments;
  std::array<uint8_t,2048> descriptor{};std::vector<uint8_t> identity;
  uint64_t prefix=0,size=0,base=0;bool enhanced=false,internal=false;
+ Sha1 sha;std::vector<std::array<uint8_t,4096>> masters;std::vector<uint8_t> group_cache;
+ size_t cached_part=SIZE_MAX,cached_group=SIZE_MAX;
+ File& Part(size_t i){Require(i<(internal?1:fragments.size()),"GOD logical data references a missing fragment");return internal?*package:*fragments.at(i);}
+ void LoadGroup(size_t part,size_t group){
+  if(cached_part==part && cached_group==group)return;
+  cached_part=cached_group=SIZE_MAX;Require(group<203,"Invalid GOD data hash-group index");auto& file=Part(part);
+  const auto table_at=base+4096+uint64_t(group)*(4096+sectors_per_table*sector);
+  std::array<uint8_t,4096> table{};file.Read(table_at,table);
+  sha.Verify(table,std::span(masters.at(part)).subspan(group*20,20),"GOD data hash table is corrupt");
+  const auto data_at=table_at+4096;Require(data_at<file.size,"GOD data hash group has no data");
+  const auto length=size_t(std::min<uint64_t>(sectors_per_table*sector,file.size-data_at));Require(length%2048==0,"GOD data hash group ends in a partial sector");
+  group_cache.resize(length);file.Read(data_at,group_cache);
+  for(size_t at=0;at<length;at+=4096){const auto bytes=std::span(group_cache).subspan(at,std::min<size_t>(4096,length-at));
+   sha.Verify(bytes,std::span(table).subspan(at/4096*20,20),"GOD game data is corrupt (SHA-1 block mismatch)");}
+  cached_part=part;cached_group=group;
+ }
  explicit Impl(const std::filesystem::path& path){
   namespace fs=std::filesystem;package=std::make_unique<File>(path);Require(package->size>=0x1000,"GOD package header is truncated");
   std::array<uint8_t,4096> header{};package->Read(0,header);
@@ -47,15 +71,18 @@ struct SvodImage::Impl {
   // Converter allocation counts may be byte-swapped or underreport trimmed
   // data. Derive the readable extent from the actual fragment/hash geometry.
   uint64_t data_bytes=0;
-  for(uint32_t i=0;i<count;++i){const auto physical=(internal?package->size:fragments.at(i)->size)-base;
+  for(uint32_t i=0;i<count;++i){const auto length=Part(i).size;Require(length>=base+0x2000,"GOD fragment is missing its hash tables");const auto physical=length-base;
    Require(physical>=0x2000,"GOD fragment has no data hash group");const auto rest=physical-4096,group=4096+sectors_per_table*sector,full=rest/group,tail=rest%group;
    Require(full<=203 && (!tail || (full<203 && tail>4096 && (tail-4096)%2048==0)),"GOD final hash group is truncated or invalid");
    data_bytes+=full*sectors_per_table*sector+(tail?tail-4096:0);
   }
   Require(data_bytes>=(enhanced?4096:0),"GOD enhanced descriptor is missing");
   size=prefix+data_bytes-(enhanced?4096:0);Require(size>=0x10800 && size<=16ull*1024*1024*1024,"GOD logical disc exceeds its limit");
-  auto& first=internal?*package:*fragments.front();
-  const auto magic_at=internal?0xd000:enhanced?0x2000:0x12000;first.Read(magic_at,descriptor);
+  masters.resize(count);std::array<uint8_t,20> expected{};std::copy_n(header.begin()+0x37d,20,expected.begin());
+  for(size_t i=0;i<count;++i){Part(i).Read(base,masters[i]);sha.Verify(masters[i],expected,"GOD master hash table/fragment chain is corrupt");
+   std::copy_n(masters[i].begin()+203*20,20,expected.begin());}
+  LoadGroup(0,0);const auto descriptor_at=enhanced || internal?0:0x10000;
+  Require(group_cache.size()>=size_t(descriptor_at)+descriptor.size(),"GOD descriptor exceeds its verified hash group");std::copy_n(group_cache.begin()+descriptor_at,descriptor.size(),descriptor.begin());
   Require(std::equal(descriptor.begin(),descriptor.begin()+20,"MICROSOFT*XBOX*MEDIA"),"GOD game filesystem descriptor is missing");
   identity.assign(header.begin(),header.end());identity.insert(identity.end(),descriptor.begin(),descriptor.end());
  }
@@ -64,13 +91,9 @@ struct SvodImage::Impl {
   while(done<output.size()){
    if(offset<prefix){const auto count=size_t(std::min<uint64_t>(output.size()-done,prefix-offset));std::fill_n(output.begin()+done,count,0);offset+=count;done+=count;continue;}
    const auto logical=(offset-prefix)/sector+(enhanced?2:0),within=offset%sector;
-   auto part=logical/sectors_per_file;const auto block=logical%sectors_per_file;
-   const auto l0=block/sectors_per_table+1;uint64_t address=block*sector+l0*4096+(l0/0xa1c4+1)*4096+base;
-   if(address>=max_file){++part;address=address%max_file+0x2000;}
-   Require(part<(internal?1:fragments.size()),"GOD logical data references a missing fragment");
-   const auto continuous=std::min(sectors_per_table-block%sectors_per_table,sectors_per_file-block);
-   const auto count=size_t(std::min<uint64_t>(output.size()-done,continuous*sector-within));
-   (internal?*package:*fragments.at(size_t(part))).Read(address+within,output.subspan(done,count));done+=count;offset+=count;
+   const auto part=size_t(logical/sectors_per_file),block=logical%sectors_per_file;LoadGroup(part,size_t(block/sectors_per_table));
+   const auto at=size_t(block%sectors_per_table*sector+within);Require(at<group_cache.size(),"GOD sector exceeds its verified data group");
+   const auto count=std::min(output.size()-done,group_cache.size()-at);std::copy_n(group_cache.begin()+at,count,output.begin()+done);done+=count;offset+=count;
   }
  }
 };

@@ -435,14 +435,31 @@ bool TestDiscImageImport(const fs::path& root) {
             std::vector<std::unique_ptr<Handle>> files;
             const auto address=[&](uint64_t logical){const auto true_block=logical+(enhanced?2:0),block=true_block%per_file,l0=block/0x198+1;
                 return std::pair{size_t(true_block/per_file),block*2048+l0*4096+4096+(internal?0xb000:0)};};
-            for(uint32_t i=0;i<count;++i){const auto part=internal?path:folder/(i?L"Data0001":L"Data0000");auto file=std::make_unique<Handle>();file->value=CreateFileW(part.c_str(),GENERIC_WRITE,0,nullptr,internal?OPEN_EXISTING:CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);Require(file->value!=INVALID_HANDLE_VALUE,"Cannot create private GOD fixture");DWORD ignored=0;DeviceIoControl(file->value,FSCTL_SET_SPARSE,nullptr,0,nullptr,0,&ignored,nullptr);
-                const auto end=address(uint64_t(blocks)*2-1-(enhanced?2:0));LARGE_INTEGER length{};length.QuadPart=LONGLONG(i+1<count?max_file:end.second+2048);Require(SetFilePointerEx(file->value,length,nullptr,FILE_BEGIN) && SetEndOfFile(file->value),"Cannot size private GOD fixture");files.push_back(std::move(file));}
+            for(uint32_t i=0;i<count;++i){const auto part=internal?path:folder/(i?L"Data0001":L"Data0000");auto file=std::make_unique<Handle>();file->value=CreateFileW(part.c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,internal?OPEN_EXISTING:CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);Require(file->value!=INVALID_HANDLE_VALUE,"Cannot create private GOD fixture");DWORD ignored=0;DeviceIoControl(file->value,FSCTL_SET_SPARSE,nullptr,0,nullptr,0,&ignored,nullptr);
+                const auto end=address(uint64_t(blocks)*2-1-(enhanced?2:0));LARGE_INTEGER length{};length.QuadPart=LONGLONG(i+1<count?max_file:end.second+2048-(mode==1?2048:0));Require(SetFilePointerEx(file->value,length,nullptr,FILE_BEGIN) && SetEndOfFile(file->value),"Cannot size private GOD fixture");files.push_back(std::move(file));}
             const auto write=[&](size_t part,uint64_t at,std::span<const uint8_t> data){LARGE_INTEGER offset{};offset.QuadPart=LONGLONG(at);DWORD written=0;Require(SetFilePointerEx(files.at(part)->value,offset,nullptr,FILE_BEGIN) && WriteFile(files.at(part)->value,data.data(),DWORD(data.size()),&written,nullptr) && written==data.size(),"Cannot write GOD fixture sector");};
             auto content=raw;if(split){const auto put=[&](size_t at,uint32_t n){for(unsigned i=0;i<4;++i)content[at+i]=uint8_t(n>>(i*8));};put(42*2048+4,uint32_t(per_file-3));put(42*2048+8,4096);}
             for(size_t b=0;b<content.size()/2048;++b){const auto [part,offset]=address(b);write(part,offset,std::span(content).subspan(b*2048,2048));}
             write(0,internal?0xd000:enhanced?0x2000:0x12000,std::span(raw).subspan(0x10000,2048));
             if(split){std::array<uint8_t,4096> payload{};for(size_t i=0;i<payload.size();++i)payload[i]=uint8_t(i*17+3);
                 for(unsigned b=0;b<2;++b){const auto [part,offset]=address(per_file-3+b);write(part,offset,std::span(payload).subspan(b*2048,2048));}}
+            BCRYPT_ALG_HANDLE sha_provider=nullptr;Require(BCryptOpenAlgorithmProvider(&sha_provider,BCRYPT_SHA1_ALGORITHM,nullptr,0)>=0,"Cannot initialize fixture SHA-1");
+            struct CloseSha{BCRYPT_ALG_HANDLE value;~CloseSha(){BCryptCloseAlgorithmProvider(value,0);}} close_sha{sha_provider};
+            const auto sha=[&](std::span<const uint8_t> data){std::array<uint8_t,20> hash{};Require(BCryptHash(sha_provider,nullptr,0,const_cast<PUCHAR>(data.data()),ULONG(data.size()),hash.data(),ULONG(hash.size()))>=0,"Cannot hash GOD fixture data");return hash;};
+            const auto read=[&](size_t part,uint64_t at,std::span<uint8_t> data){LARGE_INTEGER position{};position.QuadPart=LONGLONG(at);DWORD got=0;Require(SetFilePointerEx(files.at(part)->value,position,nullptr,FILE_BEGIN) && ReadFile(files.at(part)->value,data.data(),DWORD(data.size()),&got,nullptr) && got==data.size(),"Cannot read GOD fixture data");};
+            std::array<uint8_t,20> next_master{};
+            for(size_t part=count;part-->0;){std::array<uint8_t,4096> master{};if(part+1<count)std::copy(next_master.begin(),next_master.end(),master.begin()+203*20);
+                LARGE_INTEGER physical{};Require(GetFileSizeEx(files.at(part)->value,&physical),"Cannot size fixture hash tree");
+                for(size_t group=0;group<203;++group){const auto table_at=(internal?0xb000:0)+4096+uint64_t(group)*(4096+204*4096),data_at=table_at+4096;
+                    if(data_at>=uint64_t(physical.QuadPart))break;
+                    std::vector<uint8_t> data(size_t(std::min<uint64_t>(204*4096,uint64_t(physical.QuadPart)-data_at)));read(part,data_at,data);std::array<uint8_t,4096> table{};
+                    for(size_t at=0;at<data.size();at+=4096){const auto hash=sha(std::span(data).subspan(at,std::min<size_t>(4096,data.size()-at)));std::copy(hash.begin(),hash.end(),table.begin()+at/4096*20);}
+                    write(part,table_at,table);const auto hash=sha(table);std::copy(hash.begin(),hash.end(),master.begin()+group*20);
+                }
+                write(part,internal?0xb000:0,master);next_master=sha(master);
+            }
+            if(internal)write(0,0x37d,next_master);
+            else{std::fstream package(path,std::ios::binary|std::ios::in|std::ios::out);package.seekp(0x37d);package.write(reinterpret_cast<const char*>(next_master.data()),next_master.size());Require(bool(package),"Cannot seal fixture master hash");}
         };
         for(unsigned mode=0;mode<4;++mode){const auto package=root/("god"+std::to_string(mode))/"Package",output=root/("god-output"+std::to_string(mode));god_fixture(package,mode);
             Require(SvodImage::FindPackage(package.parent_path(),error)==package && error.empty(),"GOD folder did not resolve its extensionless package header");
@@ -455,6 +472,20 @@ bool TestDiscImageImport(const fs::path& root) {
             try{Image malformed(package);}catch(const Failure&){rejected=true;}Require(rejected,"GOD missing fragment accepted");fs::rename(folder/L"missing",folder/L"Data0000");}
         {const auto package=root/"god0/Package",duplicate=root/"god0/Duplicate";fs::copy_file(package,duplicate);
             Require(SvodImage::FindPackage(package.parent_path(),error).empty() && !error.empty(),"GOD folder silently chose between multiple packages");fs::remove(duplicate);}
+        const auto flip_byte=[&](const fs::path& path,uint64_t at){std::fstream file(path,std::ios::binary|std::ios::in|std::ios::out);file.seekg(std::streamoff(at));char byte=0;file.read(&byte,1);Require(bool(file),"Cannot read fixture corruption byte");byte^=1;file.seekp(std::streamoff(at));file.write(&byte,1);Require(bool(file),"Cannot write fixture corruption byte");};
+        for(const auto at:{uint64_t(0),uint64_t(0x1000),uint64_t(0x3000)}){
+            const auto package=root/"god0/Package",part=fs::path(package.wstring()+L".data")/L"Data0000";flip_byte(part,at);
+            Require(!ImportXbox360Disc(package,root/"corrupt-god-output",{},error) && !error.empty() && !fs::exists(root/"corrupt-god-output"),"Corrupt GOD hash/data reached extraction");flip_byte(part,at);
+        }
+        {const auto package=root/"god3/Package",part=fs::path(package.wstring()+L".data")/L"Data0001";flip_byte(part,0);bool rejected=false;
+            try{Image malformed(package);}catch(const Failure&){rejected=true;}Require(rejected,"Corrupt GOD second-fragment master chain accepted");flip_byte(part,0);}
+        {const auto package=root/"god3/Package",part=fs::path(package.wstring()+L".data")/L"Data0000";flip_byte(part,0xa290000-1);
+            {Image image(package);std::array<uint8_t,80> executable{};image.Read(44*2048,executable);bool rejected=false;
+                try{std::array<uint8_t,4096> corrupt{};image.Read(uint64_t(0x14388-3)*2048,corrupt);}catch(const Failure&){rejected=true;}Require(rejected,"Corrupt GOD final data group accepted");
+                image.Read(44*2048,executable);Require(std::equal(executable.begin(),executable.end(),raw.begin()+44*2048),"GOD checksum failure poisoned the verified group cache");}
+            Require(!ImportXbox360Disc(package,root/"late-corrupt-god-output",{},error) && !error.empty() && !fs::exists(root/"late-corrupt-god-output"),"Late GOD corruption created an extraction destination");
+            flip_byte(part,0xa290000-1);
+        }
         {const auto bad=root/"bad-index.cso";compressed_fixture(bad,1,0,false,false);std::fstream change(bad,std::ios::binary|std::ios::in|std::ios::out);change.seekp(24);const char zero[4]{};change.write(zero,4);change.close();
             bool rejected=false;try{Image malformed(bad);}catch(const Failure&){rejected=true;}Require(rejected,"Overlapping CSO header/index accepted");}
         for(const auto& bad:std::vector<std::vector<uint8_t>>{{0x10,'a',0,0},{0x10,'a',2,0},{0xf0,255,255},{0x10,'a',1}}){
@@ -463,7 +494,7 @@ bool TestDiscImageImport(const fs::path& root) {
         }
         std::ifstream stream(target/"packfiles"/"level.pak",std::ios::binary);Require(std::string(std::istreambuf_iterator<char>(stream),{})=="level-data","Extracted ISO contents differ.");
         Require(!fs::exists(root/"escape"),"Unsafe ISO path escaped extraction.");
-        REXLOG_INFO("Native disc importer passed: XDVDFS, CSO1/2, ZSO, single/split CCI, raw V5/DEFLATE V3 CHD, external/enhanced/internal GOD, hash-table and fragment-boundary reads, malformed/missing source rejection and verified extraction (synthetic images; retail container validation remains required)");return true;
+        REXLOG_INFO("Native disc importer passed: XDVDFS, CSO1/2, ZSO, CCI, raw V5/DEFLATE V3 CHD, GOD layouts and SHA-1 master/table/data/fragment-chain checks, partial blocks, cache recovery, corrupt-source rejection and verified extraction (synthetic images; retail container validation remains required)");return true;
     }catch(const std::exception& exception){REXLOG_ERROR("Disc image fixture: {}",exception.what());return false;}
 }
 }
