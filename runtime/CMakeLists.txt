@@ -425,6 +425,11 @@ if(EXISTS "${EM2_GENERATED}/../tests/instructions.cpp")
         --exe "$<TARGET_FILE:EM2Recomp>" --work "${CMAKE_CURRENT_BINARY_DIR}/zip-tests"
         --report "${CMAKE_CURRENT_BINARY_DIR}/zip-import-results.json")
     set_tests_properties(zip-content-import PROPERTIES TIMEOUT 300)
+    add_test(NAME split-iso-content-import COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/test-split-iso-import.py"
+        --exe "$<TARGET_FILE:EM2Recomp>" --work "${CMAKE_CURRENT_BINARY_DIR}/split-iso-tests"
+        --report "${CMAKE_CURRENT_BINARY_DIR}/split-iso-import-results.json")
+    set_tests_properties(split-iso-content-import PROPERTIES TIMEOUT 300)
 endif()
 target_sources(EM2Recomp PRIVATE renderer_storage.cpp)
 

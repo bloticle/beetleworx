@@ -52,11 +52,41 @@ struct Image {
         DWORD read=0;Require(bytes.size()<=MAXDWORD && ReadFile(file.value,bytes.data(),DWORD(bytes.size()),&read,nullptr) && read==bytes.size(),"Could not read disc image bytes");
     }
     uint64_t Position(size_t i)const{return uint64_t(index[i]&0x7FFFFFFF)<<shift;}
-    explicit Image(const fs::path& path,bool discover_parts=true,const DiscImportProgress& progress={}) {
+    explicit Image(const fs::path& path,bool discover_parts=true,const DiscImportProgress& progress={},bool raw_part=false) {
+        if(discover_parts){
+            // Support both Xbox-style name.1.iso and byte-split name.iso.0 /
+            // name.iso.001 sets. Leaf parts are raw bytes, never sniffed as containers.
+            auto ext=path.extension().wstring();for(auto& c:ext)if(c>=L'A' && c<=L'Z')c+=32;
+            const auto stem=path.stem().wstring();auto prefix=stem,suffix=path.extension().wstring(),number=std::wstring{};unsigned first=1,width=0;
+            if(ext==L".iso" || ext==L".xiso"){
+                const auto dot=stem.rfind(L'.');if(dot!=std::wstring::npos){number=stem.substr(dot+1);prefix=stem.substr(0,dot);}
+                if(number.empty() || number.size()>2 || number[0]==L'0')number.clear();
+            }else if(ext.size()>1){
+                const auto inner=path.stem().extension().wstring();
+                if(CompareStringOrdinal(inner.c_str(),-1,L".iso",-1,TRUE)==CSTR_EQUAL || CompareStringOrdinal(inner.c_str(),-1,L".xiso",-1,TRUE)==CSTR_EQUAL){
+                    number=ext.substr(1);suffix.clear();first=number.size()==3?1:0;width=number.size()==3?3:0;
+                    if(number.empty() || number.size()>3 || (number.size()==2 && number[0]==L'0'))number.clear();
+                }
+            }
+            if(!number.empty() && std::all_of(number.begin(),number.end(),[](wchar_t c){return c>=L'0' && c<=L'9';})){
+                const auto chosen=std::stoul(number);Require(chosen>=first && chosen<first+32,"Split ISO part number is outside the supported range");
+                auto sibling=[&](unsigned n){auto digits=std::to_wstring(n);if(width && digits.size()<width)digits.insert(0,width-digits.size(),L'0');return path.parent_path()/(prefix+L'.'+digits+suffix);};
+                Require(!fs::exists(sibling(first+32)),"Split ISO exceeds the 32-part limit");bool gap=false;
+                for(unsigned n=first;n<first+32;++n){
+                    const auto part_path=sibling(n);if(!fs::exists(part_path)){gap=true;continue;}
+                    Require(!gap,"Split ISO has a missing part; keep every numbered part in the same folder");
+                    auto part=std::make_unique<Image>(part_path,false,progress,true);
+                    Require(part->size<=16ull*1024*1024*1024-size,"Split ISO is too large");part_starts.push_back(size);size+=part->size;parts.push_back(std::move(part));
+                }
+                Require(parts.size()>chosen-first && size>=0x10800,"Split ISO is incomplete or too short");return;
+            }
+        }
         // Deny writers while validating, hashing and extracting this image.
         file.value=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
         LARGE_INTEGER length{};Require(file.value!=INVALID_HANDLE_VALUE && GetFileSizeEx(file.value,&length),"Could not open the disc image. Close any app writing it and try again.");
-        size=physical_size=uint64_t(length.QuadPart);Require(size>=24 && size<=16ull*1024*1024*1024,"Invalid Xbox disc image size");
+        size=physical_size=uint64_t(length.QuadPart);Require(size>0 && size<=16ull*1024*1024*1024,"Invalid Xbox disc image size");
+        if(raw_part)return;
+        Require(size>=24,"Invalid Xbox disc image size");
         std::array<uint8_t,24> header{};Physical(0,header);
         std::array<uint8_t,8> trailer{};Physical(physical_size-8,trailer);
         const auto archive_progress=[&](uint64_t done,uint64_t total){return !progress || progress(L"Verifying archive integrity",done,total);};
@@ -362,6 +392,23 @@ bool TestDiscImageImport(const fs::path& root) {
         const auto absent=root/"absent-reference";
         Require(!VerifyXbox360Disc(source,absent,error) && !fs::exists(absent),"Reference verification created a missing folder");
         std::ifstream raw_file(source,std::ios::binary);const std::vector<uint8_t> raw(std::istreambuf_iterator<char>(raw_file),{});
+        // Descriptor, executable and payload reads must work across arbitrary
+        // byte boundaries, including tiny final fragments and backward seeks.
+        for(unsigned scheme=0;scheme<3;++scheme){
+            const auto folder=root/("split-raw-"+std::to_string(scheme));fs::create_directories(folder);
+            auto part_name=[&](unsigned i){return folder/(scheme==0?"disc."+std::to_string(i+1)+".iso":scheme==1?"disc.iso."+std::to_string(i):"disc.iso.00"+std::to_string(i+1));};
+            const std::array<size_t,5> offsets={0,0x10005,44*2048+39,raw.size()-7,raw.size()};
+            for(unsigned i=0;i<4;++i){std::ofstream out(part_name(i),std::ios::binary);out.write(reinterpret_cast<const char*>(raw.data()+offsets[i]),offsets[i+1]-offsets[i]);}
+            Image split(part_name(2));std::vector<uint8_t> decoded(raw.size());split.Read(0,decoded);Require(decoded==raw,"Split ISO changed logical bytes");
+            std::array<uint8_t,37> crossing{};split.Read(0x10000,crossing);Require(std::equal(crossing.begin(),crossing.end(),raw.begin()+0x10000),"Split ISO backward/cross-part read failed");
+            Require(ImportXbox360Disc(part_name(3),target,{},error) && VerifyXbox360Disc(part_name(1),target,error),"Equivalent split ISO import/resume failed");
+            // Release the read-only handles before mutating a fixture.
+            split.parts.clear();fs::rename(part_name(1),folder/"missing-part");bool rejected=false;
+            try{Image missing(part_name(2));}catch(const Failure&){rejected=true;}Require(rejected,"Missing split ISO part was accepted");
+            fs::rename(folder/"missing-part",part_name(1));
+            {std::ofstream empty(part_name(3),std::ios::binary|std::ios::trunc);}rejected=false;
+            try{Image empty(part_name(0));}catch(const Failure&){rejected=true;}Require(rejected,"Empty split ISO part was accepted");
+        }
         auto compressed_fixture=[&](const fs::path& path,unsigned version,unsigned shift,bool zso,bool lz4){
             constexpr size_t block=4096;const auto count=(raw.size()+block-1)/block;
             std::vector<uint8_t> cso(24+(count+1)*4,0);

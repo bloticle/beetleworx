@@ -12,6 +12,24 @@ recognizes containers by their contents. Raw images named `.xiso`, `.img` or
 `.bin` work through the same XDVDFS parser. Choosing `default.xex` inside a
 complete extracted folder selects that folder.
 
+Development setup also accepts raw split Xbox images named `name.1.iso`,
+`name.2.iso`, ...; `name.iso.0`, `name.iso.1`, ...; or `name.iso.001`,
+`name.iso.002`, ... (and the equivalent `.xiso` names). Select any part and
+keep all parts together. Reads cross part boundaries directly without creating
+an intermediate ISO. Parts remain locked against writes while open, the set is
+limited to 32 parts and 16 GiB total, and missing middle/first parts or empty
+parts are rejected. The combined bytes use the same filesystem, title and
+executable validation as a single ISO. A missing final part is detected only
+when it truncates required filesystem data; these formats have no part-count
+manifest. Split-container formats use their own reader; these raw split naming
+rules do not concatenate compressed containers. Native setup regressions and
+31 independently generated split/import cases pass, covering both extensions,
+all three conventions, selection of first and two-digit final parts, exact
+extracted bytes, ISO-equivalent resume identity, and missing/empty parts.
+Full retail-sized split sets still need validation. Run
+`ctest -R split-iso-content-import` in the runtime build directory.
+These additions are not in demo.3.
+
 CCI supports both single files and numbered `name.1.cci`, `name.2.cci`, ...
 parts. Select any numbered part and keep the complete set together. The reader
 opens parts read-only and joins their logical sectors; no temporary ISO is
