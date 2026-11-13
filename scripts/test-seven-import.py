@@ -85,6 +85,9 @@ def run(name, path, good=True, iso=False, resume=None, identity_source=None, ext
         expected = {k: v for k, v in content.items() if not iso or k != "empty.bin"}
         for relative, data in expected.items():
             assert (destination / relative).read_bytes() == data, (name, relative)
+        actual = {p.relative_to(destination).as_posix() for p in destination.rglob("*")
+                  if p.is_file() and ".em2-iso-import" not in p.relative_to(destination).parts}
+        assert actual == set(expected), (name, actual, set(expected))
         identity = hashlib.sha256(hashlib.sha256((identity_source or path).read_bytes()).digest()).hexdigest()
         assert (destination / ".em2-iso-import/identity.txt").read_text() == identity + "\n", name
     else:
@@ -96,8 +99,26 @@ def run(name, path, good=True, iso=False, resume=None, identity_source=None, ext
 
 
 
-def make(path, *, method=None, prefix="", iso=False, encoded=True, password=None, special=None, append=False, header_encryption=False, directories=False):
-    values = {"Disc.iso": make_iso()} if iso else dict(content)
+def make(path, *, method=None, prefix="", iso=False, encoded=True, password=None, special=None, append=False, header_encryption=False, directories=False, layout=None, disc_name="Disc.iso"):
+    values = {disc_name: make_iso()} if iso else dict(content)
+    if layout in ["sidecars", "two-images", "wrong-title"]:
+        assert iso
+        values = {"README.nfo": b"Companion metadata before the image", **values,
+                  "Disc.dvd": b"LayerBreak=2133520\r\nDisc.iso\r\n",
+              "SS.bin": bytes(2048), "DMI.bin": bytes(2048), "PFI.bin": bytes(2048)}
+        if layout == "two-images":
+            values["Other.ISO"] = values[disc_name]
+        if layout == "wrong-title":
+            invalid = bytearray(values[disc_name])
+            struct.pack_into(">I", invalid, 44 * 2048 + 60, 0x12345678)
+            values[disc_name] = invalid
+    if layout in ["game-folder-and-image", "two-game-folders"]:
+        assert not iso and not prefix
+        values = {"Game/" + name: data for name, data in content.items()}
+        if layout == "game-folder-and-image":
+            values["Other.iso"] = b"A sibling image does not override a complete game folder"
+        else:
+            values.update({"Other/" + name: data for name, data in content.items()})
     if special == "traversal": values["safe-escape"] = b"bad"
     if special == "duplicate": values["CONFIGFILES.INI"] = b"config"
     if append:
@@ -139,6 +160,19 @@ try:
     ]
     for name, options in cases:
         run(name, make(root / (name + ".7z"), **options), iso=options.get("iso", False))
+    for disc_ext in ["iso", "XISO", "img", "bin"]:
+        name = "image-with-sidecars-" + disc_ext
+        run(name, make(root / (name + ".7z"), iso=True, layout="sidecars", disc_name="Disc." + disc_ext), iso=True)
+    run("folder-before-image", make(root / "folder-before-image.7z", layout="game-folder-and-image"))
+    run("ambiguous-images", make(root / "ambiguous-images.7z", iso=True, layout="two-images"), False)
+    run("ambiguous-folders", make(root / "ambiguous-folders.7z", layout="two-game-folders"), False)
+    run("wrong-title-with-sidecars", make(root / "wrong-title-with-sidecars.7z", iso=True, layout="wrong-title"), False)
+    run("unsafe-sidecar", make(root / "unsafe-sidecar.7z", iso=True, layout="sidecars", special="traversal"), False)
+    companion = make(root / "corrupt-unused-sidecar.7z", iso=True, layout="sidecars", method=[{"id": py7zr.FILTER_COPY}])
+    broken = bytearray(companion.read_bytes())
+    broken[33] ^= 1
+    companion.write_bytes(broken)
+    run("corrupt-unused-sidecar", companion, False)
     run("resume-solid", root / "lzma2-solid.7z", resume="lzma2-solid")
     unavailable_temp = root / "missing-temp"
     fallback_env = {"TMP": str(unavailable_temp), "TEMP": str(unavailable_temp)}

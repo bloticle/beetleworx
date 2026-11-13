@@ -43,7 +43,7 @@ class Streaming(io.BytesIO):
 
 
 def make(path, *, method=zipfile.ZIP_DEFLATED, prefix="", wide=False,
-         streaming=False, iso=False, comment=b"", special=None, directories=False, prelude=False):
+         streaming=False, iso=False, comment=b"", special=None, directories=False, prelude=False, layout=None, disc_name="Disc.iso"):
     sink = Streaming() if streaming else io.BytesIO()
     if prelude:
         sink.write(b"Private archive prelude\0" * 256)
@@ -55,7 +55,25 @@ def make(path, *, method=zipfile.ZIP_DEFLATED, prefix="", wide=False,
             archive.comment = comment
             if directories:
                 archive.writestr(prefix + "packfiles/", b"")
-            values = {"Disc.iso": make_iso()} if iso else dict(content)
+            values = {disc_name: make_iso()} if iso else dict(content)
+            if layout in ["sidecars", "two-images", "wrong-title"]:
+                assert iso
+                values = {"README.nfo": b"Companion metadata before the image", **values,
+                          "Disc.dvd": b"LayerBreak=2133520\r\nDisc.iso\r\n",
+                      "SS.bin": bytes(2048), "DMI.bin": bytes(2048), "PFI.bin": bytes(2048)}
+                if layout == "two-images":
+                    values["Other.ISO"] = values[disc_name]
+                if layout == "wrong-title":
+                    invalid = bytearray(values[disc_name])
+                    struct.pack_into(">I", invalid, 44 * 2048 + 60, 0x12345678)
+                    values[disc_name] = invalid
+            if layout in ["game-folder-and-image", "two-game-folders"]:
+                assert not iso and not prefix
+                values = {"Game/" + name: data for name, data in content.items()}
+                if layout == "game-folder-and-image":
+                    values["Other.iso"] = b"A sibling image does not override a complete game folder"
+                else:
+                    values.update({"Other/" + name: data for name, data in content.items()})
             if special == "traversal": values["../escape"] = b"bad"
             if special == "duplicate": values["CONFIGFILES.INI"] = b"config"
             for name, data in values.items():
@@ -118,6 +136,9 @@ def run(name, path, good=True, iso=False, resume=None):
         expected = {k: v for k, v in content.items() if not iso or k != "empty.bin"}
         for relative, data in expected.items():
             assert (destination / relative).read_bytes() == data, (name, relative)
+        actual = {p.relative_to(destination).as_posix() for p in destination.rglob("*")
+                  if p.is_file() and ".em2-iso-import" not in p.relative_to(destination).parts}
+        assert actual == set(expected), (name, actual, set(expected))
         identity = hashlib.sha256(hashlib.sha256(path.read_bytes()).digest()).hexdigest()
         assert (destination / ".em2-iso-import/identity.txt").read_text() == identity + "\n", name
     else:
@@ -145,6 +166,22 @@ try:
     ]
     for name, options in positives:
         run(name, make(root / (name + ".zip"), **options), iso=options.get("iso", False))
+    for disc_ext in ["iso", "XISO", "img", "bin"]:
+        name = "image-with-sidecars-" + disc_ext
+        run(name, make(root / (name + ".zip"), iso=True, layout="sidecars", disc_name="Disc." + disc_ext), iso=True)
+    run("folder-before-image", make(root / "folder-before-image.zip", layout="game-folder-and-image"))
+    run("ambiguous-images", make(root / "ambiguous-images.zip", iso=True, layout="two-images"), False)
+    run("ambiguous-folders", make(root / "ambiguous-folders.zip", layout="two-game-folders"), False)
+    run("wrong-title-with-sidecars", make(root / "wrong-title-with-sidecars.zip", iso=True, layout="wrong-title"), False)
+    run("unsafe-sidecar", make(root / "unsafe-sidecar.zip", iso=True, layout="sidecars", special="traversal"), False)
+    companion = make(root / "corrupt-unused-sidecar.zip", iso=True, layout="sidecars", method=zipfile.ZIP_STORED)
+    broken = bytearray(companion.read_bytes())
+    with zipfile.ZipFile(companion) as archive:
+        offset = archive.infolist()[0].header_offset
+    start = offset + 30 + sum(struct.unpack_from("<HH", broken, offset + 26))
+    broken[start] ^= 1
+    companion.write_bytes(broken)
+    run("corrupt-unused-sidecar", companion, False)
     run("resume-deflate", root / "deflate.zip", resume="deflate")
     run("misnamed-extension", make(root / "zip-with-zar-extension.zar"))
     run("seven-extension", make(root / "zip-with-seven-extension.7z"))

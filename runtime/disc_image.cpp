@@ -53,9 +53,7 @@ struct Image {
         DWORD read=0;Require(bytes.size()<=MAXDWORD && ReadFile(file.value,bytes.data(),DWORD(bytes.size()),&read,nullptr) && read==bytes.size(),"Could not read disc image bytes");
     }
     uint64_t Position(size_t i)const{return uint64_t(index[i]&0x7FFFFFFF)<<shift;}
-    void InitArchive(){size=archive->Size();archive_tree=true;const ArchiveFile* single=nullptr;size_t count=0;for(const auto& entry:archive->Files())if(!entry.directory){single=&entry;++count;}
-            if(count==1){auto extension=fs::path(single->path).extension().wstring();if(CompareStringOrdinal(extension.c_str(),-1,L".iso",-1,TRUE)==CSTR_EQUAL || CompareStringOrdinal(extension.c_str(),-1,L".xiso",-1,TRUE)==CSTR_EQUAL || CompareStringOrdinal(extension.c_str(),-1,L".img",-1,TRUE)==CSTR_EQUAL || CompareStringOrdinal(extension.c_str(),-1,L".bin",-1,TRUE)==CSTR_EQUAL){archive_tree=false;archive_base=single->offset;size=single->size;}}
-    }
+    void InitArchive(){size=archive->Size();archive_tree=true;}
     explicit Image(const fs::path& path,bool discover_parts=true,const DiscImportProgress& progress={},bool raw_part=false) {
         if(discover_parts && SevenImage::IsSplitPath(path)){
             std::string error;archive=SevenImage::Open(path,error,[&](uint64_t done,uint64_t total){return !progress || progress(L"Verifying multipart 7z archive",done,total);});Require(bool(archive),error.c_str());InitArchive();return;
@@ -216,14 +214,25 @@ struct DiscPlan {uint64_t partition=0,total=0;std::vector<DiscFile> files;};
 DiscPlan Plan(Image& image) {
     DiscPlan plan;std::array<uint8_t,2048> descriptor{};bool found=false;
     if(image.archive && image.archive_tree){
-        const auto& entries=image.archive->Files();std::set<std::string> names;for(const auto& entry:entries)names.insert(Lower(entry.path));
+        const auto& entries=image.archive->Files();std::set<std::string> files,folders;for(const auto& entry:entries)(entry.directory?folders:files).insert(Lower(entry.path));
         std::vector<std::string> roots;
-        for(const auto& entry:entries)if(!entry.directory){const auto path=Lower(entry.path);const auto slash=path.rfind('/');const auto base=slash==std::string::npos?std::string{}:path.substr(0,slash+1);if(path.substr(base.size())=="default.xex" && names.contains(base+"configfiles.ini") && names.contains(base+"packfiles"))roots.push_back(base);}
-        Require(roots.size()==1,"Archive must contain one EM2 game folder, or one raw ISO file");
-        for(const auto& entry:entries)if(Lower(entry.path).starts_with(roots[0]) && entry.path.size()>roots[0].size()){
+        for(const auto& entry:entries)if(!entry.directory){const auto path=Lower(entry.path);const auto slash=path.rfind('/');const auto base=slash==std::string::npos?std::string{}:path.substr(0,slash+1);if(path.substr(base.size())=="default.xex" && files.contains(base+"configfiles.ini") && folders.contains(base+"packfiles"))roots.push_back(base);}
+        Require(roots.size()<=1,"Archive contains more than one EM2 game folder; choose one game folder at a time");
+        if(roots.empty()){
+            const ArchiveFile* disc=nullptr;
+            for(const auto& entry:entries)if(!entry.directory){const auto extension=Lower(fs::path(entry.path).extension().string());
+                if(entry.size>=0x10800 && (extension==".iso" || extension==".xiso" || extension==".img" || extension==".bin")){
+                    Require(!disc,"Archive contains more than one disc image; choose an archive containing one game image");disc=&entry;
+                }
+            }
+            Require(disc,"Archive must contain one EM2 game folder or an ISO/XISO/IMG/BIN image");
+            image.archive_tree=false;image.archive_base=disc->offset;image.size=disc->size;
+        }
+        else for(const auto& entry:entries)if(Lower(entry.path).starts_with(roots[0]) && entry.path.size()>roots[0].size()){
             const auto relative=entry.path.substr(roots[0].size());size_t at=0;while(at<relative.size()){auto end=relative.find('/',at);if(end==std::string::npos)end=relative.size();Require(Component(relative.substr(at,end-at)),"Unsafe filename in archived Xbox game");at=end+1;}
             plan.files.push_back({entry.path.substr(roots[0].size()),entry.offset,entry.size,entry.directory});if(!entry.directory){plan.total+=entry.size;Require(plan.total<=image.size*2,"Archived game has an excessive expanded data size");}}
-    }else{
+    }
+    if(!image.archive || !image.archive_tree){
     if(image.svod){descriptor=image.svod->Descriptor();found=true;}
     else for(const auto base:partitions)if(image.Contains(base+0x10000,descriptor.size())) {
         image.Read(base+0x10000,descriptor);
@@ -569,7 +578,7 @@ bool TestDiscImageImport(const fs::path& root) {
             flip_byte(part,0xa290000-1);
         }
         const auto zar_fixture=[&](const fs::path& path,unsigned mode,int invalid){
-            const bool iso=mode==2,wrapped=mode==1;std::vector<uint8_t> logical(2*65536,0);
+            const bool iso=mode>=2,wrapped=mode==1;std::vector<uint8_t> logical(2*65536,0);
             if(iso){std::copy(raw.begin(),raw.end(),logical.begin()+37);std::copy_n("PK\x03\x04",4,logical.begin());}
             else{std::copy_n(raw.begin()+44*2048,80,logical.begin());std::copy_n("config",6,logical.begin()+80);}
             std::vector<uint8_t> archive(logical.begin(),logical.begin()+65536);
@@ -579,7 +588,7 @@ bool TestDiscImageImport(const fs::path& root) {
             const auto be=[&](size_t at,uint64_t n,unsigned bytes){for(unsigned i=0;i<bytes;++i)archive[at+i]=uint8_t(n>>(8*(bytes-1-i)));};be(record_at,0,8);be(record_at+8,65535,2);be(record_at+10,iso?65535:19,2);
             const auto names_at=archive.size();const auto name=[&](std::string_view value){const auto at=archive.size()-names_at;if(value.size()>=128){archive.push_back(uint8_t(value.size()&127)|128);archive.push_back(uint8_t(value.size()>>7));}else archive.push_back(uint8_t(value.size()));archive.insert(archive.end(),value.begin(),value.end());return uint32_t(at);};
             const auto empty=name("");std::vector<std::array<uint32_t,4>> nodes;
-            if(iso){const auto disc=name("Disc.iso");nodes={{{empty,1,1,0}},{{0x80000000u|disc,37,uint32_t(raw.size()),0}}};}
+            if(iso){const auto disc=name("Disc.iso");nodes={{{empty,1,1,0}},{{0x80000000u|disc,37,uint32_t(raw.size()),0}}};if(mode==3){nodes[0][2]=2;const auto note=name("README.nfo");nodes.push_back({0x80000000u|note,0,37,0});}}
             else{const auto folder=wrapped?name("EM2"):0,exe=name("default.xex"),config=name("ConfigFiles.ini"),packs=name("packfiles"),aux=name(invalid==1?"../escape":invalid==3?"CONFIGFILES.INI":std::string(130,'a')),pak=name("level.pak");
                 nodes.push_back({empty,wrapped?1u:1u,wrapped?1u:4u,0});if(wrapped)nodes.push_back({folder,2,4,0});
                 nodes.push_back({0x80000000u|exe,0,80,0});nodes.push_back({0x80000000u|config,80,6,0});nodes.push_back({packs,wrapped?6u:5u,1,0});nodes.push_back({0x80000000u|aux,0,0,0});nodes.push_back({0x80000000u|pak,86,65546,0});
@@ -592,9 +601,9 @@ bool TestDiscImageImport(const fs::path& root) {
             const auto digit=[](char c){return c<='9'?c-'0':c-'a'+10;};for(size_t i=0;i<32;++i)archive[footer+96+i]=uint8_t(digit(hash[i*2])*16+digit(hash[i*2+1]));
             std::ofstream out(path,std::ios::binary);out.write(reinterpret_cast<const char*>(archive.data()),archive.size());
         };
-        for(unsigned mode=0;mode<3;++mode){const auto path=root/("archive"+std::to_string(mode)+".zar"),output=root/("zar-output"+std::to_string(mode));zar_fixture(path,mode,0);
+        for(unsigned mode=0;mode<4;++mode){const auto path=root/("archive"+std::to_string(mode)+".zar"),output=root/("zar-output"+std::to_string(mode));zar_fixture(path,mode,0);
             Require(ImportXbox360Disc(path,output,{},error) && ImportXbox360Disc(path,output,{},error) && VerifyXbox360Disc(path,output,error),"ZArchive import, resume or verification failed");
-            if(mode==2)Require(VerifyXbox360Disc(path,target,error),"ZArchive-wrapped ISO differs from its extracted reference");
+            if(mode>=2)Require(VerifyXbox360Disc(path,target,error),"ZArchive-wrapped ISO differs from its extracted reference");
             else{Image image(path);std::array<uint8_t,80> exe{};image.Read(0,exe);Require(std::equal(exe.begin(),exe.end(),raw.begin()+44*2048),"ZArchive raw-block bytes differ");std::vector<uint8_t> zeroes(65546);image.Read(86,zeroes);Require(std::all_of(zeroes.begin(),zeroes.end(),[](uint8_t b){return b==0;}),"ZArchive compressed/cross-block bytes differ");}
         }
         for(int invalid:{1,2,3,4,5}){const auto path=root/("invalid-archive"+std::to_string(invalid)+".zar");zar_fixture(path,0,invalid);

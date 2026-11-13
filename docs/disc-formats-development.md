@@ -12,6 +12,21 @@ recognizes containers by their contents. Raw images named `.xiso`, `.img` or
 `.bin` work through the same XDVDFS parser. Choosing `default.xex` inside a
 complete extracted folder selects that folder.
 
+For ZIP, 7z and ZArchive, setup first looks for one extracted-game layout:
+`default.xex` and `ConfigFiles.ini` files beside a `packfiles` directory. When
+none is present, it selects one potential raw `.iso`, `.xiso`, `.img` or `.bin`
+image of at least `0x10800` bytes (the minimum Xbox filesystem-header extent).
+NFO/README files, `.dvd` descriptors and small `.bin` companions can stay in
+the archive; they are not extracted when setup uses the contained image.
+Two potential images or multiple game-folder layouts produce an explicit
+ambiguity error. A recognized game-folder layout retains priority over a
+sibling image. Archive integrity/path checks still cover unused companion
+files, and the selected image must pass the normal filesystem and EM2 title
+checks. Independent ZIP and 7z tests cover all four image extensions, nonzero
+image offsets, small SS/DMI/PFI-style companions, game-folder priority,
+ambiguity, wrong-game rejection, corrupt unused metadata and exact output-file
+sets. The native ZArchive fixture also covers an ISO beside an NFO file.
+
 Development setup also accepts raw split Xbox images named `name.1.iso`,
 `name.2.iso`, ...; `name.iso.0`, `name.iso.1`, ...; or `name.iso.001`,
 `name.iso.002`, ... (and the equivalent `.xiso` names). Select any part and
@@ -125,7 +140,7 @@ can affect timing. The new path removes one complete 8.61 GB archive read.
 The full read-only comparison also passed after the change. This does not
 establish a complete setup/gameplay run from that archive or compatibility
 with every ZIP producer/build. Run `ctest -R zip-content-import` in the runtime
-build directory for the 27 independent fixture cases. This is not in demo.3.
+build directory for the 37 independent fixture cases. This is not in demo.3.
 
 Development setup also reads single-file and numbered multipart 7z archives
 through pinned
@@ -170,7 +185,7 @@ deletion after comparison were observed. This verifies real-data COPY decoding,
 large volume/cache offsets and low-space fallback. It does not establish a
 full setup/gameplay run or retail-sized LZMA/LZMA2 validation.
 
-The 41-case independent fixture suite covers solid and multiple-block decoding, the
+The 51-case independent fixture suite covers solid and multiple-block decoding, the
 three enabled codecs and BCJ, plain/encoded headers, Unicode wrappers, contained
 ISOs, resume/source preservation, corrupt CRCs/truncation, unsafe/duplicate/link
 entries, encryption rejection, oversized dictionaries, cancellation during
