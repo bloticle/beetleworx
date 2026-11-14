@@ -2,6 +2,7 @@
 #include "online_internet_relay.h"
 #include "online_room.h"
 #include "online_gameover_input.h"
+#include "online_cutscene_input.h"
 #include "online_checkpoint.h"
 #include "online_room_load.h"
 #include <rex/logging.h>
@@ -25,7 +26,7 @@ namespace {
 using Clock=std::chrono::steady_clock;
 using Bytes=std::vector<uint8_t>;
 constexpr size_t Window=64,MaxPacket=8192,MaxQueued=256*1024;
-constexpr uint8_t WireVersion=7;
+constexpr uint8_t WireVersion=8;
 constexpr auto Timeout=std::chrono::seconds(15);
 constexpr auto StartupTimeout=std::chrono::seconds(180);
 constexpr auto TransferTimeout=std::chrono::seconds(120);
@@ -98,7 +99,7 @@ bool ValidCommandTick(const RoomCommand& c,uint64_t tick,unsigned delay){
 RoomCommand Neutral(){RoomCommand c;c.actor_epoch=1;c.source=RoomMovementSource::NativeActionV1;return c;}
 void WriteCommand(Bytes& b,const RoomCommand& c){
     for(float n:{c.x,c.y,c.forward_x,c.forward_z})U64(b,std::bit_cast<uint32_t>(n),4);
-    U64(b,c.actor_epoch);U8(b,uint8_t(c.source));
+    U64(b,c.actor_epoch);U64(b,c.input_epoch);U8(b,uint8_t(c.source));
     const auto& p=c.pad;U64(b,p.buttons,2);U8(b,p.left_trigger);U8(b,p.right_trigger);
     for(auto n:{p.left_x,p.left_y,p.right_x,p.right_y})U64(b,uint16_t(n),2);
     U64(b,c.jump_button_mask,2);U8(b,c.jump_count);
@@ -111,7 +112,7 @@ void WriteCommand(Bytes& b,const RoomCommand& c){
 RoomCommand ReadCommand(Reader& r){
     RoomCommand c;c.x=std::bit_cast<float>(uint32_t(r.Number(4)));c.y=std::bit_cast<float>(uint32_t(r.Number(4)));
     c.forward_x=std::bit_cast<float>(uint32_t(r.Number(4)));c.forward_z=std::bit_cast<float>(uint32_t(r.Number(4)));
-    c.actor_epoch=r.Number(8);c.source=RoomMovementSource(r.Byte());
+    c.actor_epoch=r.Number(8);c.input_epoch=r.Number(8);c.source=RoomMovementSource(r.Byte());
     auto& p=c.pad;p.buttons=uint16_t(r.Number(2));p.left_trigger=r.Byte();p.right_trigger=r.Byte();
     for(auto* n:{&p.left_x,&p.left_y,&p.right_x,&p.right_y})*n=std::bit_cast<int16_t>(uint16_t(r.Number(2)));
     c.jump_button_mask=uint16_t(r.Number(2));c.jump_count=r.Byte();
@@ -1006,7 +1007,7 @@ RoomHistoryResult Room::ReadGameplayHistory(const RoomHistoryScope& scope,uint64
 RoomHistoryResult Room::FingerprintGameplayHistory(const RoomHistoryScope& scope,uint64_t first,uint64_t last,std::string& out)const{
     std::vector<RoomHistoryEntry> records;const auto result=ReadGameplayHistory(scope,first,last,records);if(result!=RoomHistoryResult::Ready)return result;
     // Versioned canonical bytes, never native struct padding or guest pointers.
-    Bytes bytes{'B','W','H','1'};WriteIdentity(bytes,scope.identity);bytes.insert(bytes.end(),scope.world.begin(),scope.world.end());
+    Bytes bytes{'B','W','H','2'};WriteIdentity(bytes,scope.identity);bytes.insert(bytes.end(),scope.world.begin(),scope.world.end());
     U64(bytes,scope.roster_revision);U64(bytes,scope.first_tick);U64(bytes,scope.players_mask,2);U64(bytes,first);U64(bytes,last);
     for(const auto& record:records){U64(bytes,record.frame.tick);U64(bytes,record.frame.players_mask,2);
         for(unsigned i=0;i<16;++i)if(record.frame.players_mask&(1u<<i))WriteCommand(bytes,record.frame.players[i]);
@@ -1329,7 +1330,21 @@ bool TestOnlineRoom(){
             expected.players[i].button_actions.fired[31]==255 && expected.players[i].button_actions.fired[32]==0,"V3 schema, delayed source tick and full bitmap preserve each peer's identity");
         for(unsigned i=1;i<16;++i){RoomFrame actual;check(rooms[i]->TakeFrame(actual) && actual==expected,"maximum native button/Jump payload remains bit-exact across all sixteen peers");}
         check(complete_fixture_tick(tick),"full receive window drains only through per-tick completion barriers");}
-    const auto terminal_tick=111+Window;const auto terminal=NativeGameOverCommand();
+    const auto suspend_tick=111+Window;
+    for(auto& room:rooms)check(room->SubmitLocal(suspend_tick,NativeCutsceneCommand(2)),"sixteen TCP peers submit explicit suspended input epoch");
+    check(pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& r){RoomFrame f;return r->PeekFrame(f);});}),"suspended epoch reaches every peer");
+    RoomFrame suspend_frame;suspend_frame.tick=suspend_tick;suspend_frame.players_mask=0xFFFF;
+    for(auto& c:suspend_frame.players)c=NativeCutsceneCommand(2);
+    for(auto& room:rooms){RoomFrame actual;check(room->TakeFrame(actual) && actual==suspend_frame,"suspension keeps actor incarnation and exact independent input epoch across all peers");}
+    check(complete_fixture_tick(suspend_tick),"suspension retains real world-proof barrier in transport fixture");
+    const auto resume_tick=suspend_tick+1;RoomFrame resume_frame;resume_frame.tick=resume_tick;resume_frame.players_mask=0xFFFF;
+    for(unsigned i=0;i<16;++i){auto& c=resume_frame.players[i];c.actor_epoch=1;c.input_epoch=3;c.source=RoomMovementSource::NativeActionV3;c.jump_button_mask=0x1000;
+        c.button_actions.schema[0]=uint8_t(i+1);c.button_actions.source_tick=resume_tick-id.input_delay;
+        check(rooms[i]->SubmitLocal(resume_tick,c),"new input epoch resumes fresh V3 schemas without a new actor incarnation");}
+    check(pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& r){RoomFrame f;return r->PeekFrame(f);});}),"resumed input epoch reaches every peer");
+    for(auto& room:rooms){RoomFrame actual;check(room->TakeFrame(actual) && actual==resume_frame,"resumed epoch and source clocks echo bit-exactly across sixteen TCP peers");}
+    check(complete_fixture_tick(resume_tick),"resumed input epoch retains actual fixture completion consensus");
+    const auto terminal_tick=resume_tick+1;const auto terminal=NativeGameOverCommand(3);
     for(auto& room:rooms)check(room->SubmitLocal(terminal_tick,terminal),"sixteen peers submit explicit terminal native no-action commands");
     check(pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& r){RoomFrame frame;return r->PeekFrame(frame);});}),"terminal command reaches every TCP peer");
     RoomFrame terminal_frame;terminal_frame.tick=terminal_tick;terminal_frame.players_mask=0xFFFF;
@@ -1729,9 +1744,9 @@ bool TestOnlineRoom(){
     {
         auto command=native_jump(1,RoomJumpEdge::Pressed);command.jump_count=2;command.jump_events[1]={2,RoomJumpEdge::Released};
         Bytes encoded;WriteCommand(encoded,command);Reader decoded{encoded};
-        Bytes legacy(58,0);legacy[12]=0x3f;legacy[13]=0x80;legacy[23]=1;legacy[24]=2;legacy[37]=0x10;legacy[39]=2;
-        legacy[47]=1;legacy[48]=1;legacy[56]=2;legacy[57]=2;
-        check(encoded==legacy,"legacy V2 command retains exact pre-extension golden wire bytes");
+        Bytes golden(66,0);golden[12]=0x3f;golden[13]=0x80;golden[23]=1;golden[31]=1;golden[32]=2;golden[45]=0x10;golden[47]=2;
+        golden[55]=1;golden[56]=1;golden[64]=2;golden[65]=2;
+        check(encoded==golden,"protocol8 V2 golden bytes keep actor and independent input epoch explicit");
         check(ReadCommand(decoded)==command && decoded.Done(),"V2 native edge payload round trips without native addresses");
         for(size_t length=0;length<encoded.size();++length){Reader truncated{std::span(encoded).first(length)};ReadCommand(truncated);
             check(!truncated.Done(),"every truncated native edge payload rejects");}
@@ -1743,7 +1758,7 @@ bool TestOnlineRoom(){
         command.button_actions.schema[0]=0x61;command.button_actions.source_tick=source_tick;command.button_actions.fired[63]=128;return command;};
     {
         auto command=native_buttons();Bytes encoded;WriteCommand(encoded,command);Reader decoded{encoded};
-        check(encoded.size()==144 && ReadCommand(decoded)==command && decoded.Done(),"V3 fixed bitmap adds exactly104 bytes without pointers or float output loss");
+        check(encoded.size()==152 && ReadCommand(decoded)==command && decoded.Done(),"V3 fixed bitmap adds exactly104 bytes without pointers or float output loss");
         for(size_t length=0;length<encoded.size();++length){Reader truncated{std::span(encoded).first(length)};ReadCommand(truncated);
             check(!truncated.Done(),"every truncated V3 schema/tick/bitmap payload rejects");}
         RoomJumpStream state;check(AdvanceRoomJumpStream(state,command),"first V3 frame establishes schema and source timeline");

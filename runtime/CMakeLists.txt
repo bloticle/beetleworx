@@ -534,7 +534,7 @@ target_sources(EM2Recomp PRIVATE online_room_gameplay.cpp online_retail_input.cp
 
 target_sources(EM2Recomp PRIVATE online_behavior_trace.cpp)
 target_sources(EM2Recomp PRIVATE native_turn_rate_defaults.cpp)
-target_sources(EM2Recomp PRIVATE online_input_clock.cpp online_gameover_input.cpp)
+target_sources(EM2Recomp PRIVATE online_input_clock.cpp online_gameover_input.cpp online_cutscene_input.cpp)
 target_sources(EM2Recomp PRIVATE online_native_triggers.cpp)
 target_sources(EM2Recomp PRIVATE native_launch_defaults.cpp)
 target_sources(EM2Recomp PRIVATE native_character_physics.cpp)

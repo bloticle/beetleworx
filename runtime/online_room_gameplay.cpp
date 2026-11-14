@@ -1,5 +1,7 @@
 #include "online_room_gameplay.h"
 #include "online_gameover_input.h"
+#include "online_cutscene_input.h"
+#include "online_actor_jump.h"
 #include "online_room_bootstrap.h"
 #include "online_room_runtime.h"
 #include "online_native_menu.h"
@@ -138,6 +140,28 @@ struct NativeRoomGameplay::Impl {
     bool history_probe_done=false;
     bool native_buttons=false,button_delivery_enabled=false;
     std::optional<uint64_t> native_completed;
+    uint64_t input_epoch=1;
+    std::optional<uint32_t> normal_control_mode;
+    std::string normal_context_name;
+    bool return_pending=false;
+    std::optional<uint64_t> return_wait_start;
+    std::optional<uint64_t> cutscene_entry,cutscene_resume;
+    std::array<std::array<uint8_t,32>,kOnlineRoomCapacity> cutscene_schemas{};
+    bool prepared_passive=false,consumed_passive=false;
+    bool CutsceneFrame(const RoomFrame& frame,PPCContext& ctx,uint8_t* base)const{
+        if(cutscene_entry){
+            bool phase=ReadNativeCutsceneContext(ctx,base,registry);
+            if(!phase && return_pending && normal_control_mode){NativeGameOverState state;uint32_t mode=0;
+                phase=ReadNativeControlState(ctx,base,state,mode) && state.registry==registry && mode==*normal_control_mode;}
+            return phase && ValidNativeCutsceneFrame(frame,roster_mask,*cutscene_entry,identity.input_delay,input_epoch,cutscene_schemas,native_buttons);
+        }
+        if(cutscene_resume && frame.tick>*cutscene_resume && *cutscene_resume<=UINT64_MAX-identity.input_delay &&
+           frame.tick<=*cutscene_resume+identity.input_delay){
+            NativeGameOverState state;uint32_t mode=0;
+            return normal_control_mode && ReadNativeControlState(ctx,base,state,mode) && state.registry==registry &&
+                mode==*normal_control_mode && NativeCutsceneReturnPrefix(frame,roster_mask,input_epoch-1);
+        }return false;
+    }
     // Frozen for the rest of this native world. Only its original load and a
     // new bootstrap may re-arm gameplay sources after terminal GameOver.
     std::optional<uint64_t> game_over_entry;
@@ -149,7 +173,7 @@ struct NativeRoomGameplay::Impl {
     }
     bool GameOverFrame(const RoomFrame& frame,PPCContext& ctx,uint8_t* base)const{
         return GameOver(ctx,base) && ValidNativeGameOverFrame(frame,roster_mask,
-            *game_over_entry,identity.input_delay,game_over_schemas,native_buttons);
+            *game_over_entry,identity.input_delay,game_over_schemas,native_buttons,input_epoch);
     }
     bool native_unwind=false;
     std::optional<uint64_t> first_game_tick;
@@ -439,6 +463,7 @@ bool NativeRoomGameplay::Readiness(PPCContext& ctx,uint8_t* base){
             if(slot==s.slot)s.movement=binding;
         }
     }
+    if(s.normal_context_name.empty() && !ReadNativeInputContextName(base,s.normal_context_name))return s.Retry("Original gameplay input-context name is not available");
     if(!DiscoverNativeLocalJumpBinding(s.movement,ctx,base,s.jump))return s.Retry("Local native Jump bindings are not admitted");
     if(!ArmNativeLocalSource(*s.room,s.physical,s.movement,ctx,base))return s.Retry("Local hardware source route is not admitted");
     // Only the final unanimous raw round determines the first gameplay tick.
@@ -460,6 +485,60 @@ bool NativeRoomGameplay::Readiness(PPCContext& ctx,uint8_t* base){
             s.peer,s.physical,s.movement.user,s.load,frame.tick+1);
         s.ready_logged=true;
     }
+    return true;
+}
+bool NativeRoomGameplay::RearmInputContext(uint64_t tick,PPCContext& ctx,uint8_t* base){
+    auto& s=*impl_;const auto old_epoch=s.input_epoch-1;
+    const char* step="owner boundary";bool finished=false;
+    struct Diagnostic {const char*& step;bool& finished;uint64_t tick;~Diagnostic(){if(!finished)REXLOG_ERROR("Native cutscene rearm rejected: source tick {} stage '{}'",tick,step);}} diagnostic{step,finished,tick};
+    if(!s.Owner() || !s.cutscene_entry || !s.native_completed || *s.native_completed!=tick-1 ||
+       s.input_epoch==UINT64_MAX || !RefreshOwnedActorTaskPermissions(ctx,base))return false;
+    const auto next_epoch=s.input_epoch+1;
+    // No native update or physical poll can interleave this owner-thread
+    // transition. Quarantine stays armed while old capabilities are retired.
+    DisarmRetailButtonDelivery();DisarmRetailJump();DisarmNativeLocalSource();DisarmNativeLocalJump();DisarmNativeLocalMovement();
+    step="retail context generation";if(!BeginRetailContextRearm(old_epoch,next_epoch,tick,ctx,base))return false;
+    s.button_delivery_enabled=false;s.movement={};s.jump={};s.button_binding={};
+    s.button_source=std::make_unique<NativeTriggerSource>();
+    for(auto& receiver:s.button_receivers)receiver.reset();
+    for(unsigned pass=0;pass<2;++pass){
+        const auto slot=pass?s.slot:1-s.slot;NativeLocalMovementBinding binding;bool found=false;
+        for(unsigned user=0;user<4;++user){DisarmNativeLocalMovement();
+            if(ArmNativeLocalMovement(s.world,s.registry,base,user,slot) && DiscoverNativeLocalMovementBinding(ctx,base,binding)){found=true;break;}}
+        step=slot?"Oswald movement discovery":"Mickey movement discovery";
+        if(!found || binding.entity!=s.label_entities[slot] || binding.handle!=s.label_handles[slot])return false;
+        s.dispatch[slot]={binding.event,binding.action,0,0};
+        if(s.native_buttons){
+            NativeTriggerBinding definitions;step=slot?"Oswald button definitions":"Mickey button definitions";
+            if(!DiscoverNativeTriggerBinding(binding,ctx,base,definitions,NativeButtonScope::DigitalAndTriggers))return false;
+            auto receiver=std::make_unique<RetailButtonReceiver>();
+            if(!ArmRetailButtons(*receiver,slot,definitions,ctx,base))return false;
+            const auto schema=HashNativeButtonSchema(definitions);if(!schema)return false;
+            s.button_schemas[slot]=*schema;s.button_definitions[slot]=definitions;s.button_receivers[slot]=std::move(receiver);
+            if(slot==s.slot)s.button_binding=definitions;
+        }
+        if(slot==s.slot)s.movement=binding;
+    }
+    step="retail Jump receiver";if(!ArmRetailJump(ctx,base))return false;
+    step="local Jump definitions";if(!DiscoverNativeLocalJumpBinding(s.movement,ctx,base,s.jump))return false;
+    step="local source route";if(!ArmNativeLocalSource(*s.room,s.physical,s.movement,ctx,base))return false;
+    step="local Jump source baseline";if(!ArmNativeLocalJump(s.jump,next_epoch,tick,ctx,base))return false;
+    if(s.native_buttons){
+        step="local button source and delivery";
+        if(!ArmNativeTriggers(*s.button_source,s.button_binding,next_epoch,tick,ctx,base) ||
+           !EnableRetailButtonDelivery({s.button_receivers[0].get(),s.button_receivers[1].get()},ctx,base))return false;
+        s.button_delivery_enabled=true;
+    }
+    step="finish retail context";if(!FinishRetailContextRearm(s.native_buttons,ctx,base) || tick>UINT64_MAX-s.identity.input_delay)return false;
+    const auto first=tick+s.identity.input_delay;
+    step="owned Jump stream epochs";for(const auto& actor:s.actors->actors())if(!RearmOwnedActorJumpInput(actor.actor.peer,actor.actor.generation,old_epoch,next_epoch,first,ctx,base))return false;
+    auto frames=std::make_unique<OwnedMovementFrames>();std::array<uint64_t,kOnlineRoomCapacity> epochs{};
+    for(const auto& player:s.roster.players)epochs[player.peer-1]=1;
+    step="owned frame coordinator";if(!frames->Configure(s.roster_mask,3,epochs,first,s.registry,ValidateRetailMovementFrame,next_epoch) || !s.actors->BindFrames(*frames,ctx,base))return false;
+    if(s.native_buttons)for(const auto& actor:s.actors->actors())
+        if(!frames->BindButtons(actor.room_peer,s.button_definitions[actor.actor.action_user],ctx,base))return false;
+    finished=true;s.actor_frames=std::move(frames);s.input_epoch=next_epoch;s.cutscene_resume=*s.native_completed;s.cutscene_entry.reset();s.return_pending=false;s.return_wait_start.reset();
+    REXLOG_INFO("Native Room cutscene bindings re-admitted: source tick {}, first delivery {}, input epoch {}; actor/world/controls incarnation retained, fresh producer/receiver leases",tick,first,next_epoch);
     return true;
 }
 RoomGameplayAdmission NativeRoomGameplay::Prepare(PPCContext& ctx,uint8_t* base,RoomFrame& output){
@@ -492,7 +571,7 @@ RoomGameplayAdmission NativeRoomGameplay::Prepare(PPCContext& ctx,uint8_t* base,
         const auto tick=s.room->next_tick();
         if(!s.submitted){
             if(tick>UINT64_MAX-s.identity.input_delay || s.room->next_submit_tick()!=tick+s.identity.input_delay ||
-               !s.room->SubmitLocal(s.room->next_submit_tick(),NativeGameOverCommand())){
+               !s.room->SubmitLocal(s.room->next_submit_tick(),NativeGameOverCommand(s.input_epoch))){
                 s.Stop("Native GameOver no-action command submission failed");return RoomGameplayAdmission::Stopped;}
             s.submitted=tick;
         }
@@ -502,6 +581,47 @@ RoomGameplayAdmission NativeRoomGameplay::Prepare(PPCContext& ctx,uint8_t* base,
             s.Stop("Native GameOver authoritative frame failed phase admission");return RoomGameplayAdmission::Stopped;}
         s.prepared=frame;output=frame;gameplay_waiting.store(false,std::memory_order_release);return RoomGameplayAdmission::Ready;
     }
+    NativeGameOverState control;uint32_t mode=0;
+    if(!ReadNativeControlState(ctx,base,control,mode) || control.registry!=s.registry){s.Stop("Native input control-state query lost world ownership");return RoomGameplayAdmission::Stopped;}
+    if(mode==3 && !s.cutscene_entry){
+        if(!s.started || !s.native_completed || !s.normal_control_mode || s.input_epoch==UINT64_MAX ||
+           !(s.input_epoch&1) || !ReadNativeCutsceneContext(ctx,base,s.registry)){
+            s.Stop("Native cutscene entry lacks a completed owned input epoch");return RoomGameplayAdmission::Stopped;}
+        for(const auto& player:s.roster.players)s.cutscene_schemas[player.peer-1]=s.button_schemas[player.character==LobbyCharacter::Mickey?0:1];
+        s.cutscene_entry=*s.native_completed;s.cutscene_resume.reset();++s.input_epoch;
+        REXLOG_INFO("Native Room cutscene input suspended: entry tick {}, input epoch {}; original state 3 and native cutscene restriction, actor incarnations unchanged",*s.cutscene_entry,s.input_epoch);
+    }
+    if(s.cutscene_entry && mode!=3){
+        if(!s.normal_control_mode || mode!=*s.normal_control_mode){
+            s.Stop("Native cutscene returned to an unowned control mode");return RoomGameplayAdmission::Stopped;}
+        std::string selected;
+        if(!ReadNativeInputContextName(base,selected) || selected!=s.normal_context_name){
+            if(!s.return_wait_start){s.return_wait_start=s.room->next_tick();
+                REXLOG_INFO("Native Room cutscene return awaiting selector: source tick {}, expected context '{}'; native mode restored, gameplay source remains retired",*s.return_wait_start,s.normal_context_name);}
+            if(s.room->next_tick()-*s.return_wait_start>=120){s.Stop("Native cutscene gameplay selector did not settle within 120 real native updates");return RoomGameplayAdmission::Stopped;}
+            s.return_pending=true;
+        }else if(!RearmInputContext(s.room->next_tick(),ctx,base)){
+            s.Stop("Native cutscene return could not re-admit fresh input bindings");return RoomGameplayAdmission::Stopped;}
+    }else if(s.cutscene_entry){s.return_pending=false;s.return_wait_start.reset();}
+    if(s.cutscene_entry){
+        if((!ReadNativeCutsceneContext(ctx,base,s.registry) && !s.return_pending) || !RefreshOwnedActorTaskPermissions(ctx,base)){
+            s.Stop("Native cutscene context or authored permissions changed before suspension frame");return RoomGameplayAdmission::Stopped;}
+        if(s.prepared){output=*s.prepared;return RoomGameplayAdmission::Ready;}
+        const auto tick=s.room->next_tick();
+        if(!s.submitted){Pad discarded;
+            if(tick>UINT64_MAX-s.identity.input_delay || s.room->next_submit_tick()!=tick+s.identity.input_delay ||
+               !em2::SampleLocalControls(*s.input,s.physical,tick,discarded) ||
+               !s.room->SubmitLocal(s.room->next_submit_tick(),NativeCutsceneCommand(s.input_epoch))){
+                s.Stop("Native cutscene source could not poll its owned device and submit no-action epoch");return RoomGameplayAdmission::Stopped;}
+            s.submitted=tick;
+        }
+        if(*s.submitted!=tick){s.Stop("Native cutscene source crossed native ticks");return RoomGameplayAdmission::Stopped;}
+        RoomFrame frame;if(!s.room->PeekFrame(frame))return RoomGameplayAdmission::Waiting;
+        if(frame.tick!=tick || !s.CutsceneFrame(frame,ctx,base)){
+            s.Stop("Native cutscene authoritative frame failed input-epoch admission");return RoomGameplayAdmission::Stopped;}
+        s.prepared=frame;s.prepared_passive=true;output=frame;gameplay_waiting.store(false,std::memory_order_release);return RoomGameplayAdmission::Ready;
+    }
+    s.normal_control_mode=mode;
     if(!RefreshOwnedActorTaskPermissions(ctx,base)){s.Stop("Could not refresh authored extra-human ability policy");return RoomGameplayAdmission::Stopped;}
     if(s.prepared){output=*s.prepared;return RoomGameplayAdmission::Ready;}
     const auto tick=s.room->next_tick();
@@ -554,17 +674,17 @@ RoomGameplayAdmission NativeRoomGameplay::Prepare(PPCContext& ctx,uint8_t* base,
         NativeRoutedPadSample sample;RoomMovement command;NativeLocalJumpEvents edges;
         if(!SampleNativeLocalSource(*s.room,*s.input,tick,ctx,base,sample) ||
             !ProduceNativeLocalRoomMovement(*s.room,s.movement,sample,1,ctx,base,command) ||
-            !ProduceNativeLocalJump(*s.room,s.jump,sample,1,ctx,base,edges)){
+            !ProduceNativeLocalJump(*s.room,s.jump,sample,s.input_epoch,ctx,base,edges)){
             s.Stop("The live local source could not produce original native Movement/Jump");return RoomGameplayAdmission::Stopped;
         }
-        command.source=RoomMovementSource::NativeActionV2;command.jump_button_mask=edges.button_mask;
+        command.input_epoch=s.input_epoch;command.source=RoomMovementSource::NativeActionV2;command.jump_button_mask=edges.button_mask;
         command.jump_count=edges.count;command.jump_events=edges.events;
         if(s.peer>2 && !s.actors->ViewBasis(s.peer,ctx,base,command.forward_x,command.forward_z)){
             s.Stop("Local extra-human native camera reference is unavailable");return RoomGameplayAdmission::Stopped;
         }
         bool local_valid=false;
         if(s.native_buttons){NativeTriggerBatch buttons;std::vector<NativeActorAction> mapped;
-            if(!ProduceNativeTriggers(*s.room,*s.button_source,s.button_binding,sample,1,ctx,base,buttons) ||
+            if(!ProduceNativeTriggers(*s.room,*s.button_source,s.button_binding,sample,s.input_epoch,ctx,base,buttons) ||
                !EncodeNativeButtonActions(s.button_binding,buttons,command.button_actions)){
                 s.Stop("The sealed local sample could not produce native button decisions");return RoomGameplayAdmission::Stopped;}
             command.source=RoomMovementSource::NativeActionV3;
@@ -580,6 +700,11 @@ RoomGameplayAdmission NativeRoomGameplay::Prepare(PPCContext& ctx,uint8_t* base,
     }
     if(*s.submitted!=tick){s.Stop("A cached physical sample crossed native ticks");return RoomGameplayAdmission::Stopped;}
     RoomFrame frame;if(!s.room->PeekFrame(frame))return RoomGameplayAdmission::Waiting;
+    if(s.cutscene_resume && tick<=*s.cutscene_resume+s.identity.input_delay){
+        if(frame.tick!=tick || !s.CutsceneFrame(frame,ctx,base)){
+            s.Stop("Native cutscene return delayed prefix changed before gameplay re-admission");return RoomGameplayAdmission::Stopped;}
+        s.prepared=frame;s.prepared_passive=true;output=frame;gameplay_waiting.store(false,std::memory_order_release);return RoomGameplayAdmission::Ready;
+    }
     if(frame.tick!=tick || frame.players_mask!=s.roster_mask ||
         !s.actor_frames || s.actor_frames->Preflight(frame,ctx,base)!=OwnedFrameResult::Ready ||
         !s.ButtonFrame(frame,ctx,base) || !s.Actions(frame,ctx,base)){
@@ -590,20 +715,21 @@ RoomGameplayAdmission NativeRoomGameplay::Prepare(PPCContext& ctx,uint8_t* base,
 bool NativeRoomGameplay::Commit(const RoomFrame& frame,PPCContext& ctx,uint8_t* base){
     Environment environment;Context context(ctx);auto& s=*impl_;Impl::FaultOnThrow fault{s};
     if(!s.Owner() || s.stopped || s.pending || !s.prepared || frame!=*s.prepared)return false;
-    if(!s.Canonical() || !s.World(base) || (s.game_over_entry?!s.GameOverFrame(frame,ctx,base):
+    if(!s.Canonical() || !s.World(base) || (s.game_over_entry?!s.GameOverFrame(frame,ctx,base):s.prepared_passive?!s.CutsceneFrame(frame,ctx,base):
         (!s.actor_frames || s.actor_frames->Preflight(frame,ctx,base)!=OwnedFrameResult::Ready ||
         !s.ButtonFrame(frame,ctx,base) || !s.Actions(frame,ctx,base))))return s.Stop("Native retail admission changed before frame consumption");
     RoomFrame actual;
     if(!s.room->PeekFrame(actual) || actual!=frame || !s.room->TakeFrame(actual) || actual!=frame)return s.Stop("The authoritative gameplay frame changed before consumption");
     Frame retail;retail.tick=frame.tick;
     // Keep delayed commands in history without routing them to dead actors.
-    if(!s.game_over_entry){retail.players[0]=frame.players[0].pad;retail.players[1]=frame.players[1].pad;}
+    if(!s.game_over_entry && !s.prepared_passive){retail.players[0]=frame.players[0].pad;retail.players[1]=frame.players[1].pad;}
     uint64_t generation=0;Frame published;
     if(em2::SynchronizedControlsGeneration()!=s.controls || !em2::PublishSynchronizedControls(retail) ||
         !em2::ReadPublishedSynchronizedControls(generation,published) || generation!=s.controls || published!=retail)
         return s.Stop("Could not publish the authoritative retail gameplay controls");
     if(!s.started)REXLOG_INFO("Native Room gameplay first frame consumed: tick {}, delay {}, physical source {}, native slot {}; native update and world verification still required",
         frame.tick,s.identity.input_delay,s.physical,s.slot);
+    s.consumed_passive=s.prepared_passive;s.prepared_passive=false;
     s.committed=frame.tick;s.consumed=frame;s.pending=true;s.delivered=false;s.started=true;s.prepared.reset();s.submitted.reset();return true;
 }
 bool NativeRoomGameplay::Deliver(PPCContext& ctx,uint8_t* base){
@@ -611,8 +737,8 @@ bool NativeRoomGameplay::Deliver(PPCContext& ctx,uint8_t* base){
     if(!s.Owner() || s.stopped || !s.pending || s.delivered || !s.consumed ||
         !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed)return false;
     if(const auto reason=s.WorldFailure(base))return s.Stop(std::string("Native world changed before input delivery: ")+reason);
-    if(s.game_over_entry){
-        if(!s.GameOverFrame(*s.consumed,ctx,base))return s.Stop("Native GameOver phase changed before native update");
+    if(s.game_over_entry || s.consumed_passive){
+        if(s.game_over_entry?!s.GameOverFrame(*s.consumed,ctx,base):!s.CutsceneFrame(*s.consumed,ctx,base))return s.Stop("Native no-gameplay input phase changed before native update");
         if(!BeginRetailPassiveTick(s.registry,tick,ctx,base))return s.Stop("Could not retain retail quarantine for native GameOver");
         s.delivered=true;return true; // No gameplay callbacks are promised.
     }
@@ -648,7 +774,7 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
     if(!s.Owner() || s.stopped || !s.pending || !s.delivered || !s.consumed ||
         !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed)return false;
     if(const auto failure=s.WorldFailure(base))return s.Stop(std::string("Native gameplay completion rejected: ")+failure);
-    if(s.game_over_entry){
+    if(s.game_over_entry || s.consumed_passive){
         if(!FinishRetailPassiveTick(tick,ctx,base))return s.Stop("Native GameOver passive quarantine completion failed");
     }else{
         const auto finished=s.consumed->players[0].source==RoomMovementSource::NativeActionV3?
@@ -661,6 +787,7 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
     }
     if(s.game_over_entry && (tick==*s.game_over_entry+1 || tick%30==0))
         REXLOG_INFO("Native Room GameOver native update completed: tick {}; original world update and real digest, no gameplay callbacks dispatched",tick);
+    if(s.consumed_passive && tick%60==0)REXLOG_INFO("Native Room cutscene passive update completed: tick {}, input epoch {}; real native update/digest and retained quarantine, no gameplay input dispatch",tick,s.input_epoch);
     ObservePrivateRoomActors(tick,s.actors->actors(),base);
     ObservePrivateExtraDamage(tick,ctx,base);
     // The original post-update and phase-specific completion succeeded.

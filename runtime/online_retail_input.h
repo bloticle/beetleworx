@@ -9,6 +9,7 @@ struct RetailActorInput {
     unsigned slot=0;
     uint32_t registry=0,manager=0,handle=0,entity=0,controller=0,listener=0,motion=0,reference=0;
     std::array<uint32_t,4> entity_guid{},reference_guid{};
+    uint64_t input_epoch=1;
     bool operator==(const RetailActorInput&)const=default;
 };
 bool ArmRetailInput(uint64_t world_epoch,uint32_t registry,uint64_t controls_generation,
@@ -16,6 +17,10 @@ bool ArmRetailInput(uint64_t world_epoch,uint32_t registry,uint64_t controls_gen
 // Only before the first gameplay Begin; requires the owning bootstrap's actual
 // just-completed published raw frame. Does not reset input, RNG or actor state.
 bool RebaseRetailInputFirstTick(uint64_t next_tick,PPCContext&,uint8_t*);
+// Atomic owner-thread re-admission after an independently validated native
+// cutscene return. Keeps quarantine; actor incarnation and controls are pinned.
+bool BeginRetailContextRearm(uint64_t old_input_epoch,uint64_t new_input_epoch,uint64_t source_tick,PPCContext&,uint8_t*);
+bool FinishRetailContextRearm(bool native_buttons,PPCContext&,uint8_t*);
 void DisarmRetailInput();
 bool RetailActorInputFor(unsigned,PPCContext&,uint8_t*,RetailActorInput&);
 // Retained gameplay ownership across completed/waiting/faulted tick gaps.

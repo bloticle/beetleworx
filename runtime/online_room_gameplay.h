@@ -60,6 +60,7 @@ public:
     std::optional<uint64_t> last_native_completed_tick()const;
     const std::string& error()const;
 private:
+    bool RearmInputContext(uint64_t source_tick,PPCContext&,uint8_t*);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

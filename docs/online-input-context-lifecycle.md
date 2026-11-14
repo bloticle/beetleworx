@@ -154,3 +154,14 @@ receivers also retain sequence and held state per actor generation: resetting
 only a producer or coordinator would violate that stream. Rearming must cover
 that state as well as retail capabilities and button schemas; it cannot be
 implemented by restoring old definition bytes or bypassing stale checks.
+
+
+## Input-epoch return implemented
+
+The follow-up [native cutscene input-epoch lifecycle](online-cutscene-input-epochs.md)
+now passes the isolated original restriction/return fixture for both extra
+character profiles. It uses separate input and actor epochs, explicit passive
+frames, fresh native bindings and delayed return cutover in the same world.
+The failed captures above remain rejected. Interactive cinematic UI/skip input,
+arbitrary story directors and complete campaigns remain outside those passing
+captures; the no-gameplay phase does not route those UI decisions yet.

@@ -36,7 +36,7 @@ struct Context {PPCContext& ctx;std::array<uint8_t,sizeof(PPCContext)> saved;Env
     explicit Context(PPCContext& value):ctx(value){std::memcpy(saved.data(),&ctx,sizeof(ctx));}
     ~Context(){std::memcpy(&ctx,saved.data(),sizeof(ctx));}};
 struct Targets {Actor actor;uint32_t task=0,motion=0,physics=0,gravity=0,animation=0;};
-struct EdgeState {Targets targets;uint64_t sequence=0,tick=0;bool held=false,failed=false;};
+struct EdgeState {Targets targets;uint64_t sequence=0,tick=0;bool held=false,failed=false;uint64_t input_epoch=1;};
 std::array<EdgeState,16> states{};
 std::mutex state_mutex;
 DWORD owner_thread=0;
@@ -111,14 +111,14 @@ Result TargetsFor(uint64_t peer,const Command& command,PPCContext& ctx,uint8_t* 
 }
 Result EdgeAgainst(const EdgeState* prior,const Targets& targets,const Command& command){
     const bool same=prior && prior->targets.actor.generation==targets.actor.generation;
-    if(!command.sequence)return Result::InvalidTick;
+    if(!command.sequence || !command.input_epoch)return Result::InvalidTick;
     if(same){
         if(!Identity(prior->targets,targets))return Result::Stale;
-        if(prior->failed)return Result::InvalidContext;
+        if(prior->failed || command.input_epoch!=prior->input_epoch)return Result::InvalidContext;
         if(prior->sequence==UINT64_MAX || command.sequence!=prior->sequence+1 || command.tick<prior->tick)return Result::InvalidTick;
         if((command.edge==Edge::Pressed)==prior->held)return Result::InvalidInput;
     }else{
-        if(command.sequence!=1)return Result::InvalidTick;
+        if(command.input_epoch!=1 || command.sequence!=1)return Result::InvalidTick;
         if(command.edge!=Edge::Pressed)return Result::InvalidInput;
     }
     return Result::Applied;
@@ -160,7 +160,7 @@ Result em2::net::ValidateOwnedActorJumpBatch(uint64_t peer,std::span<const Comma
         Targets targets;auto result=TargetsFor(peer,command,ctx,base,targets);
         if(result!=Result::Applied)return result;
         result=EdgeAgainst(prior?&*prior:nullptr,targets,command);if(result!=Result::Applied)return result;
-        prior=EdgeState{targets,command.sequence,command.tick,command.edge==Edge::Pressed,false};
+        prior=EdgeState{targets,command.sequence,command.tick,command.edge==Edge::Pressed,false,command.input_epoch};
     }
     return Result::Applied;
 }
@@ -188,7 +188,7 @@ Result em2::net::ReplayOwnedActorJump(uint64_t peer,const Command& command,PPCCo
     try{result=detail::DispatchOwnedActorJump(peer,command,ctx,base);}
     catch(...){
         std::lock_guard lock(state_mutex);auto slot=StateSlot(peer);
-        if(slot!=states.end())*slot={targets,command.sequence,command.tick,command.edge==Edge::Pressed,true};
+        if(slot!=states.end())*slot={targets,command.sequence,command.tick,command.edge==Edge::Pressed,true,command.input_epoch};
         owner_thread=GetCurrentThreadId();throw;
     }
     if(result!=Result::Applied)return result;
@@ -199,7 +199,19 @@ Result em2::net::ReplayOwnedActorJump(uint64_t peer,const Command& command,PPCCo
     }
     std::lock_guard lock(state_mutex);auto slot=StateSlot(peer);
     if(slot==states.end())return Result::InvalidContext;
-    *slot={targets,command.sequence,command.tick,command.edge==Edge::Pressed,false};owner_thread=GetCurrentThreadId();return Result::Applied;
+    *slot={targets,command.sequence,command.tick,command.edge==Edge::Pressed,false,command.input_epoch};owner_thread=GetCurrentThreadId();return Result::Applied;
+}
+bool em2::net::RearmOwnedActorJumpInput(uint64_t peer,uint64_t generation,uint64_t old_epoch,uint64_t next_epoch,uint64_t first,PPCContext& ctx,uint8_t* base){
+    Context preserve(ctx);
+    if(!first || old_epoch>UINT64_MAX-2 || next_epoch!=old_epoch+2 || !(next_epoch&1))return false;
+    Actor actor;if(!OwnedActorInputFor(peer,ctx,base,actor) || actor.generation!=generation || !actor.enabled)return false;
+    Command probe{generation,first,1,Edge::Pressed,{0,0x833DAEBCu+actor.action_user*12,1,0},next_epoch};Targets targets;
+    if(TargetsFor(peer,probe,ctx,base,targets)!=Result::Applied)return false;
+    std::lock_guard lock(state_mutex);auto slot=StateSlot(peer);if(slot==states.end())return false;
+    const bool same=slot->targets.actor.peer==peer && slot->targets.actor.generation==generation;
+    if(same){if(slot->failed || slot->input_epoch!=old_epoch || first<=slot->tick)return false;}
+    else if(old_epoch!=1)return false;
+    *slot={targets,0,first-1,false,false,next_epoch};owner_thread=GetCurrentThreadId();return true;
 }
 bool em2::net::ReadNativeJumpTaskFlags(uint32_t entity,uint8_t* base,uint32_t& flags){
     Environment preserve;em2::GuestReadBatch reads;

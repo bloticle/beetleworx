@@ -39,7 +39,7 @@ std::array<NativeActorJump,kMaxRoomJumpEvents> JumpCommands(uint64_t generation,
     std::array<NativeActorJump,kMaxRoomJumpEvents> commands{};
     for(unsigned i=0;i<movement.jump_count;++i){const auto& event=movement.jump_events[i];
         const bool down=event.edge==RoomJumpEdge::Pressed;
-        commands[i]={generation,tick,event.sequence,down?OwnedJumpEdge::Pressed:OwnedJumpEdge::Released,{0,(down?0x833DAEBCu:0x833DAEC0u)+user*12,1,0}};
+        commands[i]={generation,tick,event.sequence,down?OwnedJumpEdge::Pressed:OwnedJumpEdge::Released,{0,(down?0x833DAEBCu:0x833DAEC0u)+user*12,1,0},movement.input_epoch};
     }
     return commands;
 }
@@ -59,10 +59,11 @@ bool detail::OwnedButtonDispatchAuthorized(uint64_t peer,uint64_t generation,uin
     return button_permit && button_permit->peer==peer && button_permit->generation==generation && button_permit->tick==tick &&
         button_permit->action.event==action.event && button_permit->action.action==action.action && button_permit->action.x==action.x && button_permit->action.y==action.y;
 }
-bool OwnedMovementFrames::Configure(uint16_t roster,uint16_t retail,const std::array<uint64_t,kOnlineRoomCapacity>& epochs,uint64_t first,uint32_t registry,RetailAdmission admission){
-    if(configured_ || !registry || !(roster&1) || (retail&~uint16_t(3)) || (retail&~roster))return false;
+bool OwnedMovementFrames::Configure(uint16_t roster,uint16_t retail,const std::array<uint64_t,kOnlineRoomCapacity>& epochs,uint64_t first,uint32_t registry,RetailAdmission admission,uint64_t input_epoch){
+    if(configured_ || !input_epoch || !registry || !(roster&1) || (retail&~uint16_t(3)) || (retail&~roster))return false;
     for(unsigned i=0;i<kOnlineRoomCapacity;++i)if(bool(roster&(1u<<i))!=(epochs[i]!=0))return false;
     roster_=roster;retail_=retail;epochs_=epochs;next_tick_=first;registry_=registry;
+    input_epoch_=input_epoch;
     owner_thread_=GetCurrentThreadId();retail_admission_=admission;configured_=true;return true;
 }
 bool OwnedMovementFrames::Bind(uint8_t peer,uint64_t native_peer,PPCContext& ctx,uint8_t* base){
@@ -96,9 +97,9 @@ OwnedFrameResult OwnedMovementFrames::Preflight(const RoomFrame& frame,PPCContex
     for(unsigned i=0;i<kOnlineRoomCapacity;++i){
         const auto& movement=frame.players[i];
         if(!(roster_&(1u<<i))){if(movement!=RoomMovement{})return OwnedFrameResult::InvalidRoster;continue;}
-        if(movement.actor_epoch!=epochs_[i])return OwnedFrameResult::EpochMismatch;
+        if(movement.actor_epoch!=epochs_[i] || movement.input_epoch!=input_epoch_)return OwnedFrameResult::EpochMismatch;
         if(!ValidRoomMovement(movement))return OwnedFrameResult::InvalidMovement;
-        if(movement.source==RoomMovementSource::NativeGameOverV4)return OwnedFrameResult::UnsupportedIntent;
+        if(movement.source==RoomMovementSource::NativeGameOverV4 || movement.source==RoomMovementSource::NativeCutsceneV5)return OwnedFrameResult::UnsupportedIntent;
         if(retail_&(1u<<i)){
             // Interpreted edges require a live native retail receiver, not a
             // boolean promise that some other code will consume them later.

@@ -18,7 +18,7 @@ struct Preserve {
     ~Preserve(){if(stack)std::memcpy(stack,bytes.data(),bytes.size());ctx=saved;_mm_setcsr(fp);SetLastError(error);}
 };
 }
-bool ReadNativeGameOverState(PPCContext& ctx,uint8_t* base,NativeGameOverState& output){
+bool ReadNativeControlState(PPCContext& ctx,uint8_t* base,NativeGameOverState& output,uint32_t& mode){
     Preserve preserve(ctx,base);if(!preserve.stack || !Readable(base,0x833DAD98,4) || !Readable(base,0x833DA7E4,4) || !Readable(base,0x833E36CC,4))return false;
     const auto profile=PPC_LOAD_U32(0x833DAD98),registry=PPC_LOAD_U32(0x833DA7E4),dead=PPC_LOAD_U32(0x833E36CC);
     if(!registry || dead>kOnlineRoomCapacity || !Readable(base,profile,16))return false;
@@ -26,22 +26,23 @@ bool ReadNativeGameOverState(PPCContext& ctx,uint8_t* base,NativeGameOverState& 
     const auto method=PPC_LOAD_U32(table+20);
     if((method&3) || method<PPC_CODE_BASE || uint64_t(method)>=uint64_t(PPC_CODE_BASE)+PPC_CODE_SIZE || !PPC_LOOKUP_FUNC(base,method))return false;
     ctx.r3.u64=profile;__imp__sub_82770F00(ctx,base);
-    if(ctx.r3.u32!=7 || PPC_LOAD_U32(0x833DAD98)!=profile || PPC_LOAD_U32(0x833DA7E4)!=registry || PPC_LOAD_U32(0x833E36CC)!=dead)return false;
-    output={registry,dead};return true;
+    if(PPC_LOAD_U32(0x833DAD98)!=profile || PPC_LOAD_U32(0x833DA7E4)!=registry || PPC_LOAD_U32(0x833E36CC)!=dead)return false;
+    output={registry,dead};mode=ctx.r3.u32;return true;
 }
-RoomMovement NativeGameOverCommand(){RoomMovement result;result.actor_epoch=1;result.source=RoomMovementSource::NativeGameOverV4;return result;}
+bool ReadNativeGameOverState(PPCContext& ctx,uint8_t* base,NativeGameOverState& out){uint32_t mode=0;return ReadNativeControlState(ctx,base,out,mode) && mode==7;}
+RoomMovement NativeGameOverCommand(uint64_t input_epoch){RoomMovement result;result.actor_epoch=1;result.input_epoch=input_epoch;result.source=RoomMovementSource::NativeGameOverV4;return result;}
 bool ValidNativeGameOverFrame(const RoomFrame& frame,uint16_t roster,uint64_t entry,uint8_t delay,
-    const std::array<std::array<uint8_t,32>,kOnlineRoomCapacity>& schemas,bool buttons){
+    const std::array<std::array<uint8_t,32>,kOnlineRoomCapacity>& schemas,bool buttons,uint64_t input_epoch){
     if(!roster || frame.players_mask!=roster || entry>UINT64_MAX-delay || frame.tick<=entry || frame.tick==UINT64_MAX)return false;
     const auto end=entry+delay;
     for(unsigned i=0;i<kOnlineRoomCapacity;++i){const auto& c=frame.players[i];
         if(!(roster&(1u<<i))){if(c!=RoomMovement{})return false;continue;}
-        if(c.actor_epoch!=1 || !ValidRoomMovement(c))return false;
-        if(frame.tick>end){if(c!=NativeGameOverCommand())return false;continue;}
+        if(c.actor_epoch!=1 || c.input_epoch!=input_epoch || !ValidRoomMovement(c))return false;
+        if(frame.tick>end){if(c!=NativeGameOverCommand(input_epoch))return false;continue;}
         if(c.source==RoomMovementSource::NativeGameOverV4)return false;
         // Explicit startup-neutral frames have no interpreted actions.
-        RoomMovement neutral;neutral.actor_epoch=1;neutral.source=RoomMovementSource::NativeActionV1;
-        if(c==neutral)continue;
+        RoomMovement neutral;neutral.actor_epoch=1;neutral.input_epoch=input_epoch;neutral.source=RoomMovementSource::NativeActionV1;
+        if(c==neutral || c.source==RoomMovementSource::NativeCutsceneV5)continue;
         if(buttons){
             if(c.source!=RoomMovementSource::NativeActionV3 || schemas[i]==std::array<uint8_t,32>{} ||
                c.button_actions.schema!=schemas[i] || frame.tick<delay || c.button_actions.source_tick!=frame.tick-delay)return false;
@@ -50,12 +51,25 @@ bool ValidNativeGameOverFrame(const RoomFrame& frame,uint16_t roster,uint64_t en
     return true;
 }
 bool AdvanceRoomTransportInput(RoomTransportInputStream& state,const RoomMovement& command){
+    if(!ValidRoomMovement(command))return false;
+    auto next=state;
     if(command.source==RoomMovementSource::NativeGameOverV4){
-        if(!ValidRoomMovement(command))return false;
-        state.terminal=true;return true;
+        if(command.input_epoch!=next.input_epoch)return false;
+        next.terminal=true;state=next;return true;
     }
-    if(state.terminal)return false;
-    return AdvanceRoomJumpStream(state.gameplay,command);
+    if(next.terminal)return false;
+    if(command.source==RoomMovementSource::NativeCutsceneV5){
+        if(next.suspended){if(command.input_epoch!=next.input_epoch)return false;}
+        else{if(next.input_epoch==UINT64_MAX || command.input_epoch!=next.input_epoch+1)return false;
+            next.suspended=true;next.input_epoch=command.input_epoch;}
+        state=next;return true;
+    }
+    if(next.suspended){
+        if(next.input_epoch==UINT64_MAX || command.input_epoch!=next.input_epoch+1)return false;
+        next.input_epoch=command.input_epoch;next.suspended=false;next.gameplay={};
+    }else if(command.input_epoch!=next.input_epoch)return false;
+    if(!AdvanceRoomJumpStream(next.gameplay,command))return false;
+    state=next;return true;
 }
 bool TestNativeGameOverInput(){
     unsigned checks=0;auto check=[&](bool value,const char* why){++checks;if(!value)REXLOG_ERROR("Native game-over input: {}",why);return value;};

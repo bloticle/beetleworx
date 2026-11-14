@@ -27,7 +27,7 @@ public:
     OwnedMovementFrames& operator=(const OwnedMovementFrames&)=delete;
     bool Configure(uint16_t roster_mask,uint16_t retail_mask,
         const std::array<uint64_t,kOnlineRoomCapacity>& actor_epochs,
-        uint64_t first_tick,uint32_t registry,RetailAdmission=nullptr);
+        uint64_t first_tick,uint32_t registry,RetailAdmission=nullptr,uint64_t input_epoch=1);
     bool Bind(uint8_t room_peer,uint64_t native_peer,PPCContext&,uint8_t* base);
     bool BindButtons(uint8_t room_peer,const NativeTriggerBinding&,PPCContext&,uint8_t*);
     OwnedFrameResult Preflight(const RoomFrame&,PPCContext&,uint8_t* base)const;
@@ -43,7 +43,7 @@ private:
     std::optional<RoomFrame> delivered_;
     uint32_t registry_=0,owner_thread_=0;
     uint16_t roster_=0,retail_=0;
-    uint64_t next_tick_=0;
+    uint64_t next_tick_=0,input_epoch_=1;
     bool configured_=false,faulted_=false,exhausted_=false;
     RetailAdmission retail_admission_=nullptr;
 };

@@ -8,9 +8,10 @@ struct NativeActorJump {
     uint64_t generation=0,tick=0,sequence=0;
     OwnedJumpEdge edge=OwnedJumpEdge::Pressed;
     NativeActorAction action{};
+    uint64_t input_epoch=1;
 };
 // Explicit NATIVE action edges, never a held raw Pad button. Sequence starts at
-// 1 per native actor generation, increments exactly, and ticks never reverse.
+// 1 per input epoch within a native actor generation; ticks never reverse.
 // Deliver after this tick's Movement callback and before controller update.
 // Applied means native delivery, not that the native ability accepted a jump.
 ActorInputResult ValidateOwnedActorJump(uint64_t peer,const NativeActorJump&,PPCContext&,uint8_t* base);
@@ -20,6 +21,10 @@ ActorInputResult ValidateOwnedActorJumpBatch(uint64_t peer,std::span<const Nativ
 ActorInputResult ReplayOwnedActorJump(uint64_t peer,const NativeActorJump&,PPCContext&,uint8_t* base);
 // Only after native listener removal or world teardown; live ownership rejects.
 // Idempotent when this generation has no retained history.
+// Retire only this unchanged actor's input stream at a validated cutscene
+// return. A new odd input epoch begins fresh native edge history; actor
+// generation remains unchanged and old-epoch commands can never resume.
+bool RearmOwnedActorJumpInput(uint64_t peer,uint64_t generation,uint64_t old_input_epoch,uint64_t new_input_epoch,uint64_t first_tick,PPCContext&,uint8_t*);
 bool ForgetOwnedActorJump(uint64_t peer,uint64_t generation,PPCContext&,uint8_t* base);
 // Read-only task activation snapshot for a native human entity, including retail.
 bool ReadNativeJumpTaskFlags(uint32_t entity,uint8_t* base,uint32_t& flags);

@@ -47,7 +47,7 @@ bool Readable(uint32_t p,size_t n,uint8_t* base){return base && p>=4096 && uint6
 struct Stage {RoomMovement command{};bool prepared=false,delivered=false,consumed=false;};
 struct RetailState {
     DWORD thread=0;uint8_t* base=nullptr;uint64_t serial=0,world=0,controls=0,next=0,tick=0;
-    uint16_t mask=0;bool active=false,passive=false,started=false,faulted=false,camera=false;
+    uint16_t mask=0;bool active=false,passive=false,rearming=false,started=false,faulted=false,camera=false;
     Frame published{};std::array<RetailActorInput,2> actors{};std::array<Stage,2> stages{};
     RetailJumpAdmission jump=nullptr;
     RetailButtonAdmission buttons=nullptr;
@@ -166,8 +166,8 @@ bool Published(uint64_t tick){Frame frame;uint64_t generation=0;
 bool Active(uint64_t tick,uint8_t* base){uint64_t agreed=0;return Owner(base) && !state.faulted && state.active && state.tick==tick &&
     Clock(agreed,base) && agreed==tick && Published(tick);}
 Result Validate(unsigned slot,const RoomMovement& command,PPCContext& ctx,uint8_t* base){
-    if(!Owner(base))return Result::WrongThread;if(state.faulted || !Current(slot,ctx,base))return Result::Stale;
-    if(!ValidRoomMovement(command) || command.actor_epoch!=state.actors[slot].actor_epoch)return Result::InvalidInput;
+    if(!Owner(base))return Result::WrongThread;if(state.rearming || state.faulted || !Current(slot,ctx,base))return Result::Stale;
+    if(!ValidRoomMovement(command) || command.actor_epoch!=state.actors[slot].actor_epoch || command.input_epoch!=state.actors[slot].input_epoch)return Result::InvalidInput;
     if(command.source==RoomMovementSource::NativeActionV3){
         if(!state.buttons || !state.buttons(slot,command,ctx,base))return Result::UnsupportedAction;
         if(!state.camera && (command.pad.right_x || command.pad.right_y))return Result::UnsupportedAction;
@@ -243,6 +243,29 @@ bool RebaseRetailInputFirstTick(uint64_t next,PPCContext& ctx,uint8_t* base){
     for(unsigned i=0;i<2;++i)if((state.mask&(1u<<i)) && !Current(i,ctx,base))return false;
     state.next=next;return true;
 }
+bool BeginRetailContextRearm(uint64_t old_epoch,uint64_t next_epoch,uint64_t tick,PPCContext& ctx,uint8_t* base){
+    Environment environment;Frame published;uint64_t controls=0;
+    if(!Owner(base) || state.active || state.passive || state.rearming || !state.started || state.faulted ||
+       serial==UINT64_MAX || old_epoch>UINT64_MAX-2 || next_epoch!=old_epoch+2 || !(next_epoch&1) ||
+       !tick || state.next!=tick || state.tick!=tick-1 ||
+       !em2::ReadPublishedSynchronizedControls(controls,published) || controls!=state.controls || published!=state.published)return false;
+    Frame neutral;neutral.tick=tick-1;if(published!=neutral)return false;
+    auto candidate=state;
+    for(unsigned slot=0;slot<2;++slot)if(state.mask&(1u<<slot)){
+        if(state.actors[slot].input_epoch!=old_epoch || !CurrentControllerOwner(slot,ctx,base))return false;
+        auto& actor=candidate.actors[slot];actor.generation=serial+1;actor.input_epoch=next_epoch;
+        if(!Inspect(actor,ctx,base) || actor.entity!=state.actors[slot].entity || actor.entity_guid!=state.actors[slot].entity_guid ||
+           actor.controller!=state.actors[slot].controller || actor.listener!=state.actors[slot].listener)return false;
+    }
+    candidate.serial=++serial;candidate.jump=nullptr;candidate.buttons=nullptr;candidate.rearming=true;candidate.stages={};
+    state=std::move(candidate);return true;
+}
+bool FinishRetailContextRearm(bool buttons,PPCContext& ctx,uint8_t* base){
+    Environment environment;
+    if(!Owner(base) || !state.rearming || state.active || state.passive || state.faulted || !state.jump || (buttons && !state.buttons))return false;
+    for(unsigned i=0;i<2;++i)if((state.mask&(1u<<i)) && !Current(i,ctx,base))return false;
+    state.rearming=false;return true;
+}
 void DisarmRetailInput(){if(state.world && state.thread!=GetCurrentThreadId())return;state={};replay_slot=update_slot=-1;}
 bool RetailActorInputFor(unsigned slot,PPCContext& ctx,uint8_t* base,RetailActorInput& out){Environment preserve;out={};if(!Current(slot,ctx,base))return false;out=state.actors[slot];return true;}
 bool RetailInputQuarantineFor(unsigned slot,PPCContext& ctx,uint8_t* base,RetailActorInput& out){
@@ -255,8 +278,8 @@ bool RetailInputQuarantineFor(unsigned slot,PPCContext& ctx,uint8_t* base,Retail
     if(!em2::ReadPublishedSynchronizedControls(generation,frame) || generation!=state.controls || frame!=state.published)return false;
     out=state.actors[slot];return true;
 }
-bool SetRetailJumpAdmission(RetailJumpAdmission admission){if(!state.world || state.thread!=GetCurrentThreadId() || state.active || state.passive || (admission && state.started))return false;state.jump=admission;return true;}
-bool SetRetailButtonAdmission(RetailButtonAdmission admission){if(!state.world || state.thread!=GetCurrentThreadId() || state.active || state.passive || (admission && state.started))return false;state.buttons=admission;return true;}
+bool SetRetailJumpAdmission(RetailJumpAdmission admission){if(!state.world || state.thread!=GetCurrentThreadId() || state.active || state.passive || (admission && state.started && !state.rearming))return false;state.jump=admission;return true;}
+bool SetRetailButtonAdmission(RetailButtonAdmission admission){if(!state.world || state.thread!=GetCurrentThreadId() || state.active || state.passive || (admission && state.started && !state.rearming))return false;state.buttons=admission;return true;}
 bool SetRetailCameraInputAllowed(bool allowed){if(!state.world || state.thread!=GetCurrentThreadId() || state.active || state.passive || state.started)return false;state.camera=allowed;return true;}
 ActorInputResult ValidateRetailMovement(unsigned slot,const RoomMovement& c,PPCContext& ctx,uint8_t* base){Environment environment;return Validate(slot,c,ctx,base);}
 ActorInputResult ValidateRetailMovementFrame(const RoomFrame& frame,PPCContext& ctx,uint8_t* base){Environment environment;
@@ -290,7 +313,7 @@ bool FinishRetailPassiveTick(uint64_t tick,PPCContext& ctx,uint8_t* base){
     state.passive=false;state.next=tick+1;return true;
 }
 bool BeginRetailBasisTick(uint32_t registry,uint64_t tick,PPCContext& ctx,uint8_t* base){Environment environment;uint64_t agreed=0;
-    if(!Owner(base) || state.faulted || state.active || state.passive || state.next!=tick || !Clock(agreed,base) || agreed!=tick || !Published(tick))return false;
+    if(!Owner(base) || state.faulted || state.active || state.passive || state.rearming || state.next!=tick || !Clock(agreed,base) || agreed!=tick || !Published(tick))return false;
     for(unsigned i=0;i<2;++i)if((state.mask&(1u<<i)) && (state.actors[i].registry!=registry || !Current(i,ctx,base)))return false;
     uint64_t generation=0;Frame frame;if(!em2::ReadPublishedSynchronizedControls(generation,frame) || generation!=state.controls)return false;
     state.published=frame;state.tick=tick;state.active=true;state.started=true;state.stages={};return true;

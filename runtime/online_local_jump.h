@@ -26,7 +26,8 @@ struct NativeLocalJumpEvents {
 // Read-only selected retail context discovery; does not dispatch Jump or imply
 // that native abilities accepted it. Requires a currently retained Movement lease.
 bool DiscoverNativeLocalJumpBinding(const NativeLocalMovementBinding&,PPCContext&,uint8_t*,NativeLocalJumpBinding&);
-// Explicit game-thread stream ownership. actor_epoch is authoritative, first_tick
+// Explicit game-thread stream ownership. The epoch pins this input source
+// lifecycle independently of the unchanged wire actor incarnation; first_tick
 // is the producer/source tick (before transport delay). Default is unarmed.
 bool ArmNativeLocalJump(const NativeLocalJumpBinding&,uint64_t actor_epoch,uint64_t first_tick,PPCContext&,uint8_t*);
 void DisarmNativeLocalJump();

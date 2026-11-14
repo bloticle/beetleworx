@@ -13,7 +13,7 @@ inline constexpr std::size_t kOnlineRoomCapacity=16;
 // movement values until the original native action interpreter has run.
 // NativeActionV1 identifies post-interpreter x/y, including explicit neutral;
 // neither transport nor the actor coordinator may infer it from Pad values.
-enum class RoomMovementSource : uint8_t { UnconvertedPad=0, NativeActionV1=1, NativeActionV2=2, NativeActionV3=3, NativeGameOverV4=4 };
+enum class RoomMovementSource : uint8_t { UnconvertedPad=0, NativeActionV1=1, NativeActionV2=2, NativeActionV3=3, NativeGameOverV4=4, NativeCutsceneV5=5 };
 // Digital interpreter outputs are booleans, ordered default context then active
 // context and original ordinal. No guest address or guessed semantic ID travels.
 struct RoomButtonActions {
@@ -39,6 +39,7 @@ struct RoomMovement {
     // Stable logical spawn incarnation assigned by the authoritative world.
     // Zero means unassigned. This is never a native entity handle/address.
     uint64_t actor_epoch=0;
+    uint64_t input_epoch=1; // Native input lifecycle, independent of actor incarnation.
     RoomMovementSource source=RoomMovementSource::UnconvertedPad;
     // V2 certifies native digital Jump evaluation, including held ticks with
     // no event. This mask comes from the selected native bindings, not an
@@ -54,7 +55,7 @@ struct RoomMovement {
             std::bit_cast<uint32_t>(y)==std::bit_cast<uint32_t>(other.y) &&
             std::bit_cast<uint32_t>(forward_x)==std::bit_cast<uint32_t>(other.forward_x) &&
             std::bit_cast<uint32_t>(forward_z)==std::bit_cast<uint32_t>(other.forward_z) &&
-            pad==other.pad && actor_epoch==other.actor_epoch && source==other.source &&
+            pad==other.pad && actor_epoch==other.actor_epoch && input_epoch==other.input_epoch && source==other.source &&
             jump_button_mask==other.jump_button_mask && jump_count==other.jump_count && jump_events==other.jump_events && button_actions==other.button_actions;
     }
 };
@@ -63,8 +64,9 @@ struct RoomMovement {
 inline bool ValidRoomMovement(const RoomMovement& value){
     // Terminal no-gameplay phase: native state admission belongs to the world
     // owner, not the transport. No input or stale schema may hide in this type.
-    if(value.source==RoomMovementSource::NativeGameOverV4){
-        RoomMovement expected;expected.actor_epoch=value.actor_epoch;expected.source=value.source;
+    if(!value.input_epoch)return false;
+    if(value.source==RoomMovementSource::NativeGameOverV4 || value.source==RoomMovementSource::NativeCutsceneV5){
+        RoomMovement expected;expected.actor_epoch=value.actor_epoch;expected.input_epoch=value.input_epoch;expected.source=value.source;
         return value.actor_epoch!=0 && value==expected;
     }
     if(value.source!=RoomMovementSource::NativeActionV1 && value.source!=RoomMovementSource::NativeActionV2 && value.source!=RoomMovementSource::NativeActionV3)return false;
@@ -90,9 +92,9 @@ inline bool ValidRoomMovement(const RoomMovement& value){
 }
 
 // Per-incarnation semantic stream. A failed batch leaves history untouched.
-// Actor epoch changes require a negotiated lifecycle reset outside this helper.
+// Actor/input epoch changes require a negotiated lifecycle reset outside this helper.
 struct RoomJumpStream {
-    uint64_t sequence=0;
+    uint64_t sequence=0,input_epoch=0;
     uint16_t button_mask=0;
     bool held=false,native=false;
     bool buttons=false,buttons_exhausted=false;
@@ -101,9 +103,10 @@ struct RoomJumpStream {
     bool operator==(const RoomJumpStream&)const=default;
 };
 inline bool AdvanceRoomJumpStream(RoomJumpStream& state,const RoomMovement& value){
-    if(value.source==RoomMovementSource::NativeGameOverV4 || !ValidRoomMovement(value))return false;
+    if(value.source==RoomMovementSource::NativeGameOverV4 || value.source==RoomMovementSource::NativeCutsceneV5 || !ValidRoomMovement(value))return false;
+    if(state.input_epoch && state.input_epoch!=value.input_epoch)return false;
     if(value.source==RoomMovementSource::NativeActionV1)return !state.native;
-    auto next=state;
+    auto next=state;next.input_epoch=value.input_epoch;
     if(next.buttons && value.source!=RoomMovementSource::NativeActionV3)return false;
     if(value.source==RoomMovementSource::NativeActionV3){
         const auto& actions=value.button_actions;

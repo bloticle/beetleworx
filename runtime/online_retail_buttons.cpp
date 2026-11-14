@@ -131,7 +131,7 @@ bool ResetRetailButtons(RetailButtonReceiver& receiver){Preserve preserve;auto& 
 bool PrepareRetailButtons(RetailButtonReceiver& receiver,const RoomMovement& command,PPCContext& ctx,uint8_t* base,std::vector<NativeActorAction>& out){
     Preserve preserve;auto& s=RetailButtonAccess::Get(receiver);
     if(!s.Current(ctx,base) || !ValidRoomMovement(command) || command.source!=RoomMovementSource::NativeActionV3 ||
-       command.actor_epoch!=s.actor.actor_epoch || command.button_actions.schema!=s.schema)return false;
+       command.actor_epoch!=s.actor.actor_epoch || command.input_epoch!=s.actor.input_epoch || command.button_actions.schema!=s.schema)return false;
     std::vector<NativeActorAction> next;
     if(!MatchNativeButtonActions(s.definitions,command.button_actions,next) || !s.Current(ctx,base))return false;
     out=std::move(next);return true;
