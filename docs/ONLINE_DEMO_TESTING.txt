@@ -11,14 +11,16 @@ world repair and reconnect are unfinished. A mismatch or lost peer can stop the
 session. Arbitrary level changes, death/respawn and recovery are not proven
 throughout the campaign. Keep a backup and report where a session stops.
 
-Rooms currently require an invitation. Public matchmaking, joining games that
-have already started, and voice through the internet relay remain unfinished.
-Discord provides invitations and game launching; it is not the game's network
-transport. Its in-game friends/invite picker is not implemented.
+Rooms currently require an invitation. Public matchmaking and joining games
+that have already started remain unfinished. Invite Friends requests Discord's
+native game-invitation screen; actual cross-account acceptance still needs testing.
+Discord is not the game's network transport. Copy room code remains available.
 
-Text chat and gameplay use the room connection. The UI may still expose voice
-controls, but do not rely on voice working through the relay in this build.
-Use an ordinary Discord voice channel while testing with friends.
+Text chat and gameplay use the room connection. Optional proximity/party voice
+uses a separate authenticated relay connection with encrypted audio, bounded
+queues and retries. Native component checks and the local server checks pass;
+real internet audio and microphone/speaker hardware across PCs remain unverified.
+Voice is Off until enabled; keep Discord voice available as a fallback.
 
 The original Epic Mickey mode is an offline courtyard exploration preview.
 Full campaign progression, quests, scripts, transitions, audio, materials,

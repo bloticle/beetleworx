@@ -31,10 +31,13 @@ template<class Original> bool Free(PPCContext& ctx,uint8_t* base,Original origin
 PPC_FUNC_IMPL(sub_82E29700){Free(ctx,base,__imp__sub_82E29700,true);}
 bool em2::TestNativeEmptyFree(){
     const auto error=GetLastError();const auto fp=_mm_getcsr();
-    auto* base=static_cast<uint8_t*>(VirtualAlloc(nullptr,65536,MEM_RESERVE,PAGE_NOACCESS));if(!base)return false;
+    auto* base=static_cast<uint8_t*>(VirtualAlloc(nullptr,16*1024*1024,MEM_RESERVE,PAGE_NOACCESS));if(!base)return false;
     struct Release{uint8_t* base;DWORD error;unsigned fp;~Release(){VirtualFree(base,0,MEM_RELEASE);_mm_setcsr(fp);SetLastError(error);}}release{base,error,fp};
     PPCContext ctx{};ctx.r3.u64=0x833D3ED8;ctx.r4.u64=0x8000;ctx.lr=0x82E2972C;
     const auto saved=ctx;unsigned calls=0;auto original=[&](PPCContext& c,uint8_t*){++calls;c.r11.u64=0x12345678;};
+    ctx.r4.u64=0x78BFA8;const auto reported=ctx;
+    if(Free(ctx,base,original,false) || calls || std::memcmp(&ctx,&reported,sizeof(ctx)))return false;
+    ctx=saved;
     if(Free(ctx,base,original,false) || calls || std::memcmp(&ctx,&saved,sizeof(ctx)))return false;
     if(!VirtualAlloc(base+0x8000,4096,MEM_COMMIT,PAGE_READWRITE))return false;
     if(!Free(ctx,base,original,false) || calls!=1 || ctx.r11.u32!=0x12345678)return false;

@@ -121,6 +121,7 @@
 #include "online_clothing_texture.h"
 #include "online_clothing_draw.h"
 #include "content_setup.h"
+#include "native_empty_free.h"
 #include "content_patch.h"
 #include "disc_image.h"
 #include "online_frontend.h"
@@ -539,7 +540,7 @@ public:
         }
         if(REXCVAR_GET(em2_test_content_setup)){
             const auto root=exe_dir/("content-setup-test-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-            bool success=em2::TestContentSetup(root/"setup") && em2::TestContentLibraryPersistence(root/"library") && em2::TestContentPatches(root/"patches") && em2::TestDiscImageImport(root/"disc-image") && TestEm1Folders(root/"em1-folder");
+            bool success=em2::TestNativeEmptyFree() && em2::TestContentSetup(root/"setup") && em2::TestContentLibraryPersistence(root/"library") && em2::TestContentPatches(root/"patches") && em2::TestDiscImageImport(root/"disc-image") && TestEm1Folders(root/"em1-folder");
             const auto patch_directory=REXCVAR_GET(em2_test_content_patch_directory);
             if(success && !patch_directory.empty()){
                 for(const auto* name:em2::kPatchedGameArchives){

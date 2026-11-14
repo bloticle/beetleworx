@@ -5,11 +5,10 @@ A live component check verified host/guest WebSockets, unchanged payloads in
 both directions and rejection of new joins after a room starts. Native gameplay
 over the relay and real Discord invitations still need end-to-end testing.
 
-The current live deployment still carries gameplay/text only. The source also
-contains a separate media endpoint, verified in the local Cloudflare runtime.
-That media endpoint is not deployed. The native adapter compiles and its
-queue fixtures plus existing voice regressions pass. The encrypted internet
-media path remains unverified. Demo.4 still cannot relay voice.
+The live service carries gameplay/text and a separate authenticated media
+endpoint. Demo.5 includes the native voice adapter and proximity settings.
+Native voice component checks and local server checks pass; cross-machine
+internet audio and hardware remain unverified. Demo.4 does not have this adapter.
 
 The service accepts outbound HTTPS/WebSocket connections from the host and up
 to fifteen guests. Players do not open inbound ports or configure routers.
@@ -34,7 +33,8 @@ The implementation follows Cloudflare's [WebSocket Hibernation API](https://deve
 Raw IP addresses, invite contents, host keys and game packets are not logged.
 Per-address creation/lookup admission is bounded; daily hashed admission records
 expire. Rooms expire after six hours. A host disconnect closes all guests.
-This does not provide reconnect, public matchmaking or voice relaying.
+This does not provide gameplay reconnect or public matchmaking. Voice uses
+the separate media connection described below.
 The native [Discord integration](../../docs/ONLINE-DISCORD.md) supplies party
 presence and accepted-invite handoff; it still needs live verification after
 this service is deployed.
@@ -58,13 +58,13 @@ this service is deployed.
   The native guest bridges its loopback join socket to its outbound WebSocket.
   Preserve exact stream bytes and normal Room framing; bound queues, cancel all
   I/O on close, and retain the native handshake before save installation.
-- UDP voice is not carried by this stream contract. It must be integrated
-  separately before claiming router-free voice chat.
+- Voice is not carried by the gameplay stream contract. The separate media
+  endpoint forwards native encrypted datagrams without inbound player ports.
 
 Not release-ready until an actual deployment and an
 internet connection between different networks have been completed.
 
-## Separate media endpoint (source only)
+## Separate media endpoint
 
 A guest's gameplay WebSocket upgrade returns `X-Beetleworx-Media-Token` and
 `X-Beetleworx-Media-Channel`. The token is a private 256-bit bearer credential

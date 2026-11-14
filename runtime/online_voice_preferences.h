@@ -3,7 +3,7 @@
 #include <string>
 namespace em2::net {
 struct VoicePreferences {
-    int mode=0,volume=4,key=0,positioning=0,range=2;
+    int mode=0,volume=4,key=0,positioning=1,range=2;
     std::string input,output;
     bool operator==(const VoicePreferences&)const=default;
 };

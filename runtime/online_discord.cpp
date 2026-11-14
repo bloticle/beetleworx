@@ -43,6 +43,9 @@ class Discord {
     std::string app,pending,status="Discord is not connected.";
     std::jthread worker;
     uint64_t revision=1;
+    uint64_t confirmed_revision=0;
+    bool invite_requested=false;
+    bool invite_busy=false;
     bool enabled=false;
     void RegisterLaunch(const std::string& application){
         std::array<wchar_t,32768> path{};const auto length=GetModuleFileNameW(nullptr,path.data(),DWORD(path.size()));
@@ -112,10 +115,11 @@ class Discord {
         return "{\"cmd\":\"SET_ACTIVITY\",\"args\":{\"pid\":"+std::to_string(GetCurrentProcessId())+",\"activity\":"+activity+"},\"nonce\":\"bw-"+std::to_string(nonce)+"\"}";
     }
     void Connected(HANDLE pipe,const std::string& application,std::stop_token stop){
+        struct Reset{Discord& owner;~Reset(){std::lock_guard lock(owner.mutex);owner.confirmed_revision=0;owner.invite_requested=false;owner.invite_busy=false;}}reset{*this};
         Need(Send(pipe,0,"{\"v\":1,\"client_id\":"+demo_detail::Quote(application)+"}",stop),"Discord handshake could not be sent");
         bool ready=false;uint64_t sent_revision=0,nonce=0;
         auto handshake_deadline=Clock::now()+10s,last_activity=Clock::now()-5s;
-        std::string activity_nonce;Party sent_party;auto acknowledgement=Clock::now();
+        std::string activity_nonce,invite_nonce;Party sent_party;auto acknowledgement=Clock::now(),invite_deadline=Clock::now();
         while(!stop.stop_requested()){
             Party party;uint64_t current_revision;bool active;
             {std::lock_guard lock(mutex);active=enabled && app==application;party=wanted;current_revision=revision;}
@@ -130,6 +134,13 @@ class Discord {
                 Need(opcode==1,"Discord closed the connection");
                 auto json=demo_detail::ParseJson(body);const auto* event=json.Find("evt");const auto* command=json.Find("cmd");
                 const auto name=event && event->kind==demo_detail::Json::String?event->Str():std::string{};
+                const auto* response=json.Find("nonce");
+                if(response && response->kind==demo_detail::Json::String && !invite_nonce.empty() && response->Str()==invite_nonce){
+                    invite_nonce.clear();
+                    {std::lock_guard lock(mutex);invite_busy=false;}
+                    Status(name=="ERROR"?"Discord could not open its invite screen. Use Copy room code, or check Discord's game activity settings.":"Discord invite screen opened. Choose the friends or channel to invite.");
+                    continue;
+                }
                 if(name=="ERROR")throw std::runtime_error("Discord rejected the integration request. Check the Application ID and application configuration.");
                 if(command && command->kind==demo_detail::Json::String && command->Str()=="DISPATCH"){
                     if(name=="READY"){
@@ -143,8 +154,9 @@ class Discord {
                         }
                     }
                 }
-                if(const auto* response=json.Find("nonce");response && response->kind==demo_detail::Json::String && !activity_nonce.empty() && response->Str()==activity_nonce){
+                if(response && response->kind==demo_detail::Json::String && !activity_nonce.empty() && response->Str()==activity_nonce){
                     activity_nonce.clear();
+                    {std::lock_guard lock(mutex);confirmed_revision=sent_revision;}
                     Status(sent_party.code.empty()?"Discord connected.":sent_party.joinable?
                         "Discord invites ready. Invite friends through Discord.":"Discord connected. This game has already started.");
                 }
@@ -157,6 +169,17 @@ class Discord {
                 sent_party=party;
                 sent_revision=current_revision;last_activity=acknowledgement=Clock::now();
             }
+            bool open_invite=false;
+            {std::lock_guard lock(mutex);
+                if(ready && activity_nonce.empty() && invite_nonce.empty() && invite_requested && confirmed_revision==revision && wanted.joinable && wanted.players<wanted.capacity){invite_requested=false;open_invite=true;}
+            }
+            if(open_invite){
+                invite_nonce="bw-invite-"+std::to_string(++nonce);invite_deadline=Clock::now()+10s;
+                // The official Game SDK's OpenActivityInvite(Join) operation,
+                // over our existing local IPC connection; no helper or token.
+                Need(Send(pipe,1,"{\"cmd\":\"OPEN_OVERLAY_ACTIVITY_INVITE\",\"args\":{\"type\":1},\"nonce\":"+demo_detail::Quote(invite_nonce)+"}",stop),"Discord invite screen request failed");
+            }
+            if(!invite_nonce.empty() && Clock::now()>invite_deadline){invite_nonce.clear();{std::lock_guard lock(mutex);invite_busy=false;}Status("Discord did not open its invite screen. Use Copy room code instead.");}
             std::unique_lock lock(mutex);wake.wait_for(lock,50ms);
         }
     }
@@ -205,6 +228,12 @@ public:
     void Clear(std::string_view code){std::lock_guard lock(mutex);if(wanted.code==code){wanted={};++revision;wake.notify_all();}}
     std::optional<std::string> Take(){std::lock_guard lock(mutex);if(pending.empty())return {};auto value=std::move(pending);pending.clear();return value;}
     std::string Status(){std::lock_guard lock(mutex);return status;}
+    bool CanInvite(){std::lock_guard lock(mutex);return enabled && !invite_busy && confirmed_revision==revision && wanted.joinable && !wanted.code.empty() && wanted.players<wanted.capacity;}
+    bool Invite(){
+        std::lock_guard lock(mutex);
+        if(!enabled || invite_busy || confirmed_revision!=revision || !wanted.joinable || wanted.code.empty() || wanted.players>=wanted.capacity)return false;
+        invite_busy=true;invite_requested=true;wake.notify_all();return true;
+    }
 };
 Discord& Service(){static Discord service;return service;}
 }
@@ -213,4 +242,6 @@ void SetDiscordParty(std::string_view code,unsigned players,unsigned capacity,bo
 void ClearDiscordParty(std::string_view code){if(auto* service=live_service.load(std::memory_order_acquire))service->Clear(code);}
 std::optional<std::string> TakeDiscordJoinCode(){return Service().Take();}
 std::string DiscordConnectionStatus(){return Service().Status();}
+bool CanInviteDiscordFriends(){return Service().CanInvite();}
+bool InviteDiscordFriends(){return Service().Invite();}
 }

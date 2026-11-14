@@ -12,6 +12,7 @@
 #include <array>
 #include <atomic>
 #include <fstream>
+#include <functional>
 #include <thread>
 #include <mutex>
 #include <vector>
@@ -154,46 +155,91 @@ fs::path ChooseSource(bool em1) {
         CoUninitialize();
     });picker.join();return selected;
 }
-bool Install(const fs::path& source,const fs::path& content,std::string& error,IProgressDialog* progress=nullptr) {
+bool RecoverContentView(const fs::path& content,std::string& error){
+    // Preserve the old view rather than mixing two discs or deleting user data.
+    // Rename directory entries themselves, including junctions, never targets.
+    const auto absolute=fs::absolute(content).lexically_normal();
+    if((GetFileAttributesW(absolute.c_str())&FILE_ATTRIBUTE_REPARSE_POINT)!=0){error="The content folder is a link. Choose a separate Beetleworx folder before changing game files.";return false;}
+    static std::atomic<uint64_t> backup_nonce{0};
+    const auto backup=absolute.parent_path()/(absolute.filename().wstring()+L".previous-"+std::to_wstring(GetTickCount64())+L"-"+std::to_wstring(++backup_nonce));
+    if(backup.parent_path()!=absolute.parent_path() || fs::exists(backup)){error="Could not create a backup for the previous setup. Please retry.";return false;}
+    fs::create_directory(backup);
+    std::vector<fs::path> moved;
+    for(const auto& entry:fs::directory_iterator(absolute))moved.push_back(entry.path().filename());
+    const auto entries=std::move(moved);moved.clear();moved.reserve(entries.size());
+    try{
+        for(const auto& name:entries){
+            if(name==L"patches" || name==L"pc-shader-library" || name==L"pc-shader-catalog.em2" || name==L"mods")continue;
+            const auto from=(absolute/name).lexically_normal(),to=(backup/name).lexically_normal();
+            if(from.parent_path()!=absolute || to.parent_path()!=backup)throw std::runtime_error("Invalid content backup path");
+            moved.push_back(name);fs::rename(from,to);
+        }
+    }catch(const std::exception& exception){
+        for(auto it=moved.rbegin();it!=moved.rend();++it){std::error_code ignored;fs::rename(backup/ *it,absolute/ *it,ignored);}
+        error="Could not move the previous setup out of the way: "+std::string(exception.what());return false;
+    }
+    fs::create_directories(content/"packfiles");
+    REXLOG_INFO("Changed game source; previous imported content retained at {}",backup.string());return true;
+}
+bool Install(const fs::path& source,const fs::path& content,std::string& error,IProgressDialog* progress=nullptr,bool copy_only=false) {
     if(Nested(content,source) || Nested(source,content)){error="Keep the Beetleworx folder and original game folder separate, then start beetleworx.exe again.";return false;}
     fs::create_directories(content/"packfiles");
-    // Persist ownership before creating even one link. A canceled import can
-    // resume only against the identical source, preventing a mixed game view.
+    // Persist ownership before creating even one link. Changing sources backs
+    // up the previous view so interrupted imports never mix different discs.
     constexpr const char* intent_name="content-setup-source.txt";
     const auto pending=Marker(content,intent_name);
     if(fs::exists(content/intent_name)) {
         std::error_code equivalent_error;
         if(pending.empty() || !fs::equivalent(source,pending,equivalent_error)) {
-            error="An unfinished setup used a different game folder. Resume with that folder, or extract a fresh recomp release folder.";return false;
+            if(!RecoverContentView(content,error))return false;
+            if(!StoreMarker(content,intent_name,source)){error="Could not save the new game location. Check folder permissions.";return false;}
         }
     } else if(!StoreMarker(content,intent_name,source)) {
         error="Could not save content setup progress. Move the recomp to a writable folder and try again.";return false;
     }
     uint64_t completed=0,total=0;
     if(progress){for(const auto& entry:fs::directory_iterator(source))++total;for(const auto& entry:fs::directory_iterator(source/"packfiles"))++total;}
-    auto link=[&](const fs::directory_entry& entry,const fs::path& target) {
-        if(progress){if(progress->HasUserCancelled())return false;progress->SetLine(2,entry.path().filename().c_str(),FALSE,nullptr);progress->SetProgress64(++completed,total);}
-        if(fs::exists(target))return true;
-        if(entry.is_directory())return Junction(target,entry.path());
+    std::function<bool(const fs::directory_entry&,const fs::path&,unsigned)> link;
+    link=[&](const fs::directory_entry& entry,const fs::path& target,unsigned depth) {
+        if(depth>64){error="The selected game folder contains a recursive directory link.";return false;}
+        if(progress){if(progress->HasUserCancelled())return false;progress->SetLine(2,entry.path().filename().c_str(),FALSE,nullptr);++completed;progress->SetProgress64(completed,std::max(total,completed+1));}
+        if(entry.is_directory()){
+            if(fs::exists(target)){
+                if(!fs::is_directory(target)){error="A file is blocking the game folder "+target.filename().string()+".";return false;}
+                if(GetFileAttributesW(target.c_str())&FILE_ATTRIBUTE_REPARSE_POINT)return true;
+            }
+            if(!copy_only && !fs::exists(target) && Junction(target,entry.path()))return true;
+            fs::create_directories(target);
+            for(const auto& child:fs::directory_iterator(entry.path()))if(!link(child,target/child.path().filename(),depth+1))return false;
+            return true;
+        }
         if(!entry.is_regular_file())return true;
-        if(CreateHardLinkW(target.c_str(),entry.path().c_str(),nullptr))return true;
-        // Different volumes do not support hard links. CopyFile never replaces
-        // an existing patched archive or modifies the selected original.
-        return CopyFileExW(entry.path().c_str(),target.c_str(),
+        if(fs::exists(target))return true;
+        if(!copy_only && CreateHardLinkW(target.c_str(),entry.path().c_str(),nullptr))return true;
+        // FAT/exFAT, cross-volume sources and restricted folders can copy.
+        // Publish only complete files, so a crash cannot leave a partial file
+        // that would be mistaken for a completed import on the next launch.
+        static std::atomic<uint64_t> nonce{0};
+        const auto temporary=target.parent_path()/(L".em2-copy-"+std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(++nonce)+L".tmp");
+        const bool copied=CopyFileExW(entry.path().c_str(),temporary.c_str(),
             [](LARGE_INTEGER,LARGE_INTEGER,LARGE_INTEGER,LARGE_INTEGER,DWORD,DWORD,HANDLE,HANDLE,LPVOID context)->DWORD {
                 auto* dialog=static_cast<IProgressDialog*>(context);
                 return dialog && dialog->HasUserCancelled()?PROGRESS_CANCEL:PROGRESS_CONTINUE;
             },progress,nullptr,COPY_FILE_FAIL_IF_EXISTS)!=0;
+        const auto reason=GetLastError();
+        const bool installed=copied && MoveFileExW(temporary.c_str(),target.c_str(),MOVEFILE_WRITE_THROUGH);
+        if(!installed){const auto failure=copied?GetLastError():reason;DeleteFileW(temporary.c_str());error="Could not copy "+entry.path().filename().string()+" (Windows error "+std::to_string(failure)+"). Check available space and folder permissions, then retry.";}
+        return installed;
     };
     for(const auto& entry:fs::directory_iterator(source)) {
         const auto name=entry.path().filename();
         if(name==L"packfiles" || name==L"ConfigFiles.ini" || name==L"$SystemUpdate" || name.native().starts_with(L".em2-") || name==L"source-game-directory.txt" || name==L"content-setup-source.txt")continue;
-        if(!link(entry,content/name)){error="Could not prepare game content. Keep the recomp in a writable folder, preferably on the same drive as the original game, and try again.";return false;}
+        if(!link(entry,content/name,0))return false;
     }
     for(const auto& entry:fs::directory_iterator(source/"packfiles")) {
         const auto name=entry.path().filename().string();
         if(std::find(patches.begin(),patches.end(),name)!=patches.end())continue;
-        if(!link(entry,content/"packfiles"/entry.path().filename())){error="Could not link or copy a game archive. Check free space and folder permissions, then try again.";return false;}
+        if(!link(entry,content/"packfiles"/entry.path().filename(),0))return false;
     }
     if(!StoreMarker(content,"source-game-directory.txt",source)){error="Could not save the selected game location. Move the recomp to a writable folder and try again.";return false;}
     // The completed source marker is the only path metadata allowed into
@@ -205,9 +251,8 @@ bool Install(const fs::path& source,const fs::path& content,std::string& error,I
 bool PrepareGameContent(const fs::path& executable_directory,fs::path& game,const fs::path& content,bool explicit_game,bool interactive,std::string& error) {
     try {
         error.clear();
-        const auto saved=Marker(content);
-        const auto pending=Marker(content,"content-setup-source.txt");
-        if(fs::exists(content/"content-setup-source.txt") && pending.empty()){error="Content setup progress is incomplete. Extract a fresh recomp release folder and try again.";return false;}
+        auto saved=Marker(content);
+        auto pending=Marker(content,"content-setup-source.txt");
         const auto remembered=saved.empty()?pending:saved;
         if(!explicit_game && !remembered.empty() && OriginalFolder(remembered))game=remembered;
         auto extract_image=[&] {
@@ -233,12 +278,8 @@ bool PrepareGameContent(const fs::path& executable_directory,fs::path& game,cons
             if(!extract_image())return false;
             if(!OriginalFolder(game)){error="That folder does not contain default.xex, ConfigFiles.ini and packfiles. Extract your Xbox 360 game files first, then choose that folder.";return false;}
         }
-        if(!pending.empty()) {
-            std::error_code equivalent_error;
-            if(!fs::equivalent(game,pending,equivalent_error)){error="An unfinished setup belongs to a different game folder. Resume with that folder, or extract a fresh recomp release folder.";return false;}
-        }
         std::error_code equivalent_error;
-        const bool same=!saved.empty() && fs::equivalent(game,saved,equivalent_error);
+        bool same=!saved.empty() && fs::equivalent(game,saved,equivalent_error);
         if(!interactive) {
             // Existing private renderer fixtures intentionally carry only their
             // required assets. Keep their previous staged-path contract, rather
@@ -248,6 +289,12 @@ bool PrepareGameContent(const fs::path& executable_directory,fs::path& game,cons
         }
         if(Nested(content,game) || Nested(game,content) || Nested(content/"packfiles",game)){
             error="Keep the recomp content folder and original game folder separate. The content packfiles folder must not link to your original packfiles folder.";return false;
+        }
+        const bool different_pending=fs::exists(content/"content-setup-source.txt") &&
+            (pending.empty() || !fs::equivalent(game,pending,equivalent_error));
+        if(different_pending || (!saved.empty() && !same)){
+            if(!RecoverContentView(content,error))return false;
+            saved.clear();pending.clear();same=false;
         }
         for(const auto* name:patches){
             const auto delta=content/"patches"/(std::string(name)+".em2patch");
@@ -259,7 +306,6 @@ bool PrepareGameContent(const fs::path& executable_directory,fs::path& game,cons
         }
         if(!fs::is_regular_file(content/"pc-shader-catalog.em2")){error="The recomp package is incomplete: pc-assets/pc-shader-catalog.em2 is missing. Extract the complete release folder.";return false;}
         if(same && pending.empty() && fs::is_regular_file(content/"default.xex"))return true;
-        if(!saved.empty() && !same){error="This content view belongs to another game folder. Extract a fresh recomp release folder to select a different game location.";return false;}
         bool installed=false;
         std::thread importer([&]{
             const auto initialized=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
@@ -377,10 +423,19 @@ bool TestContentSetup(const fs::path& root) {
         write(partial/"pc-shader-catalog.em2","catalog");for(auto name:patches)write(partial/"packfiles"/name,"modified-menu");
         write(different/"default.xex","different-xex");write(different/"ConfigFiles.ini","different-config");
         if(!StoreMarker(partial,"content-setup-source.txt",source) || !CreateHardLinkW((partial/"default.xex").c_str(),(source/"default.xex").c_str(),nullptr))return false;
-        if(Install(different,partial,error) || error.empty() || read(partial/"default.xex")!="original-xex" || fs::exists(partial/"source-game-directory.txt"))return false;
+        if(!Install(different,partial,error,nullptr,true) || read(partial/"default.xex")!="different-xex" || read(source/"default.xex")!="original-xex" || !fs::equivalent(Marker(partial),different))return false;
+        // Switching back preserves the old imported view in a sibling backup.
+        if(!RecoverContentView(partial,error))return false;
         if(!Install(source,partial,error) || fs::exists(partial/"content-setup-source.txt") || !fs::equivalent(Marker(partial),source))return false;
         game=source;if(!PrepareGameContent(root/"interrupted",game,partial,true,false,error))return false;
-        REXLOG_INFO("Content setup passed: portable saved path, strict noninteractive/explicit paths, junction/hard-link view, patched archive/original preservation and interrupted-import source ownership/recovery (no dialogs launched)");return true;
+        const auto copied=root/"copy-fallback"/"pc-assets";fs::create_directories(copied/"packfiles");
+        for(auto name:patches)write(copied/"packfiles"/name,"modified-menu");
+        if(!Install(source,copied,error,nullptr,true) || fs::equivalent(copied/"Audio"/"sample",source/"Audio"/"sample") ||
+           (GetFileAttributesW((copied/"Audio").c_str())&FILE_ATTRIBUTE_REPARSE_POINT) || read(copied/"Audio"/"sample")!="original-audio")return false;
+        fs::create_directories(source/"Audio"/"nested");write(source/"Audio"/"nested"/"second","second-audio");
+        if(!Install(source,copied,error,nullptr,true) || read(copied/"Audio"/"nested"/"second")!="second-audio")return false;
+        if(read(copied/"packfiles"/"UIOptions.pak")!="modified-menu")return false;
+        REXLOG_INFO("Content setup passed: saved paths, source change with preserved backup, original/patch preservation, FAT-style directory/file copying and resuming copied directories (no dialogs launched)");return true;
     }catch(const std::exception& error){REXLOG_ERROR("Content setup fixture: {}",error.what());return false;}
 }
 }

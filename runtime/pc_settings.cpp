@@ -707,7 +707,7 @@ PPC_FUNC_IMPL(sub_82B0D118) {
                 }
             }
             if(raw_id==1989 && raw_choice==-1){ctx.f1.f64=em2::em1::OriginalInkPakMounted()?1:0;sub_8295FEA8(ctx,base);return;}
-            if(std::isfinite(raw_id) && raw_id>=2700 && raw_id<=2744 && std::floor(raw_id)==raw_id &&
+            if(std::isfinite(raw_id) && raw_id>=2700 && raw_id<=2745 && std::floor(raw_id)==raw_id &&
                std::isfinite(raw_choice) && raw_choice>=-3 && raw_choice<=1024 && std::floor(raw_choice)==raw_choice){
                 int result=0;if(em2::net::NativeOnlineMenuOption(int(raw_id),int(raw_choice),result)){
                     ctx.f1.f64=result;sub_8295FEA8(ctx,base);return;

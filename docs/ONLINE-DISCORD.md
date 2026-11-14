@@ -10,6 +10,9 @@ Discord DLL. The application ID is a public identifier.
 
 - A connected internet lobby publishes its actual player count and capacity.
   Its join secret contains the eight-character relay room code.
+- Invite Friends in the native lobby opens Discord's game invitation screen.
+  The button waits for an acknowledged, joinable party. An invitation error
+  leaves gameplay connected and offers Copy room code as a fallback.
 - Players send invitations through Discord's game invitation interface.
   Beetleworx subscribes to accepted `ACTIVITY_JOIN` events and passes validated
   room codes into the normal native Join flow. It does not send messages or

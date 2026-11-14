@@ -23,6 +23,7 @@
       if(_level0.SetOption(2743,-1) != 1) { this.b_5.disable(); this.b_5._visible = false; return; }
       this._em2Online = true;
       this._em2OnlineHostPage = false;
+      this._em2OnlineVoicePage = 0;
       this._em2OnlinePlayerPage = false;
       this._em2OnlineRosterPage = false;
       _level0.SetOption(2700,0);
@@ -67,6 +68,34 @@
       this._em2OnlineState = state;
       var idle = state == 0 || state == 9;
       var internet = _level0.SetOption(2743,1) == 1;
+      if(this._em2OnlineVoicePage > 0 && state != 7)
+      {
+         if(this._em2OnlineVoicePage == 1)
+         {
+            var modes = ["Off","Listen only","Push to talk","Open microphone"];
+            var positions = ["Party","Proximity"];
+            var ranges = ["10","20","30","50","100"];
+            var talkKeys = ["F8","Caps Lock","Alt"];
+            this._em2OnlineButton(0,"Voice chat: " + modes[_level0.SetOption(2800,-1)],true);
+            this._em2OnlineButton(1,"Voice positioning: " + positions[_level0.SetOption(2804,-1)],true);
+            this._em2OnlineButton(2,"Proximity range: " + ranges[_level0.SetOption(2805,-1)] + " units",true);
+            this._em2OnlineButton(3,"Push to talk: " + talkKeys[_level0.SetOption(2802,-1)],true);
+            this._em2OnlineButton(4,"Microphone / speakers",true);
+            this._em2OnlineButton(5,"Back",true);
+         }
+         else
+         {
+            this._em2OnlineButton(0,"Microphone: " + this._em2OnlineRead(2808).substr(0,46),true);
+            this._em2OnlineButton(1,"Speakers: " + this._em2OnlineRead(2809).substr(0,46),true);
+            this._em2OnlineButton(2,"Voice volume: " + (_level0.SetOption(2801,-1)*25) + "%",true);
+            this._em2OnlineButton(3,"Refresh audio devices",true);
+            this._em2OnlineButton(4,"Back to voice settings",true);
+            this._em2OnlineButton(5,"Back",true);
+         }
+         this._em2OnlineHelp.textColor = 16777215;
+         this._em2OnlineHelp.text = this._em2OnlineRead(2803) + "\nMicrophone stays off until enabled. Proximity chat fades with distance during gameplay. Select a setting to change it.";
+         this._em2OnlineRefreshTime = getTimer();return;
+      }
       if(this._em2OnlineHostPage && !idle) this._em2OnlineHostPage = false;
       if(this._em2OnlineHostPage)
       {
@@ -119,7 +148,7 @@
             this._em2OnlineButton(0,"Name: " + this._em2OnlineRead(2722),editable);
             this._em2OnlineButton(1,"Character: " + (_level0.SetOption(2732,-1) == 0 ? "Mickey" : "Oswald"),_level0.SetOption(2737,-1) == 1);
             this._em2OnlineButton(2,"Pants / name color: " + this._em2OnlineRead(2733),editable);
-            this._em2OnlineButton(3,"View players",true);
+            this._em2OnlineButton(3,"Voice chat settings",true);
             this._em2OnlineButton(4,"Back",true);
             this._em2OnlineButton(5,"Leave lobby",true);
             this._em2OnlineHelp.textColor = 16777215;
@@ -131,7 +160,7 @@
          {
             this._em2OnlineButton(0,isHost ? (canStart ? "Start online game" : "Waiting for players to be ready") : "Waiting for host",canStart);
             this._em2OnlineButton(1,"Player options",true);
-            this._em2OnlineButton(2,isHost ? "Host" : (ready ? "Ready (select to cancel)" : "Not ready (select when ready)"),editable && !isHost);
+            this._em2OnlineButton(2,isHost ? "Invite Friends" : (ready ? "Ready (select to cancel)" : "Not ready (select when ready)"),isHost ? _level0.SetOption(2745,0) == 1 : editable);
             this._em2OnlineButton(3,"Players: " + _level0.SetOption(2741,2) + "/" + _level0.SetOption(2736,-1),true);
             this._em2OnlineButton(4,internet ? "Copy room code" : "Copy invite",canCopy);
             this._em2OnlineButton(5,"Leave lobby",true);
@@ -176,7 +205,8 @@
       this._em2OnlineButton(4,inviteLabel,idle || canCopy);
       if(internet)
       {
-         this.b_3.disable(); this.b_3._visible = false;
+         this._em2OnlineButton(3,"Voice chat settings",state != 7);
+         if(isHost && !idle) this._em2OnlineButton(2,"Invite Friends",_level0.SetOption(2745,0) == 1);
          this._em2OnlineButton(4,"Copy room code",canCopy);
          if(idle) this.b_4._visible = false;
       }
@@ -196,6 +226,28 @@
       var item = this._list.activeItem; var state = this._em2OnlineState;
       var internet = _level0.SetOption(2743,1) == 1;
       if(state == 7) return;
+      if(this._em2OnlineVoicePage > 0)
+      {
+         if(this._em2OnlineVoicePage == 1)
+         {
+            if(item == this.b_main) _level0.SetOption(2800,(_level0.SetOption(2800,-1)+1)%4);
+            else if(item == this.b_1) _level0.SetOption(2804,1-_level0.SetOption(2804,-1));
+            else if(item == this.b_2) _level0.SetOption(2805,(_level0.SetOption(2805,-1)+1)%5);
+            else if(item == this.b_3) _level0.SetOption(2802,(_level0.SetOption(2802,-1)+1)%3);
+            else if(item == this.b_4) this._em2OnlineVoicePage = 2;
+            else if(item == this.b_5) this._em2OnlineVoicePage = 0;
+         }
+         else
+         {
+            if(item == this.b_main) _level0.SetOption(2806,1);
+            else if(item == this.b_1) _level0.SetOption(2807,1);
+            else if(item == this.b_2) _level0.SetOption(2801,(_level0.SetOption(2801,-1)+1)%9);
+            else if(item == this.b_3) _level0.SetOption(2810,1);
+            else if(item == this.b_4) this._em2OnlineVoicePage = 1;
+            else if(item == this.b_5) this._em2OnlineVoicePage = 0;
+         }
+         this._em2OnlineRefresh();return;
+      }
       if(state == 6)
       {
          if(_level0.SetOption(2731,-1) == 1)
@@ -210,7 +262,7 @@
                if(item == this.b_main) { this._em2OnlineBeginName(); return; }
                else if(item == this.b_1) _level0.SetOption(2734,0);
                else if(item == this.b_2) _level0.SetOption(2735,0);
-               else if(item == this.b_3) { this._em2OnlineShowRoster(true); return; }
+               else if(item == this.b_3) { this._em2OnlineVoicePage = 1; this._em2OnlineRefresh(); this._list.activate(0); return; }
                else if(item == this.b_4) { this._em2OnlineBack(); return; }
                else if(item == this.b_5) _level0.SetOption(2700,6);
             }
@@ -218,7 +270,7 @@
             {
                if(item == this.b_main) _level0.SetOption(2700,7);
                else if(item == this.b_1) { this._em2OnlinePlayerPage = true; this._em2OnlineRefresh(); this._list.activate(0); return; }
-               else if(item == this.b_2) _level0.SetOption(2725,0);
+               else if(item == this.b_2) { if(_level0.SetOption(2702,-1) == 1) _level0.SetOption(2745,1); else _level0.SetOption(2725,0); }
                else if(item == this.b_3) { this._em2OnlineShowRoster(false); return; }
                else if(item == this.b_4) _level0.SetOption(2700,5);
                else if(item == this.b_5) _level0.SetOption(2700,6);
@@ -252,10 +304,11 @@
       else if(item == this.b_1) _level0.SetOption(2700,2);
       else if(item == this.b_2)
       {
-         if(internet) { this._em2OnlineHostPage = true; _level0.SetOption(2700,11); }
+         if(internet && state != 0 && state != 9) _level0.SetOption(2745,1);
+         else if(internet) { this._em2OnlineHostPage = true; _level0.SetOption(2700,11); }
          else _level0.SetOption(2700,3);
       }
-      else if(item == this.b_3) _level0.SetOption(2700,4);
+      else if(item == this.b_3) { if(internet) this._em2OnlineVoicePage = 1; else _level0.SetOption(2700,4); }
       else if(item == this.b_4) _level0.SetOption(2700,state == 0 || state == 9 ? 15 : 5);
       else if(item == this.b_5)
       {
@@ -381,6 +434,7 @@
    function _em2OnlineBack()
    {
       if(this._em2OnlineEditingName) { this._em2OnlineEndName(false); return; }
+      if(this._em2OnlineVoicePage > 0) { this._em2OnlineVoicePage = this._em2OnlineVoicePage == 2 ? 1 : 0; this._em2OnlineRefresh(); this._list.activate(0); return; }
       if(this._em2OnlineRosterPage) { this._em2OnlineRestoreRosterColors(); this._em2OnlineRosterPage = false; this._em2OnlinePlayerPage = this._em2OnlineRosterReturnPlayer; this._em2OnlineRefresh(); this._list.activate(3); return; }
       if(this._em2OnlinePlayerPage) { this._em2OnlinePlayerPage = false; this._em2OnlineRefresh(); this._list.activate(1); return; }
       if(this._em2OnlineHostPage) { this._em2OnlineHostPage = false; this._em2OnlineRefresh(); return; }

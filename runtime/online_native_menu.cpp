@@ -464,7 +464,7 @@ struct Controller {
 Controller& Menu(){static Controller controller;return controller;}
 }
 bool NativeOnlineMenuOption(int id,int choice,int& result){
-    if(id<2700 || id>2744 || (id>2716 && id<2720))return false;
+    if(id<2700 || id>2745 || (id>2716 && id<2720))return false;
     if(id==2743){result=choice==1?(!REXCVAR_GET(em2_online_relay_url).empty() && !Em1DemoSession()):OnlineMenuAvailable();return true;}
     struct Restore{unsigned csr=_mm_getcsr();DWORD error=GetLastError();~Restore(){_mm_setcsr(csr);SetLastError(error);}}restore;
     if(!OnlineMenuAvailable()) {
@@ -474,6 +474,14 @@ bool NativeOnlineMenuOption(int id,int choice,int& result){
         return true;
     }
     auto& menu=Menu();std::lock_guard lock(menu.mutex);result=0;
+    if(id==2745){
+        const bool available=!NativeOnlineMenuQaActive() && menu.InternetMode() && menu.host && menu.internet && menu.internet->status().ready && CanInviteDiscordFriends();
+        if(choice==1 && available){
+            result=InviteDiscordFriends();
+            menu.feedback=result?"Opening Discord's invite screen...":"Discord invitations are not ready. Use Copy room code instead.";
+        }else if(choice==0)result=available;
+        return true;
+    }
     if(id==2744){
         if(menu.InternetMode() && !menu.Busy()){
             if(auto code=TakeDiscordJoinCode())menu.discord_join_code=std::move(*code);

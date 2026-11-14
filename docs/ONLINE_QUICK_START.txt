@@ -23,10 +23,30 @@ the host selects Start online game when everyone is ready.
 DISCORD
 
 Run Beetleworx once to register game launching with Discord. Keep the Discord
-desktop app open. Hosting publishes a joinable party so you can invite friends
-through Discord. Accepting an invite enters the same native Join flow without
+desktop app open. After hosting, select Invite Friends in the online menu
+to open Discord's game invitation screen. Choose friends or a channel there.
+Copy room code is also available. Accepting an invite enters the Join flow without
 copying a code. During gameplay, invites wait until you return to the title.
 Joining a session that has already started is not supported in this demo.
+
+VOICE CHAT
+
+Open Voice chat settings in Online Multiplayer, or Player options in a lobby.
+Choose Listen only, Push to talk, or Open microphone. Voice is Off initially;
+new profiles use Proximity positioning when enabled. Existing choices stay saved.
+The default push-to-talk key is F8; controller users hold D-pad Down.
+Change proximity range, microphone, speakers and volume in the voice pages.
+Nearby players are louder; other levels or unavailable player positions are muted.
+Voice uses the internet relay without router configuration. It is experimental;
+cross-machine hardware and long sessions still need testing.
+
+SETUP RECOVERY
+
+Game files and Beetleworx may be on different drives. Setup copies files when
+links are unavailable, including on FAT/exFAT drives. If you select another
+game folder after an interrupted setup, the previous imported view is preserved
+in a pc-assets.previous-* backup beside pc-assets. Your original game and saves
+are not overwritten. No fresh release extraction is required to change sources.
 
 SETTINGS AND SAVES
 

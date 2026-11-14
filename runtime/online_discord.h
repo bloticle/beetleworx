@@ -10,4 +10,6 @@ void SetDiscordParty(std::string_view room_code,unsigned players,unsigned capaci
 void ClearDiscordParty(std::string_view room_code);
 std::optional<std::string> TakeDiscordJoinCode();
 std::string DiscordConnectionStatus();
+bool CanInviteDiscordFriends();
+bool InviteDiscordFriends();
 }
