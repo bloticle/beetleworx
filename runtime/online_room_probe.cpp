@@ -50,6 +50,7 @@ REXCVAR_DECLARE(bool,em2_probe_owned_native_player);
 REXCVAR_DEFINE_STRING(em2_room_probe_role,"","Debug","Private native Room loopback probe: host or guest; never a gameplay adapter");
 REXCVAR_DEFINE_STRING(em2_room_probe_invitation_file,"","Debug","Private native Room probe NEW absolute invitation path");
 REXCVAR_DECLARE(uint32_t,em2_native_lobby_qa_damage_player);
+REXCVAR_DECLARE(uint32_t,em2_probe_extra_damage_peer);
 REXCVAR_DEFINE_INT32(em2_room_probe_expected_players,2,"Debug","Private native Room probe transport participant count 2..16; not playable actor capacity");
 REXCVAR_DEFINE_BOOL(em2_room_probe_gameplay,false,"Debug","Explicit private two-retail-player native gameplay experiment; no public-menu enablement");
 REXCVAR_DEFINE_BOOL(em2_room_probe_scripted_input,false,"Debug","Isolated verified loopback Room only: synthetic SDK source for extra-human movement and jump; never normal gameplay input");
@@ -341,7 +342,9 @@ std::unique_ptr<rex::input::InputSystem> MakePrivateRoomInput(Room& room){
             if(!first_){first_=tick;if(warming_)REXLOG_INFO("Private Room SDK neutral warmup completed: peer {} program origin {}",room_.local_peer(),tick);}
             const auto elapsed=tick-*first_;const char* phase="neutral";
             const auto damage_player=REXCVAR_GET(em2_native_lobby_qa_damage_player);
-            const bool damage_target=damage_player && room_.local_peer()==damage_player;
+            const auto extra_damage=REXCVAR_GET(em2_probe_extra_damage_peer);
+            const bool damage_fixture=damage_player || extra_damage;
+            const bool damage_target=room_.local_peer()==(damage_player?damage_player:extra_damage);
             const bool active=room_.lobby().players.size()>2?room_.local_peer()>=3:room_.local_peer()==2;
             const int direction=room_.lobby().players.size()>2 && !(room_.local_peer()&1)?-1:1;
             if(active){
@@ -359,12 +362,14 @@ std::unique_ptr<rex::input::InputSystem> MakePrivateRoomInput(Room& room){
                 if(REXCVAR_GET(em2_probe_native_policy_cycle) && !(room_.local_peer()&1) && elapsed>=530 && elapsed<545){state->gamepad.right_trigger=200;phase="tool after policy release";}
             }
             if(damage_target){
+                if(extra_damage && elapsed>=720 && elapsed<760){state->gamepad.thumb_ly=16000;phase="movement while dead";}
+                if(extra_damage && elapsed>=740 && elapsed<744){state->gamepad.buttons=0x1000;phase="jump while dead";}
                 if(elapsed>=1000 && elapsed<1012){state->gamepad.thumb_ly=16000;phase="forward after respawn";}
                 if(elapsed>=1040 && elapsed<1052){state->gamepad.thumb_ly=-16000;phase="backward after respawn";}
                 if(elapsed>=1080 && elapsed<1084){state->gamepad.buttons=0x1000;phase="jump after respawn";}
             }
-            const auto complete=damage_player?1200u:REXCVAR_GET(em2_probe_native_policy_cycle)?560u:360u;
-            if((!last_ || *last_!=tick) && ((damage_player && (elapsed==1000 || elapsed==1012 || elapsed==1040 || elapsed==1052 || elapsed==1080 || elapsed==1084 || elapsed==1200)) || elapsed==0 || elapsed==60 || elapsed==72 || elapsed==90 || elapsed==102 || elapsed==130 || elapsed==134 || elapsed==175 || elapsed==195 || elapsed==240 || elapsed==252 || elapsed==280 || elapsed==284 || elapsed==300 || elapsed==320 || elapsed==330 || elapsed==345 || elapsed==360 || (REXCVAR_GET(em2_probe_native_policy_cycle) && (elapsed==530 || elapsed==545 || elapsed==560)) || (REXCVAR_GET(em2_probe_online_chat) && (elapsed==480 || elapsed==492))))
+            const auto complete=damage_fixture?1200u:REXCVAR_GET(em2_probe_native_policy_cycle)?560u:360u;
+            if((!last_ || *last_!=tick) && ((extra_damage && (elapsed==720 || elapsed==740 || elapsed==744 || elapsed==760)) || (damage_fixture && (elapsed==1000 || elapsed==1012 || elapsed==1040 || elapsed==1052 || elapsed==1080 || elapsed==1084 || elapsed==1200)) || elapsed==0 || elapsed==60 || elapsed==72 || elapsed==90 || elapsed==102 || elapsed==130 || elapsed==134 || elapsed==175 || elapsed==195 || elapsed==240 || elapsed==252 || elapsed==280 || elapsed==284 || elapsed==300 || elapsed==320 || elapsed==330 || elapsed==345 || elapsed==360 || (REXCVAR_GET(em2_probe_native_policy_cycle) && (elapsed==530 || elapsed==545 || elapsed==560)) || (REXCVAR_GET(em2_probe_online_chat) && (elapsed==480 || elapsed==492))))
                 REXLOG_INFO("Private Room SDK input: peer {} tick {} elapsed {} phase '{}' reads {}; synthetic SDK driver, original native interpreters",room_.local_peer(),tick,elapsed,elapsed==complete?"complete":phase,reads_);
             last_=tick;return X_ERROR_SUCCESS;
         }

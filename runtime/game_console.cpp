@@ -275,6 +275,7 @@ void Service(PPCContext& ctx,uint8_t* base,uint32_t state){
 
 void em2::TickPrivateNativeRestart(PPCContext& ctx,uint8_t* base){
  net::TickPrivateNativeTaskPolicy(ctx,base);
+ if(net::TickPrivateNativeExtraDamage(ctx,base))return;
  const auto requested=REXCVAR_GET(em2_native_lobby_qa_restart_tick);
  const auto count=REXCVAR_GET(em2_native_lobby_qa_restart_count);
  const auto interval=REXCVAR_GET(em2_native_lobby_qa_restart_interval);

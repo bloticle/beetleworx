@@ -239,6 +239,19 @@ bool NativeRoomGameplay::InitializeActors(PPCContext& ctx,uint8_t* base){
     return result==NativeRosterStep::Ready;
 }
 uint16_t NativeRoomGameplay::extra_actor_mask()const{return impl_->actors->ready()?impl_->actors->mask():0;}
+bool NativeRoomGameplay::OwnedActorForPeer(uint64_t peer,PPCContext& ctx,uint8_t* base,OwnedActorInput& out)const{
+    Environment environment;Context preserve(ctx);out={};const auto& s=*impl_;
+    if(!s.Owner() || s.stopped || !s.started || !s.Canonical() || !s.World(base) || !s.actors->ready())return false;
+    for(const auto& entry:s.actors->actors())if(entry.room_peer==peer){
+        OwnedActorInput current;
+        if(!OwnedActorInputFor(entry.actor.peer,ctx,base,current) || !current.enabled ||
+           current.generation!=entry.actor.generation || current.registry!=entry.actor.registry ||
+           current.entity!=entry.actor.entity || current.controller!=entry.actor.controller ||
+           current.listener!=entry.actor.listener || current.handle!=entry.actor.handle || current.action_user!=entry.actor.action_user)return false;
+        out=current;return true;
+    }
+    return false;
+}
 uint32_t NativeRoomGameplay::LocalCameraController()const{const auto& s=*impl_;return s.Owner() && s.peer>2 && s.load==em2::CurrentNativeLoadGeneration()?s.actors->CameraController(s.peer):0;}
 uint32_t NativeRoomGameplay::LocalHudActor(unsigned profile,PPCContext& ctx,uint8_t* base)const{
     Environment environment;Context preserve(ctx);const auto& s=*impl_;
@@ -581,6 +594,7 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
     const auto owned_finished=s.actor_frames->Finish(tick,base);
     if(owned_finished!=OwnedFrameResult::Ready)return s.Stop("Native owned actor completion rejected (result "+std::to_string(int(owned_finished))+")");
     ObservePrivateRoomActors(tick,s.actors->actors(),base);
+    ObservePrivateExtraDamage(tick,ctx,base);
     // Original post-update, observation, retail input and every owned actor
     // completion succeeded. Proof consensus may still fail or be unavailable.
     // This is only a physical update boundary, never authoritative agreement.

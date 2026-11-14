@@ -33,6 +33,7 @@
 
 REXCVAR_DEFINE_BOOL(em2_open_native_online_menu,false,"Debug","Open the authored native online page on the title menu (no gameplay input)");
 REXCVAR_DEFINE_STRING(em2_native_lobby_qa_role,"","Debug","Private native-menu loopback test role: host or client");
+REXCVAR_DEFINE_BOOL(em2_native_lobby_qa_extra_oswald,false,"Debug","Private native lobby only: select Oswald for additional players before Ready");
 REXCVAR_DEFINE_INT32(em2_native_lobby_qa_players,2,"Debug","Private native Room menu: wait for exactly 2..16 verified participants before Ready");
 REXCVAR_DEFINE_STRING(em2_native_lobby_qa_invitation_file,"","Debug","Private native-menu loopback invitation file");
 REXCVAR_DEFINE_STRING(em2_native_lobby_qa_replay_invitation_file,"","Debug","Host-only private native-menu replay: reuse a prior loopback invitation nonce, with freshly verified build/content/save");
@@ -250,7 +251,7 @@ struct Controller {
             if(boot->uses_room() && NativeOnlineMenuQaActive()){
                 const auto roster=boot->lobby();const auto* local=LocalPlayer(roster);
                 const auto wanted=[&](const LobbyPlayer& player){return std::pair{
-                    player.peer==1 || (player.peer>2 && (player.peer&1))?LobbyCharacter::Mickey:LobbyCharacter::Oswald,
+                    player.peer==1 || (player.peer>2 && !REXCVAR_GET(em2_native_lobby_qa_extra_oswald) && (player.peer&1))?LobbyCharacter::Mickey:LobbyCharacter::Oswald,
                     uint8_t(Qa().players==2?player.peer+1:player.peer-1)};};
                 qa_profile_ready=roster.players.size()==Qa().players && std::all_of(roster.players.begin(),roster.players.end(),[&](const auto& player){const auto [character,color]=wanted(player);return player.character==character && player.color==color;});
                 if(!qa_profile_ready && local && !boot->lobby_request_pending() &&

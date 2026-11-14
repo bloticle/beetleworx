@@ -578,3 +578,5 @@ add_custom_command(TARGET EM2Recomp POST_BUILD
 target_sources(EM2Recomp PRIVATE rex_upload_buffer_pool.cpp)
 
 target_sources(EM2Recomp PRIVATE guest_shutdown.cpp rex_xthread.cpp rex_xobject.cpp)
+
+target_sources(EM2Recomp PRIVATE online_damage_probe.cpp)

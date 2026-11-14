@@ -2,10 +2,12 @@ param(
  [ValidateRange(3,16)][int]$Players=3,
  
  [switch]$CooperativeShutdown,
+ [switch]$ExtraOswald,
  [switch]$ScriptedInput,[switch]$ChatProbe,[switch]$VoiceProbe,[switch]$ButtonTaskProbe,[switch]$PolicyCycle,[switch]$CaptureShutdownHang,
  [switch]$NavigationTrace,[switch]$FaceTargetPoison,[switch]$UnfixedFaceTarget,[switch]$NativeReload,
  [ValidateRange(0,100000)][int]$CheckpointReloadTick=0,
  [ValidateSet(0,1,2)][int]$DamagePlayer=0,
+ [ValidateRange(0,16)][int]$DamageExtraPeer=0,
  [ValidateRange(-1,16)][int]$PipelineCreationThreads=-1,
  [ValidateRange(1,4)][int]$CheckpointReloadCount=1,
  [ValidateRange(600,100000)][int]$CheckpointReloadInterval=700,
@@ -23,6 +25,7 @@ param(
  [ValidateRange(120,600)][int]$StartupTimeoutSeconds=360
 )
 $ErrorActionPreference='Stop'
+if($DamageExtraPeer -and ($DamageExtraPeer -lt 3 -or $DamageExtraPeer -gt $Players -or $DamagePlayer -or !$ScriptedInput -or !$CheckpointReloadTick -or $CheckpointReloadCount -ne 1 -or $NativeLevelTarget -or $NativeLevelTargets.Count -or $PolicyCycle -or $ReenterAfterReturn -or $CloseParticipant -or $PartialDeliveryParticipant)){throw 'Extra damage requires one real extra peer, one scheduled native damage action, scripted input, and no other fixture.'}
 if($DamagePlayer -and (!$ScriptedInput -or !$CheckpointReloadTick -or $CheckpointReloadCount -ne 1 -or $NativeLevelTarget -or $NativeLevelTargets.Count -or $PolicyCycle -or $ReenterAfterReturn -or $CloseParticipant -or $PartialDeliveryParticipant)){throw 'Damage fixture requires one scheduled original damage action without a level route, policy cycle, or disconnect injection.'}
 if($PolicyCycle -and (!$ScriptedInput -or !$ButtonTaskProbe -or $Players -ne 4 -or $CheckpointReloadTick -or $ReenterAfterReturn -or $CloseParticipant -or $PartialDeliveryParticipant)){throw 'PolicyCycle requires four isolated scripted players and task probes, without reload or fault injection.'}
 if($RecoveryController -and !$RecoveryPrompt){throw 'Controller recovery QA requires RecoveryPrompt mode; the HUD auto-click will be disabled.'}
@@ -72,6 +75,8 @@ $records=[Collections.Generic.List[object]]::new();$owned=[Collections.Generic.L
 $record=[ordered]@{root=$root;players=$Players;exe_sha256=$exeHash;native_room_menu=$true;checkpoint_reload_tick=$CheckpointReloadTick;voice_probe=[bool]$VoiceProbe;navigation_trace=[bool]$NavigationTrace;face_target_poison=[bool]$FaceTargetPoison;face_target_unfixed=[bool]$UnfixedFaceTarget;replay_invitation=$ReplayInvitationFile;chat_probe=[bool]$ChatProbe;scripted_sdk_input=[bool]$ScriptedInput;mixed_characters=$true;gameplay_input_sent=$false;screenshots_taken=$false;startup_complete=$false;observation_complete=$false;processes=@()}
 $record.capture_shutdown_hang=[bool]$CaptureShutdownHang
 $record.cooperative_shutdown_override=[bool]$CooperativeShutdown
+$record.damage_extra_peer=$DamageExtraPeer;
+$record.extra_dead_input=[bool]$DamageExtraPeer;$record.extra_oswald=[bool]$ExtraOswald;$record.mixed_characters=!$ExtraOswald;
 $record.damage_player=$DamagePlayer;$record.pipeline_creation_threads=$PipelineCreationThreads
 $record.commit_guard_mb=$MinimumFreeCommitMB;$record.minimum_free_commit_mb=$null
 $record.memory_guard_mb=$MinimumFreeMemoryMB;$record.memory_samples=@();$record.minimum_free_memory_mb=$null;$record.peak_owned_working_set_mb=0;$record.peak_owned_private_mb=0
@@ -197,8 +202,10 @@ try {
   SampleOwnedMemory
   $info=[Diagnostics.ProcessStartInfo]::new($exe);$info.UseShellExecute=$false;$info.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden;$info.WorkingDirectory=$runtime
   foreach($arg in @(('--em2_user_data_directory='+$peer.user),('--em2_content_directory='+$peer.content),('--log_file='+$peer.log),'--no-em2_online_menu','--no-em2_demo_build','--em2_private_profile=true','--em2_native_room_lobby=true','--em2_native_online_handoff=true',('--em2_native_lobby_qa_role='+$peer.role),('--em2_native_lobby_qa_players='+$Players),('--em2_native_lobby_qa_invitation_file='+(Join-Path $root 'native-menu-invitation.txt')),'--em2_online_auto_continue=true','--em2_auto_continue=false','--em2_online_world_random=true','--em2_online_single_view=true','--em2_trace_online_observations=true','--em2_trace_auto_continue=true','--em2_trace_online_clothing=true')){$info.ArgumentList.Add($arg)}
+  if($ExtraOswald){$info.ArgumentList.Add('--em2_native_lobby_qa_extra_oswald=true')}
   if($CooperativeShutdown){$info.ArgumentList.Add('--em2_cooperative_title_shutdown=true')}
   if($PipelineCreationThreads -ge 0){$info.ArgumentList.Add('--d3d12_pipeline_creation_threads='+$PipelineCreationThreads)}
+  if($DamageExtraPeer){$info.ArgumentList.Add('--em2_probe_extra_damage_peer='+$DamageExtraPeer)}
   if($DamagePlayer){$info.ArgumentList.Add('--em2_native_lobby_qa_damage_player='+$DamagePlayer)}
   if($ChatProbe){$info.ArgumentList.Add('--em2_probe_online_chat=true')}
   if($VoiceProbe){$info.ArgumentList.Add('--em2_probe_online_voice=true')}
@@ -287,7 +294,7 @@ try {
    if(!(OwnedProcess $entry) -or $entry.process.HasExited){throw 'A native menu test process exited before observation completed.'}
    $text=if(Test-Path -LiteralPath $entry.record.log){(Get-Content -LiteralPath $entry.record.log -Raw) ?? ''}else{''}
    if(!$PartialDeliveryParticipant){foreach($failure in @('Native online lobby handoff failed:','Native online menu preparation failed:','Native lobby QA rejected:','Retained native Room stopped:','Native Room gameplay stopped:','Native room initialization stopped:')){if($text.Contains($failure)){if($ReenterAfterReturn -and (ObserveControlledDisconnect 4)){continue};throw ($entry.record.role+' reported '+$failure)}}}
-   $expectedWorlds=1+$(if($CheckpointReloadTick -and !$DamagePlayer){$CheckpointReloadCount}else{0})
+   $expectedWorlds=1+$(if($CheckpointReloadTick -and !$DamagePlayer -and !$DamageExtraPeer){$CheckpointReloadCount}else{0})
    if([regex]::Matches($text,"phase 'complete' reads").Count -ge $expectedWorlds){++$programs}
    if([regex]::Matches($text,'Native Room gameplay first frame consumed:').Count -ge $expectedWorlds){++$reentries}
    if($text.Contains('Native lobby completed authored save reload and accepted native Continue') -and $text.Contains('Native Room gameplay first frame consumed:')){++$ready}

@@ -6,6 +6,7 @@ struct PPCContext;
 namespace rex::input {class InputSystem;}
 namespace em2::net {
 struct OnlineNameActor;
+struct OwnedActorInput;
 class RoomBootstrapGate;
 class NativeRoomActors;
 enum class RoomGameplayAdmission {Inactive,Waiting,Ready,Stopped,WrongThread};
@@ -25,6 +26,7 @@ public:
     // separate from Readiness, which must not construct/admit world entities.
     bool InitializeActors(PPCContext&,uint8_t*);
     uint16_t extra_actor_mask()const;
+    bool OwnedActorForPeer(uint64_t room_peer,PPCContext&,uint8_t*,OwnedActorInput&)const;
     uint32_t LocalCameraController()const;
     uint32_t LocalHudActor(unsigned profile,PPCContext&,uint8_t*)const;
     bool OwnsCameraMode(uint32_t,uint8_t*)const;
