@@ -1,6 +1,7 @@
 #include "online_cutscene_input.h"
 #include "guest_read_batch.h"
 #include "ppc_context.h"
+#include "allocation_trace.h"
 #include <rex/logging.h>
 #include <cstring>
 #include <windows.h>
@@ -58,9 +59,10 @@ bool InspectNativeCutsceneUi(PPCContext& ctx,uint8_t* base,uint32_t registry,Nat
 }
 void TracePrivateNativeCutsceneUi(uint64_t epoch,PPCContext& ctx,uint8_t* base,uint32_t registry){
     if(!REXCVAR_GET(em2_private_profile))return;
-    static thread_local uint64_t recorded=0;if(recorded==epoch)return;
+    static thread_local uint64_t recorded=0,recorded_load=UINT64_MAX;
+    const auto load=em2::CurrentNativeLoadGeneration();if(recorded==epoch && recorded_load==load)return;
     NativeCutsceneUiSnapshot snapshot;if(!InspectNativeCutsceneUi(ctx,base,registry,snapshot))return;
-    recorded=epoch;
+    recorded=epoch;recorded_load=load;
     REXLOG_INFO("Private native cutscene UI inventory: input epoch {} manager {:08X} contexts {}; read-only, no action evaluation or dispatch",epoch,snapshot.manager,snapshot.contexts.size());
     for(const auto& context:snapshot.contexts){
         REXLOG_INFO("Private native cutscene UI context: '{}' event {:08X} listeners {} actions {}",context.name,context.event,context.listeners.size(),context.actions.size());

@@ -1,6 +1,7 @@
 #include "online_room_gameplay.h"
 #include "online_gameover_input.h"
 #include "online_cutscene_input.h"
+#include "online_cutscene_skip.h"
 #include "online_actor_jump.h"
 #include "online_room_bootstrap.h"
 #include "online_room_runtime.h"
@@ -146,6 +147,25 @@ struct NativeRoomGameplay::Impl {
     bool return_pending=false;
     std::optional<uint64_t> return_wait_start;
     std::optional<uint64_t> cutscene_entry,cutscene_resume;
+    std::unique_ptr<NativeCutsceneSkipSource> private_skip_source;
+    bool private_skip_armed=false,private_skip_failed=false;
+    void ProbeSkip(const Pad& pad,uint64_t tick,PPCContext& ctx,uint8_t* base){
+        if(!REXCVAR_GET(em2_private_profile) || return_pending || private_skip_failed)return;
+        try{
+            if(!private_skip_source)private_skip_source=std::make_unique<NativeCutsceneSkipSource>();
+            if(!private_skip_armed){
+                private_skip_armed=private_skip_source->Arm(registry,movement.user,input_epoch,tick,ctx,base);
+                if(!private_skip_armed)return;
+                REXLOG_INFO("Private native cutscene skip source armed: tick {} input epoch {} native device {}; private original math only, no dispatch or submit",tick,input_epoch,movement.user);
+            }
+            NativeCutsceneSkipSample sample;
+            if(!private_skip_source->Produce(pad,movement.user,input_epoch,tick,ctx,base,sample)){
+                private_skip_failed=true;REXLOG_WARN("Private native cutscene skip source rejected sample: tick {}; no callbacks dispatched",tick);return;
+            }
+            if(std::any_of(sample.dispatch.begin(),sample.dispatch.end(),[](bool fired){return fired;}))
+                REXLOG_INFO("Private native cutscene skip result: tick {} epoch {} prompt {} hold {} release {}; original math, no callback dispatch or wire submission",tick,input_epoch,sample.dispatch[0],sample.dispatch[1],sample.dispatch[2]);
+        }catch(...){private_skip_failed=true;REXLOG_WARN("Private native cutscene skip source failed; no callbacks dispatched");}
+    }
     std::array<std::array<uint8_t,32>,kOnlineRoomCapacity> cutscene_schemas{};
     bool prepared_passive=false,consumed_passive=false;
     bool CutsceneFrame(const RoomFrame& frame,PPCContext& ctx,uint8_t* base)const{
@@ -589,6 +609,7 @@ RoomGameplayAdmission NativeRoomGameplay::Prepare(PPCContext& ctx,uint8_t* base,
             s.Stop("Native cutscene entry lacks a completed owned input epoch");return RoomGameplayAdmission::Stopped;}
         for(const auto& player:s.roster.players)s.cutscene_schemas[player.peer-1]=s.button_schemas[player.character==LobbyCharacter::Mickey?0:1];
         s.cutscene_entry=*s.native_completed;s.cutscene_resume.reset();++s.input_epoch;
+        s.private_skip_source.reset();s.private_skip_armed=false;s.private_skip_failed=false;
         REXLOG_INFO("Native Room cutscene input suspended: entry tick {}, input epoch {}; original state 3 and native cutscene restriction, actor incarnations unchanged",*s.cutscene_entry,s.input_epoch);
     }
     if(s.cutscene_entry && mode!=3){
@@ -614,6 +635,7 @@ RoomGameplayAdmission NativeRoomGameplay::Prepare(PPCContext& ctx,uint8_t* base,
                !em2::SampleLocalControls(*s.input,s.physical,tick,discarded) ||
                !s.room->SubmitLocal(s.room->next_submit_tick(),NativeCutsceneCommand(s.input_epoch))){
                 s.Stop("Native cutscene source could not poll its owned device and submit no-action epoch");return RoomGameplayAdmission::Stopped;}
+            s.ProbeSkip(discarded,tick,ctx,base);
             s.submitted=tick;
         }
         if(*s.submitted!=tick){s.Stop("Native cutscene source crossed native ticks");return RoomGameplayAdmission::Stopped;}
