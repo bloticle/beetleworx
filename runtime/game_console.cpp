@@ -36,6 +36,7 @@ PPC_EXTERN_FUNC(__imp__sub_82705AF8);
 REXCVAR_DEFINE_BOOL(em2_verify_game_console_vm,false,"Debug","Run pure arithmetic/string/error/stack console probes in the real game VM; no gameplay actions");
 REXCVAR_DEFINE_UINT32(em2_native_lobby_qa_restart_tick,0xFFFFFFFFu,"Debug","Private validated loopback QA only: invoke the original RestartCurrentLevel at this agreed native script-scheduler tick; maximum disables");
 REXCVAR_DEFINE_UINT32(em2_native_lobby_qa_movie_skip_delay,0,"Debug","Private movie fixture only: native StartSequence skip delay in seconds, 0..10");
+REXCVAR_DEFINE_BOOL(em2_native_lobby_qa_direct_movie,false,"Debug","Private three-human native scheduler fixture: original PlayMovieInternal for retail Havok logo; no direct playback/context writes");
 REXCVAR_DEFINE_BOOL(em2_native_lobby_qa_movie_sequence,false,"Debug","Private three-human native scheduler fixture: original StartSequence for retail LOGO_havok.bik; no playback/context writes");
 REXCVAR_DEFINE_BOOL(em2_native_lobby_qa_authored_conversation,false,"Debug","Private three-human native scheduler fixture: original ForceSequence on the bound Autotopia intro owner; no direct scene/context writes");
 REXCVAR_DEFINE_BOOL(em2_native_lobby_qa_cutscene_cycle,false,"Debug","Private native scheduler fixture: balanced original RestrictCutSceneInput/UnrestrictCutSceneInput calls; never forces a load or changes a context directly");
@@ -297,6 +298,7 @@ void em2::TickPrivateNativeRestart(PPCContext& ctx,uint8_t* base){
  const bool cutscene=REXCVAR_GET(em2_native_lobby_qa_cutscene_cycle);
  const bool authored=REXCVAR_GET(em2_native_lobby_qa_authored_conversation);
  const bool movie=REXCVAR_GET(em2_native_lobby_qa_movie_sequence);
+ const bool direct=REXCVAR_GET(em2_native_lobby_qa_direct_movie);
  const auto requested_level=REXCVAR_GET(em2_native_lobby_qa_level_target);
  const auto route=REXCVAR_GET(em2_native_lobby_qa_level_route);
  auto level=requested_level.empty()?std::optional<std::string>{}:Level(requested_level);
@@ -324,15 +326,20 @@ void em2::TickPrivateNativeRestart(PPCContext& ctx,uint8_t* base){
      REXCVAR_GET(em2_native_lobby_qa_checkpoint_reload) || !net::PrivateNativeMenuRoom() || net::PrivateNativeMenuRoom()->lobby().players.size()!=3)){
    REXLOG_ERROR("Native lobby QA rejected: cutscene cycle requires three private humans, exactly two balanced native calls and no other fixture");return;
  }
- if(authored && (movie || cutscene || damage_player || REXCVAR_GET(em2_probe_extra_damage_peer) || level || !route.empty() || count!=1 ||
+ if(authored && (direct || movie || cutscene || damage_player || REXCVAR_GET(em2_probe_extra_damage_peer) || level || !route.empty() || count!=1 ||
      REXCVAR_GET(em2_native_lobby_qa_checkpoint_reload) || !net::PrivateNativeMenuRoom() || net::PrivateNativeMenuRoom()->lobby().players.size()!=3 ||
      Signature("ForceSequence")!="ScriptEntityHandle hEntity, NiFixedString sequenceName, int playerNum=0")){
    REXLOG_ERROR("Native lobby QA rejected: authored conversation requires three private humans, one original sequence call and no other fixture");return;
  }
- if(movie && (REXCVAR_GET(em2_native_lobby_qa_movie_skip_delay)>10 || authored || cutscene || damage_player || REXCVAR_GET(em2_probe_extra_damage_peer) || level || !route.empty() || count!=1 ||
+ if(movie && (direct || REXCVAR_GET(em2_native_lobby_qa_movie_skip_delay)>10 || authored || cutscene || damage_player || REXCVAR_GET(em2_probe_extra_damage_peer) || level || !route.empty() || count!=1 ||
      REXCVAR_GET(em2_native_lobby_qa_checkpoint_reload) || !net::PrivateNativeMenuRoom() || net::PrivateNativeMenuRoom()->lobby().players.size()!=3 ||
      Signature("StartSequence")!="ScriptEntityHandle entityHandle, NiFixedString sequences, bool bPauseAudio=true, bool bIgnoreLotCheck=false, NiFixedString audioEvent")){
    REXLOG_ERROR("Native lobby QA rejected: movie sequence requires three private humans, one original StartSequence call and no other fixture");return;
+ }
+ if(direct && (movie || authored || cutscene || damage_player || REXCVAR_GET(em2_probe_extra_damage_peer) || level || !route.empty() || count!=1 ||
+     REXCVAR_GET(em2_native_lobby_qa_movie_skip_delay) || REXCVAR_GET(em2_native_lobby_qa_checkpoint_reload) || !net::PrivateNativeMenuRoom() || net::PrivateNativeMenuRoom()->lobby().players.size()!=3 ||
+     Signature("PlayMovieInternal")!="ScriptEntityHandle entityHandle, NiFixedString movieName, bool bPauseAudio=true, bool allowSkipping=true")){
+   REXLOG_ERROR("Native lobby QA rejected: direct movie requires three private humans, one original PlayMovieInternal call and no other fixture");return;
  }
  // 82732AB8 publishes the reusable native BScript at 833DA5E0. Retail
  // 82732634 reads its +4 lua_State before calling Lua. Borrow it freshly at
@@ -347,11 +354,12 @@ void em2::TickPrivateNativeRestart(PPCContext& ctx,uint8_t* base){
  REXLOG_INFO("Native lobby QA restart executing: tick {}",tick);
  const bool checkpoint=REXCVAR_GET(em2_native_lobby_qa_checkpoint_reload);
  const bool clean=REXCVAR_GET(em2_native_lobby_qa_clean_level_load);
- REXLOG_INFO("Native lobby QA reload method: {}",movie?"original-movie-sequence":authored?"original-authored-conversation":cutscene?"original-cutscene-cycle":damage_player?"original-damage":level?(clean?"original-level":"original-transition"):checkpoint?"checkpoint-memory":"level-only");
+ REXLOG_INFO("Native lobby QA reload method: {}",direct?"original-direct-movie":movie?"original-movie-sequence":authored?"original-authored-conversation":cutscene?"original-cutscene-cycle":damage_player?"original-damage":level?(clean?"original-level":"original-transition"):checkpoint?"checkpoint-memory":"level-only");
  if(level)REXLOG_INFO("Native lobby QA level target: {}",*level);
- const auto source=movie?std::string("StartSequence(GetPlayer(),\"LOGO_havok.bik:")+std::to_string(REXCVAR_GET(em2_native_lobby_qa_movie_skip_delay))+"\",true,false,\"\")":authored?std::string("local owner=GetEntity(\"tcy_autotopia_01a_shared.Marker(Conversation) Oswald\"); ForceSequence(owner,\"AUT_v1_AreaIntro\",1); return IsSequencePlaying(owner,\"AUT_v1_AreaIntro\")"):cutscene?std::string(sent==1?"RestrictCutSceneInput()":"UnrestrictCutSceneInput()"):damage_player>=3?std::string("local a=GetPlayer(); local b=GetPlayer2(); local x=GetHealth(a); local y=GetHealth(b); Damage(a,1000); Damage(b,1000); return x,y,GetHealth(a),GetHealth(b)"):damage_player?std::string("local p=")+(damage_player==1?"GetPlayer()":"GetPlayer2()")+"; local before=GetHealth(p); Damage(p,1000); return before,GetHealth(p)":level?std::string(clean?"CleanLoadLevel(":"TransitionToLevel(")+Quote(*level)+")":std::string(checkpoint?"LoadGameFromMemory()":"RestartCurrentLevel()");
+ const auto source=direct?std::string("PlayMovieInternal(GetPlayer(),\"Movies/LOGO_havok.bik\",true,true)"):movie?std::string("StartSequence(GetPlayer(),\"LOGO_havok.bik:")+std::to_string(REXCVAR_GET(em2_native_lobby_qa_movie_skip_delay))+"\",true,false,\"\")":authored?std::string("local owner=GetEntity(\"tcy_autotopia_01a_shared.Marker(Conversation) Oswald\"); ForceSequence(owner,\"AUT_v1_AreaIntro\",1); return IsSequencePlaying(owner,\"AUT_v1_AreaIntro\")"):cutscene?std::string(sent==1?"RestrictCutSceneInput()":"UnrestrictCutSceneInput()"):damage_player>=3?std::string("local a=GetPlayer(); local b=GetPlayer2(); local x=GetHealth(a); local y=GetHealth(b); Damage(a,1000); Damage(b,1000); return x,y,GetHealth(a),GetHealth(b)"):damage_player?std::string("local p=")+(damage_player==1?"GetPlayer()":"GetPlayer2()")+"; local before=GetHealth(p); Damage(p,1000); return before,GetHealth(p)":level?std::string(clean?"CleanLoadLevel(":"TransitionToLevel(")+Quote(*level)+")":std::string(checkpoint?"LoadGameFromMemory()":"RestartCurrentLevel()");
  if(damage_player)REXLOG_INFO("Native lobby QA damage requested: tick {}, retail player {}, amount 1000; original Damage Lua export, no forced reload",tick,damage_player);
  const auto result=Evaluate(ctx,base,state,source);
+ if(direct)REXLOG_INFO("Private native direct movie: tick {} LOGO_havok.bik attempted {} status {} stack {}; original PlayMovieInternal export, no direct playback/state writes",tick,result.attempted,result.status,result.stack_ok);
  if(movie)REXLOG_INFO("Private native movie sequence: tick {} LOGO_havok.bik attempted {} status {} stack {}; original StartSequence export, no direct playback/state writes",tick,result.attempted,result.status,result.stack_ok);
  if(authored)REXLOG_INFO("Private native authored conversation: tick {} sequence AUT_v1_AreaIntro attempted {} status {} stack {}; original ForceSequence export on authored owner, no direct context/state writes",tick,result.attempted,result.status,result.stack_ok);
  if(authored)for(const auto& value:result.values)REXLOG_INFO("Private native authored conversation result: {}",value);

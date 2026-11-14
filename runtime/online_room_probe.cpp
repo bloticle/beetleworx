@@ -38,6 +38,7 @@ REXCVAR_DECLARE(bool,em2_private_profile);
 REXCVAR_DECLARE(bool,em2_native_lobby_qa_cutscene_cycle);
 REXCVAR_DECLARE(bool,em2_native_lobby_qa_authored_conversation);
 REXCVAR_DECLARE(bool,em2_native_lobby_qa_movie_sequence);
+REXCVAR_DECLARE(bool,em2_native_lobby_qa_direct_movie);
 REXCVAR_DECLARE(uint32_t,em2_native_lobby_qa_movie_skip_delay);
 REXCVAR_DEFINE_BOOL(em2_probe_cutscene_boundary_move,false,"Debug","Private cutscene QA only: hold SDK movement over the authored restriction boundary to test native stop behavior");
 REXCVAR_DEFINE_BOOL(em2_probe_cutscene_skip_input,false,"Debug","Private cutscene QA only: fresh skip hold from extra peer 3 after the carried entry press releases");
@@ -352,7 +353,7 @@ std::unique_ptr<rex::input::InputSystem> MakePrivateRoomInput(Room& room){
             const auto extra_damage=REXCVAR_GET(em2_probe_extra_damage_peer);
             const bool damage_fixture=damage_player || extra_damage;
             const bool damage_target=damage_player==4 || room_.local_peer()==(damage_player?damage_player:extra_damage);
-            const bool cutscene_fixture=REXCVAR_GET(em2_native_lobby_qa_cutscene_cycle) || REXCVAR_GET(em2_native_lobby_qa_authored_conversation) || REXCVAR_GET(em2_native_lobby_qa_movie_sequence);
+            const bool cutscene_fixture=REXCVAR_GET(em2_native_lobby_qa_cutscene_cycle) || REXCVAR_GET(em2_native_lobby_qa_authored_conversation) || REXCVAR_GET(em2_native_lobby_qa_movie_sequence) || REXCVAR_GET(em2_native_lobby_qa_direct_movie);
             const bool active=!cutscene_fixture && damage_player!=4 && (room_.lobby().players.size()>2?room_.local_peer()>=3:room_.local_peer()==2);
             const int direction=room_.lobby().players.size()>2 && !(room_.local_peer()&1)?-1:1;
             if(active){

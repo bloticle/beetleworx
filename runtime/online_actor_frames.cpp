@@ -215,7 +215,7 @@ OwnedFrameResult OwnedMovementFrames::FinishMovieEntry(uint64_t tick,PPCContext&
        !em2::CurrentAgreedSimulationTick(agreed) || agreed!=tick)return OwnedFrameResult::IncompleteTick;
     if(!SameWorld(registry_,base))return OwnedFrameResult::StaleActor;
     NativeGameOverState control;uint32_t mode=0;
-    if(!ReadNativeControlState(ctx,base,control,mode) || mode!=2 || control.registry!=registry_ ||
+    if(!ReadNativeControlState(ctx,base,control,mode) || !NativeMovieControlMode(mode) || control.registry!=registry_ ||
        !ReadNativeCutsceneContext(ctx,base,registry_))return OwnedFrameResult::NativeNotReady;
     uint16_t mask=0;
     for(unsigned i=0;i<kOnlineRoomCapacity;++i)if((roster_&~retail_)&(1u<<i)){

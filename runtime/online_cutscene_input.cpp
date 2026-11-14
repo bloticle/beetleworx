@@ -34,6 +34,15 @@ bool MovieOnlySequence(uint8_t* base,uint32_t object,bool allow_completed=false)
     for(unsigned i=0;i<count;++i)if(!movie(PPC_LOAD_U32(queue+i*4)))return false;
     return current || count || (allow_completed && PPC_LOAD_U8(object+4)==1);
 }
+bool DirectMovie(uint8_t* base,uint32_t object,bool allow_completed=false){
+    if(!UiReadable(base,object,32))return false;
+    std::string file;
+    if(!UiName(base,PPC_LOAD_U32(object+8),file) || file.size()<5)return false;
+    const auto at=file.size()-4;
+    if(file[at]!='.' || (file[at+1]|32)!='b' || (file[at+2]|32)!='i' || (file[at+3]|32)!='k')return false;
+    for(unsigned offset:{12u,13u,14u,15u,20u,21u})if(PPC_LOAD_U8(object+offset)>1)return false;
+    return !PPC_LOAD_U8(object+13) || allow_completed;
+}
 }
 bool InspectNativeCutsceneUi(PPCContext& ctx,uint8_t* base,uint32_t registry,NativeCutsceneUiSnapshot& out){
     UiPreserve preserve(ctx,base);NativeGameOverState state;uint32_t mode=0;
@@ -100,6 +109,10 @@ bool ReadNativeCutsceneContext(PPCContext& ctx,uint8_t* base,uint32_t registry,u
     NativeGameOverState state;uint32_t mode=0;
     if(!ReadNativeControlState(ctx,base,state,mode) || !NativeCutsceneControlMode(mode) || state.registry!=registry ||
        !GuestReadBatch::Readable(base+0x833DBAD8,4))return false;
+    if(mode==1){uint32_t profile=0,object=0,handler=0;
+        return ReadNativeControlTarget(ctx,base,registry,1,profile,object,handler) && handler==NativeMovieInputHandler(1) &&
+            DirectMovie(base,object,owned_movie_sequence && object==owned_movie_sequence);
+    }
     if(mode==2){uint32_t profile=0,object=0,handler=0;
         return ReadNativeControlTarget(ctx,base,registry,2,profile,object,handler) && handler==0x82B1DF70 &&
             MovieOnlySequence(base,object,owned_movie_sequence && object==owned_movie_sequence);
@@ -186,6 +199,17 @@ bool TestNativeCutsceneInput(){
         if(!check(!MovieOnlySequence(base,object) && MovieOnlySequence(base,object,true),"completion latch only admits the previously owned movie boundary"))return false;
         PPC_STORE_U8(object+4,2);
         if(!check(!MovieOnlySequence(base,object,true),"unrecognized completion latch rejects"))return false;
+        std::fill(memory.begin(),memory.end(),uint8_t(0));
+        constexpr uint32_t name=0x5000;PPC_STORE_U32(object+8,name);
+        if(!check(!DirectMovie(base,object),"direct movie requires a nonempty native file"))return false;
+        std::memcpy(base+name,"Movies/test.BIK",16);
+        if(!check(DirectMovie(base,object),"direct native Bink name admits before playback begins"))return false;
+        PPC_STORE_U8(object+13,1);
+        if(!check(!DirectMovie(base,object) && DirectMovie(base,object,true),"completed direct movie requires retained ownership"))return false;
+        PPC_STORE_U8(object+13,0);PPC_STORE_U8(object+21,2);
+        if(!check(!DirectMovie(base,object),"invalid direct movie flag rejects"))return false;
+        PPC_STORE_U8(object+21,1);std::memcpy(base+name,"MainMenu",9);
+        if(!check(!DirectMovie(base,object),"frontend commands cannot masquerade as direct movies"))return false;
     }
     auto pause=NativeCutsceneCommand(2);RoomTransportInputStream stream;RoomMovement active;active.actor_epoch=1;active.source=RoomMovementSource::NativeActionV2;active.jump_button_mask=0x1000;
     if(!check(AdvanceRoomTransportInput(stream,active) && AdvanceRoomTransportInput(stream,pause) && stream.suspended && stream.input_epoch==2,"explicit even epoch suspends existing gameplay stream"))return false;

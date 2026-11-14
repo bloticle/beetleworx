@@ -4,7 +4,7 @@ param(
  
  [switch]$CooperativeShutdown,
  [ValidateRange(0,10)][int]$MovieSkipDelay=0,
- [switch]$MovieSequence,[switch]$AuthoredConversation,[switch]$CutsceneCycle,[switch]$CutsceneBoundaryMovement,[switch]$CutsceneSkipInput,[switch]$CutsceneHeldReturn,[switch]$UnfencedCutsceneReturn,
+ [switch]$DirectMovie,[switch]$MovieSequence,[switch]$AuthoredConversation,[switch]$CutsceneCycle,[switch]$CutsceneBoundaryMovement,[switch]$CutsceneSkipInput,[switch]$CutsceneHeldReturn,[switch]$UnfencedCutsceneReturn,
  [switch]$ExtraOswald,
  [switch]$ScriptedInput,[switch]$ChatProbe,[switch]$VoiceProbe,[switch]$ButtonTaskProbe,[switch]$PolicyCycle,[switch]$CaptureShutdownHang,
  [switch]$NavigationTrace,[switch]$FaceTargetPoison,[switch]$UnfixedFaceTarget,[switch]$NativeReload,
@@ -28,12 +28,13 @@ param(
  [ValidateRange(120,600)][int]$StartupTimeoutSeconds=360
 )
 $ErrorActionPreference='Stop'
+if($DirectMovie -and ($MovieSequence -or $AuthoredConversation -or $CutsceneCycle -or $Players -ne 3 -or !$ScriptedInput -or $CheckpointReloadTick -ne 300 -or $CheckpointReloadCount -ne 1 -or $MovieSkipDelay -or $DamagePlayer -or $DamageExtraPeer -or $NativeLevelTarget -or $NativeLevelTargets.Count -or $PolicyCycle -or $ReenterAfterReturn -or $CloseParticipant -or $PartialDeliveryParticipant)){throw 'DirectMovie requires three scripted humans and one original PlayMovieInternal at tick 300, without other fixtures.'}
 if($MovieSkipDelay -and !$MovieSequence){throw 'MovieSkipDelay requires MovieSequence.'}
-if($MovieSequence -and ($AuthoredConversation -or $CutsceneCycle -or $Players -ne 3 -or !$ScriptedInput -or $CheckpointReloadTick -ne 300 -or $CheckpointReloadCount -ne 1 -or $DamagePlayer -or $DamageExtraPeer -or $NativeLevelTarget -or $NativeLevelTargets.Count -or $PolicyCycle -or $ReenterAfterReturn -or $CloseParticipant -or $PartialDeliveryParticipant)){throw 'MovieSequence requires three scripted humans and one original StartSequence call at tick 300, without other fixtures.'}
+if($MovieSequence -and ($DirectMovie -or $AuthoredConversation -or $CutsceneCycle -or $Players -ne 3 -or !$ScriptedInput -or $CheckpointReloadTick -ne 300 -or $CheckpointReloadCount -ne 1 -or $DamagePlayer -or $DamageExtraPeer -or $NativeLevelTarget -or $NativeLevelTargets.Count -or $PolicyCycle -or $ReenterAfterReturn -or $CloseParticipant -or $PartialDeliveryParticipant)){throw 'MovieSequence requires three scripted humans and one original StartSequence call at tick 300, without other fixtures.'}
 if($AuthoredConversation -and ($MovieSequence -or $CutsceneCycle -or $Players -ne 3 -or !$ScriptedInput -or $CheckpointReloadTick -notin @(300,700) -or $CheckpointReloadCount -ne 1 -or $DamagePlayer -or $DamageExtraPeer -or $NativeLevelTarget -or $NativeLevelTargets.Count -or $PolicyCycle -or $ReenterAfterReturn -or $CloseParticipant -or $PartialDeliveryParticipant)){throw 'AuthoredConversation requires three scripted humans, one original sequence call at tick 300 or 700, and no other fixture.'}
 if($CutsceneHeldReturn -and !$CutsceneCycle){throw 'CutsceneHeldReturn requires CutsceneCycle.'}
 if($UnfencedCutsceneReturn -and !$CutsceneHeldReturn){throw 'UnfencedCutsceneReturn requires CutsceneHeldReturn.'}
-if($CutsceneSkipInput -and !$CutsceneCycle -and !$AuthoredConversation -and !$MovieSequence){throw 'CutsceneSkipInput requires CutsceneCycle, AuthoredConversation or MovieSequence.'}
+if($CutsceneSkipInput -and !$CutsceneCycle -and !$AuthoredConversation -and !$MovieSequence -and !$DirectMovie){throw 'CutsceneSkipInput requires CutsceneCycle, AuthoredConversation or MovieSequence.'}
 if($CutsceneBoundaryMovement -and !$CutsceneCycle){throw 'CutsceneBoundaryMovement requires CutsceneCycle.'}
 if($CutsceneCycle -and ($Players -ne 3 -or !$ScriptedInput -or $CheckpointReloadTick -ne 700 -or $CheckpointReloadCount -ne 2 -or $CheckpointReloadInterval -ne 600 -or $DamagePlayer -or $DamageExtraPeer -or $NativeLevelTarget -or $NativeLevelTargets.Count -or $PolicyCycle -or $ReenterAfterReturn -or $CloseParticipant -or $PartialDeliveryParticipant)){throw 'CutsceneCycle requires three scripted humans, original restriction at tick 700/release at 1300, and no other fixture.'}
 if($DamagePlayer -eq 4){if($Players -ne 3 -or ($DamageExtraPeer -and $DamageExtraPeer -ne 3)){throw 'Whole-party damage requires exactly three players and extra peer 3.'};$DamageExtraPeer=3}
@@ -89,7 +90,7 @@ $record.capture_shutdown_hang=[bool]$CaptureShutdownHang
 $record.cooperative_shutdown_override=[bool]$CooperativeShutdown
 $record.damage_extra_peer=$DamageExtraPeer;
 $record.extra_dead_input=[bool]$DamageExtraPeer;$record.extra_oswald=[bool]$ExtraOswald;$record.mixed_characters=!$ExtraOswald;
-$record.movie_skip_delay=$MovieSkipDelay;$record.movie_sequence=[bool]$MovieSequence;$record.authored_conversation=[bool]$AuthoredConversation;$record.cutscene_held_return=[bool]$CutsceneHeldReturn;$record.unfenced_cutscene_return=[bool]$UnfencedCutsceneReturn;$record.cutscene_skip_input=[bool]$CutsceneSkipInput;$record.cutscene_boundary_movement=[bool]$CutsceneBoundaryMovement;$record.cutscene_cycle=[bool]$CutsceneCycle;$record.whole_party_damage=($DamagePlayer -eq 4);$record.damage_player=$DamagePlayer;$record.pipeline_creation_threads=$PipelineCreationThreads
+$record.direct_movie=[bool]$DirectMovie;$record.movie_skip_delay=$MovieSkipDelay;$record.movie_sequence=[bool]$MovieSequence;$record.authored_conversation=[bool]$AuthoredConversation;$record.cutscene_held_return=[bool]$CutsceneHeldReturn;$record.unfenced_cutscene_return=[bool]$UnfencedCutsceneReturn;$record.cutscene_skip_input=[bool]$CutsceneSkipInput;$record.cutscene_boundary_movement=[bool]$CutsceneBoundaryMovement;$record.cutscene_cycle=[bool]$CutsceneCycle;$record.whole_party_damage=($DamagePlayer -eq 4);$record.damage_player=$DamagePlayer;$record.pipeline_creation_threads=$PipelineCreationThreads
 $record.commit_guard_mb=$MinimumFreeCommitMB;$record.minimum_free_commit_mb=$null
 $record.memory_guard_mb=$MinimumFreeMemoryMB;$record.memory_samples=@();$record.minimum_free_memory_mb=$null;$record.peak_owned_working_set_mb=0;$record.peak_owned_private_mb=0
 $nextMemorySample=[DateTime]::MinValue
@@ -214,6 +215,7 @@ try {
   SampleOwnedMemory
   $info=[Diagnostics.ProcessStartInfo]::new($exe);$info.UseShellExecute=$false;$info.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden;$info.WorkingDirectory=$runtime
   foreach($arg in @(('--em2_user_data_directory='+$peer.user),('--em2_content_directory='+$peer.content),('--log_file='+$peer.log),'--no-em2_online_menu','--no-em2_demo_build','--em2_private_profile=true','--em2_native_room_lobby=true','--em2_native_online_handoff=true',('--em2_native_lobby_qa_role='+$peer.role),('--em2_native_lobby_qa_players='+$Players),('--em2_native_lobby_qa_invitation_file='+(Join-Path $root 'native-menu-invitation.txt')),'--em2_online_auto_continue=true','--em2_auto_continue=false','--em2_online_world_random=true','--em2_online_single_view=true','--em2_trace_online_observations=true','--em2_trace_auto_continue=true','--em2_trace_online_clothing=true')){$info.ArgumentList.Add($arg)}
+  if($DirectMovie){$info.ArgumentList.Add('--em2_native_lobby_qa_direct_movie=true')}
   if($MovieSequence){$info.ArgumentList.Add('--em2_native_lobby_qa_movie_sequence=true');$info.ArgumentList.Add('--em2_native_lobby_qa_movie_skip_delay='+$MovieSkipDelay)}
   if($AuthoredConversation){$info.ArgumentList.Add('--em2_native_lobby_qa_authored_conversation=true')}
   if($CutsceneCycle){$info.ArgumentList.Add('--em2_native_lobby_qa_cutscene_cycle=true')}
@@ -230,7 +232,7 @@ try {
   if($VoiceProbe){$info.ArgumentList.Add('--em2_probe_online_voice=true')}
   if($ButtonTaskProbe){$info.ArgumentList.Add('--em2_probe_owned_button_tasks=true')}
   if($PolicyCycle){$info.ArgumentList.Add('--em2_probe_native_policy_cycle=true')}
-  if($CheckpointReloadTick){$info.ArgumentList.Add('--em2_native_lobby_qa_restart_tick='+$CheckpointReloadTick);if(!$CutsceneCycle -and !$AuthoredConversation -and !$MovieSequence){$info.ArgumentList.Add('--em2_native_lobby_qa_checkpoint_reload=true')}}
+  if($CheckpointReloadTick){$info.ArgumentList.Add('--em2_native_lobby_qa_restart_tick='+$CheckpointReloadTick);if(!$CutsceneCycle -and !$AuthoredConversation -and !$MovieSequence -and !$DirectMovie){$info.ArgumentList.Add('--em2_native_lobby_qa_checkpoint_reload=true')}}
   if($CheckpointReloadTick){$info.ArgumentList.Add('--em2_native_lobby_qa_restart_count='+$CheckpointReloadCount);$info.ArgumentList.Add('--em2_native_lobby_qa_restart_interval='+$CheckpointReloadInterval)}
   if($NativeLevelTarget){$info.ArgumentList.Add('--em2_native_lobby_qa_level_target='+$NativeLevelTarget)}
   if($NativeLevelTargets.Count){$info.ArgumentList.Add('--em2_native_lobby_qa_level_route='+($NativeLevelTargets -join '|'))}
@@ -313,7 +315,7 @@ try {
    if(!(OwnedProcess $entry) -or $entry.process.HasExited){throw 'A native menu test process exited before observation completed.'}
    $text=if(Test-Path -LiteralPath $entry.record.log){(Get-Content -LiteralPath $entry.record.log -Raw) ?? ''}else{''}
    if(!$PartialDeliveryParticipant){foreach($failure in @('Native online lobby handoff failed:','Native online menu preparation failed:','Native lobby QA rejected:','Retained native Room stopped:','Native Room gameplay stopped:','Native room initialization stopped:')){if($text.Contains($failure)){if($ReenterAfterReturn -and (ObserveControlledDisconnect 4)){continue};throw ($entry.record.role+' reported '+$failure)}}}
-   $expectedWorlds=1+$(if($DamagePlayer -eq 4){1}elseif($CheckpointReloadTick -and !$CutsceneCycle -and !$AuthoredConversation -and !$MovieSequence -and !$DamagePlayer -and !$DamageExtraPeer){$CheckpointReloadCount}else{0})
+   $expectedWorlds=1+$(if($DamagePlayer -eq 4){1}elseif($CheckpointReloadTick -and !$CutsceneCycle -and !$AuthoredConversation -and !$MovieSequence -and !$DirectMovie -and !$DamagePlayer -and !$DamageExtraPeer){$CheckpointReloadCount}else{0})
    $expectedPrograms=if($DamagePlayer -eq 4){1}else{$expectedWorlds}
    if([regex]::Matches($text,"phase 'complete' reads").Count -ge $expectedPrograms){++$programs}
    if([regex]::Matches($text,'Native Room gameplay first frame consumed:').Count -ge $expectedWorlds){++$reentries}

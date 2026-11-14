@@ -155,6 +155,7 @@ struct NativeRoomGameplay::Impl {
     uint32_t skip_target_mode=0;
     std::unique_ptr<NativeMovieAcceptReceiver> movie_receiver;
     uint32_t movie_sequence_target=0;
+    uint32_t movie_control_mode=0;
     std::optional<uint64_t> skip_target_entry;
     std::unique_ptr<NativeCutsceneSkipReceiver> skip_receiver;
     bool private_skip_armed=false,private_skip_failed=false;
@@ -434,7 +435,7 @@ void NativeRoomGameplay::UpdateExtraCameras(PPCContext& ctx,uint8_t* base){
     if(!s.Owner() || s.stopped || !s.pending || !s.delivered || !s.actors->mask() || !s.World(base) ||
         !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed || !Readable(0x833DAB60,4,base))return;
     NativeGameOverState control;uint32_t mode=0;
-    if(ReadNativeControlState(ctx,base,control,mode) && mode==2 && control.registry==s.registry &&
+    if(ReadNativeControlState(ctx,base,control,mode) && NativeMovieControlMode(mode) && control.registry==s.registry &&
        ReadNativeCutsceneContext(ctx,base,s.registry,s.movie_sequence_target)){
         if(tick%60==0)REXLOG_INFO("Native Room movie camera retained: tick {}; original movie view, no independent gameplay look or local view replacement",tick);
         return;
@@ -450,7 +451,7 @@ bool NativeRoomGameplay::ReadMovieClock(uint32_t manager,PPCContext& ctx,uint8_t
        s.room->state()!=RoomState::Running || !Readable(0x833DCCB8,4,base) ||
        PPC_LOAD_U32(0x833DCCB8)!=manager || !Readable(manager,132,base))return false;
     NativeGameOverState control;uint32_t mode=0;
-    if(!ReadNativeControlState(ctx,base,control,mode) || mode!=2 || control.registry!=s.registry ||
+    if(!ReadNativeControlState(ctx,base,control,mode) || !NativeMovieControlMode(mode) || control.registry!=s.registry ||
        !ReadNativeCutsceneContext(ctx,base,s.registry,s.movie_sequence_target))return false;
     uint64_t current=0;
     if(em2::CurrentAgreedSimulationTick(current)){
@@ -591,7 +592,7 @@ bool NativeRoomGameplay::RearmInputContext(uint64_t tick,PPCContext& ctx,uint8_t
     step="owned frame coordinator";if(!frames->Configure(s.roster_mask,3,epochs,first,s.registry,ValidateRetailMovementFrame,next_epoch) || !s.actors->BindFrames(*frames,ctx,base))return false;
     if(s.native_buttons)for(const auto& actor:s.actors->actors())
         if(!frames->BindButtons(actor.room_peer,s.button_definitions[actor.actor.action_user],ctx,base))return false;
-    finished=true;s.actor_frames=std::move(frames);s.input_epoch=next_epoch;s.cutscene_resume=*s.native_completed;s.cutscene_entry.reset();s.movie_sequence_target=0;s.return_pending=false;s.return_wait_start.reset();
+    finished=true;s.actor_frames=std::move(frames);s.input_epoch=next_epoch;s.cutscene_resume=*s.native_completed;s.cutscene_entry.reset();s.movie_sequence_target=0;s.movie_control_mode=0;s.return_pending=false;s.return_wait_start.reset();
     s.skip_receiver.reset();s.movie_receiver.reset();s.skip_target_available=false;s.skip_target_mode=0;s.skip_target_entry.reset();
     REXLOG_INFO("Native Room cutscene bindings re-admitted: source tick {}, first delivery {}, input epoch {}; actor/world/controls incarnation retained, fresh producer/receiver leases",tick,first,next_epoch);
     return true;
@@ -644,7 +645,7 @@ RoomGameplayAdmission NativeRoomGameplay::Prepare(PPCContext& ctx,uint8_t* base,
             s.Stop("Native cutscene entry lacks a completed owned input epoch");return RoomGameplayAdmission::Stopped;}
         for(const auto& player:s.roster.players)s.cutscene_schemas[player.peer-1]=s.button_schemas[player.character==LobbyCharacter::Mickey?0:1];
         s.cutscene_entry=*s.native_completed;s.cutscene_resume.reset();++s.input_epoch;
-        s.movie_sequence_target=0;
+        s.movie_sequence_target=0;s.movie_control_mode=0;
         s.private_skip_source.reset();s.private_skip_armed=false;s.private_skip_failed=false;s.skip_gate={};s.skip_receiver.reset();s.movie_receiver.reset();s.skip_target_available=false;s.skip_target_mode=0;s.skip_target_entry.reset();s.departing_cutscene_buttons.reset();
         REXLOG_INFO("Native Room cutscene input suspended: entry tick {}, input epoch {}; original state {} and native cutscene ownership, actor incarnations unchanged",*s.cutscene_entry,s.input_epoch,mode);
     }
@@ -661,14 +662,14 @@ RoomGameplayAdmission NativeRoomGameplay::Prepare(PPCContext& ctx,uint8_t* base,
             s.Stop("Native cutscene return could not re-admit fresh input bindings");return RoomGameplayAdmission::Stopped;}
     }else if(s.cutscene_entry){s.return_pending=false;s.return_wait_start.reset();}
     if(s.cutscene_entry){
-        if(mode!=2)s.movie_sequence_target=0;
+        if(!NativeMovieControlMode(mode) || (s.movie_sequence_target && s.movie_control_mode!=mode)){s.movie_sequence_target=0;s.movie_control_mode=0;}
         if((!ReadNativeCutsceneContext(ctx,base,s.registry,s.movie_sequence_target) && !s.return_pending) || !RefreshOwnedActorTaskPermissions(ctx,base)){
             s.Stop("Native cutscene context or authored permissions changed before suspension frame");return RoomGameplayAdmission::Stopped;}
-        if(mode==2 && !s.movie_sequence_target){uint32_t profile=0,object=0,handler=0;
-            if(!ReadNativeControlTarget(ctx,base,s.registry,2,profile,object,handler) || handler!=0x82B1DF70){
+        if(NativeMovieControlMode(mode) && !s.movie_sequence_target){uint32_t profile=0,object=0,handler=0;
+            if(!ReadNativeControlTarget(ctx,base,s.registry,mode,profile,object,handler) || handler!=NativeMovieInputHandler(mode)){
                 s.Stop("Native movie sequence lost its validated original target");return RoomGameplayAdmission::Stopped;}
-            s.movie_sequence_target=object;
-            REXLOG_INFO("Native Room movie sequence target retained: tick {} object {:08X}; movie-only queue, no Menu callbacks",s.room->next_tick(),object);
+            s.movie_sequence_target=object;s.movie_control_mode=mode;
+            REXLOG_INFO("Native Room movie sequence target retained: tick {} object {:08X}; native movie state {}, no gameplay callbacks",s.room->next_tick(),object,mode);
         }
         TracePrivateNativeCutsceneUi(s.input_epoch,ctx,base,s.registry);
         const bool target_available=!s.return_pending && ((mode==6 && NativeCutsceneSkipTargetAvailable(s.registry,ctx,base)) ||
@@ -871,7 +872,7 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
         if(finished!=ActorInputResult::Applied)return s.Stop("Native retail button/jump completion rejected (result "+std::to_string(int(finished))+")");
         if(!s.actor_frames)return s.Stop("Native owned actor frame coordinator is missing at completion");
         NativeGameOverState control;uint32_t mode=0;
-        const bool movie_entry=!s.cutscene_entry && ReadNativeControlState(ctx,base,control,mode) && mode==2 &&
+        const bool movie_entry=!s.cutscene_entry && ReadNativeControlState(ctx,base,control,mode) && NativeMovieControlMode(mode) &&
             control.registry==s.registry && ReadNativeCutsceneContext(ctx,base,s.registry);
         if(movie_entry){uint8_t retail_consumed=0;uint16_t extra_consumed=0;
             if(!FinishRetailMovieEntryTick(tick,ctx,base,retail_consumed))return s.Stop("Native movie entry could not close its delivered retail input tick");

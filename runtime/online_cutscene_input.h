@@ -5,9 +5,11 @@
 #include <array>
 namespace em2::net {
 bool ReadNativeInputContextName(uint8_t*,std::string&);
-// State 2 is admitted only after its original target and movie-only queue
-// validate. Menu/credits entries share the state and are not cutscenes.
-constexpr bool NativeCutsceneControlMode(uint32_t mode){return mode==2 || mode==3 || mode==6;}
+// State 1 owns a direct movie; state 2 may also queue menu/credits entries.
+// Both require their original target and movie content to validate.
+constexpr bool NativeMovieControlMode(uint32_t mode){return mode==1 || mode==2;}
+constexpr uint32_t NativeMovieInputHandler(uint32_t mode){return mode==1?0x82B1EDF8u:mode==2?0x82B1DF70u:0;}
+constexpr bool NativeCutsceneControlMode(uint32_t mode){return NativeMovieControlMode(mode) || mode==3 || mode==6;}
 bool ReadNativeCutsceneContext(PPCContext&,uint8_t*,uint32_t registry,uint32_t owned_movie_sequence=0);
 RoomMovement NativeCutsceneCommand(uint64_t input_epoch);
 RoomMovement NativeCutsceneUiCommand(uint64_t input_epoch,bool down);

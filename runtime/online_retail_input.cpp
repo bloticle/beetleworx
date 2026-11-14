@@ -347,7 +347,7 @@ bool FinishRetailInputTick(uint64_t tick,PPCContext& ctx,uint8_t* base){Environm
 bool FinishRetailMovieEntryTick(uint64_t tick,PPCContext& ctx,uint8_t* base,uint8_t& consumed_mask){Environment environment;
     if(!Active(tick,base) || replay_slot!=-1 || update_slot!=-1 || tick==UINT64_MAX)return false;
     NativeGameOverState control;uint32_t mode=0;const auto registry=state.actors[0].registry;
-    if(!ReadNativeControlState(ctx,base,control,mode) || mode!=2 || control.registry!=registry ||
+    if(!ReadNativeControlState(ctx,base,control,mode) || !NativeMovieControlMode(mode) || control.registry!=registry ||
        !ReadNativeCutsceneContext(ctx,base,registry))return false;
     uint8_t mask=0;
     for(unsigned i=0;i<2;++i)if(state.mask&(1u<<i)){
