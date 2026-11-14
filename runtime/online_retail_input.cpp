@@ -335,8 +335,12 @@ ActorInputResult ReplayRetailMovement(unsigned slot,const NativeActorAction& act
     ctx.r3.u64=state.actors[slot].listener;ctx.r4.u64=action.event;ctx.r5.u64=action.action;ctx.f1.f64=action.x;ctx.f2.f64=action.y;
     try{__imp__sub_82A3C930(ctx,base);}catch(...){state.faulted=true;throw;}return Result::Applied;
 }
-bool RetailInputTickFor(unsigned slot,uint64_t tick,PPCContext& ctx,uint8_t* base,RetailActorInput& out,bool& delivered,RoomMovement* command){
-    Environment environment;out={};delivered=false;if(command)*command={};if(!Active(tick,base) || !Current(slot,ctx,base))return false;
+bool RetailInputTickFor(unsigned slot,uint64_t tick,PPCContext& ctx,uint8_t* base,RetailActorInput& out,bool& delivered,RoomMovement* command,bool movie_entry){
+    Environment environment;out={};delivered=false;if(command)*command={};if(!Active(tick,base) || slot>1 || !(state.mask&(1u<<slot)))return false;
+    if(movie_entry){NativeGameOverState control;uint32_t mode=0;const auto registry=state.actors[slot].registry;
+        if(!ReadNativeControlState(ctx,base,control,mode) || !NativeMovieControlMode(mode) || control.registry!=registry ||
+           !ReadNativeCutsceneContext(ctx,base,registry) || !CurrentControllerOwner(slot,ctx,base))return false;
+    }else if(!Current(slot,ctx,base))return false;
     out=state.actors[slot];delivered=state.stages[slot].delivered;if(command && state.stages[slot].prepared)*command=state.stages[slot].command;return true;
 }
 bool FinishRetailInputTick(uint64_t tick,PPCContext& ctx,uint8_t* base){Environment environment;
@@ -543,6 +547,9 @@ bool TestNativeRetailInput(){
            PPC_LOAD_U32(motions[i]+180)==0 && std::bit_cast<float>(PPC_LOAD_U32(motions[i]+184))==frame.players[i].forward_z,
            "ORIGINAL controller projection and Motion setter receive own sender basis, not local pitched camera"))return false;
     }
+    {RetailActorInput out;bool delivered=false;RoomMovement prepared;
+        if(!check(!RetailInputTickFor(0,10,ctx,base,out,delivered,&prepared,true) && !delivered && out==RetailActorInput{} && prepared==RoomMovement{},
+            "movie-only completion read rejects an ordinary gameplay tick without returning a lease"))return false;}
     {uint8_t receipt=0xA5;
         if(!check(!FinishRetailMovieEntryTick(10,ctx,base,receipt) && receipt==0xA5 && state.active && state.next==10,
             "ordinary gameplay cannot use movie interruption to bypass exact Movement completion"))return false;}

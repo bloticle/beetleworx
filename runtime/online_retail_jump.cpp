@@ -179,11 +179,12 @@ ActorInputResult ReplayRetailJumpBatch(unsigned slot,const RoomMovement& command
     }catch(...){state.faulted=true;throw;}
     state.slots[slot].stream=next;return Result::Applied;
 }
-ActorInputResult FinishRetailJumpTick(uint64_t tick,PPCContext& ctx,uint8_t* base){
+ActorInputResult FinishRetailJumpTick(uint64_t tick,PPCContext& ctx,uint8_t* base,bool movie_entry){
     Environment environment;if(!Owner(base))return Result::WrongThread;
     if(state.faulted || !state.active || state.tick!=tick || tick==UINT64_MAX)return Result::InvalidTick;
     for(unsigned i=0;i<2;++i){RetailActorInput a;bool delivered=false;
-        if(!state.slots[i].delivered || !Current(i,ctx,base) || !RetailInputTickFor(i,tick,ctx,base,a,delivered) || !delivered){state.faulted=true;return Result::InvalidContext;}}
+        if(!state.slots[i].delivered || (!movie_entry && !Current(i,ctx,base)) ||
+           !RetailInputTickFor(i,tick,ctx,base,a,delivered,nullptr,movie_entry) || a!=state.slots[i].target.actor || !delivered){state.faulted=true;return Result::InvalidContext;}}
     state.active=false;state.started=true;state.next=tick+1;for(auto& s:state.slots)s.delivered=false;return Result::Applied;
 }
 void DisarmRetailJump(){Environment environment;if(state.armed && state.thread!=GetCurrentThreadId())return;if(permit)return;SetRetailJumpAdmission(nullptr);state={};}

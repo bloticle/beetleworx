@@ -8,7 +8,7 @@ namespace em2::net {
 bool ArmRetailJump(PPCContext&,uint8_t* base);
 ActorInputResult ValidateRetailJumpFrame(const RoomFrame&,PPCContext&,uint8_t* base);
 ActorInputResult ReplayRetailJumpBatch(unsigned slot,const RoomMovement&,uint64_t tick,PPCContext&,uint8_t* base);
-ActorInputResult FinishRetailJumpTick(uint64_t tick,PPCContext&,uint8_t* base);
+ActorInputResult FinishRetailJumpTick(uint64_t tick,PPCContext&,uint8_t* base,bool movie_entry=false);
 // Lifecycle only: release after native world/listeners stopped. Never clear a
 // live held task manually or resume a partially delivered frame after failure.
 void DisarmRetailJump();

@@ -184,7 +184,7 @@ ActorInputResult ReplayRetailButtonBatch(unsigned slot,const RoomFrame& frame,PP
     }}catch(...){delivery.faulted=true;throw;}
     return ActorInputResult::Applied;
 }
-ActorInputResult FinishRetailButtonTick(uint64_t tick,PPCContext& ctx,uint8_t* base){
+ActorInputResult FinishRetailButtonTick(uint64_t tick,PPCContext& ctx,uint8_t* base,bool movie_entry){
     Preserve preserve;if(!DeliveryOwner(base))return ActorInputResult::WrongThread;
     if(!delivery.active || delivery.frame.tick!=tick || !delivery.delivered[0] || !delivery.delivered[1]){
         if(REXCVAR_GET(em2_private_profile))REXLOG_ERROR("Native button completion header rejected: tick {} expected {} active {} delivered {}/{}",tick,delivery.frame.tick,delivery.active,delivery.delivered[0],delivery.delivered[1]);
@@ -197,7 +197,7 @@ ActorInputResult FinishRetailButtonTick(uint64_t tick,PPCContext& ctx,uint8_t* b
     if(button_permit || delivery.faulted || delivery.frame.players_mask!=3 ||
        tick==UINT64_MAX || (delivery.started && delivery.next!=tick))return ActorInputResult::InvalidTick;
     for(unsigned i=0;i<2;++i){RetailActorInput actor;bool moved=false;RoomMovement prepared;
-        if(!RetailInputTickFor(i,tick,ctx,base,actor,moved,&prepared) || !moved || prepared!=delivery.frame.players[i]){
+        if(!RetailInputTickFor(i,tick,ctx,base,actor,moved,&prepared,movie_entry) || !moved || prepared!=delivery.frame.players[i]){
             delivery.faulted=true;return ActorInputResult::InvalidContext;}}
     for(unsigned i=0;i<2;++i)AdvanceRoomJumpStream(delivery.streams[i],delivery.frame.players[i]);
     delivery.started=true;delivery.active=false;delivery.next=tick+1;delivery.delivered={};return ActorInputResult::Applied;

@@ -79,7 +79,12 @@ This proves one original movie sequence in three local native clients.
 Playback scheduling currently follows the agreed 30 Hz update clock; smooth
 high-rate movie presentation and audio behavior under network stalls need
 separate checks. Other movies, queued multi-movie sequences, other skip configurations,
-direct movie state 1, startup movies, credits/end-game/menu routes, Internet
+direct-movie skipping, startup movies, credits/end-game/menu routes, Internet
 stall recovery and a complete online campaign still require validation or
 implementation. Original state-6 authored cinematic completion remains a
 separate native test. No broader release-readiness claim follows from this run.
+
+The separate [direct state-1 route](online-direct-movie-status.md) now has
+three-client natural-playback and restored-control coverage through the original
+`PlayMovieInternal` export. It has a different entry-consumption boundary and
+its own verifier mode; its skip path remains unfinished.

@@ -1,6 +1,7 @@
 """Verify original Bink movie entry, synchronized exit and restored controls.
 
 Three native clients play the retail Havok logo through StartSequence.
+--direct-movie instead checks the original PlayMovieInternal state-1 route.
 --expect-skip additionally checks native Accept, its delay and held-input return.
 This does not prove other movies, every skip configuration, credits, Internet
 stalls or a campaign.
@@ -14,9 +15,12 @@ import runpy
 import struct
 
 
-def verify(root, expect_skip=False):
+def verify(root, expect_skip=False, direct_movie=False):
     result = json.loads((root / 'result.json').read_text(encoding='utf-8-sig'))
-    assert result['movie_sequence'] and result['players'] == 3
+    assert result['players'] == 3
+    assert bool(result.get('direct_movie')) == direct_movie
+    assert bool(result['movie_sequence']) != direct_movie
+    assert not (direct_movie and expect_skip), 'Direct-movie skip is not yet supported by this fixture'
     assert result['checkpoint_reload_tick'] == 300 and result['checkpoint_reload_count'] == 1
     assert not result['cutscene_cycle'] and not result['authored_conversation']
     skip_delay = result.get('movie_skip_delay', 0)
@@ -33,11 +37,16 @@ def verify(root, expect_skip=False):
     for process in result['processes']:
         full = Path(process['log']).read_text(encoding='utf-8', errors='replace')
         text = '\n'.join(line for line in full.splitlines() if not line.startswith('[') or line[1:24] < result['close_started_local'])
-        assert text.count('Private native movie sequence: tick 300 LOGO_havok.bik attempted true status 0 stack true;') == 1
-        assert text.count('Native Room movie entry interrupted update: tick 300 actual retail Motion mask 00 extra mask 0000;') == 1
-        assert text.count('Native Room cutscene input suspended: entry tick 300, input epoch 2; original state 2') == 1
+        route = 'direct movie' if direct_movie else 'movie sequence'
+        mode = 1 if direct_movie else 2
+        assert text.count(f'Private native {route}: tick 300 LOGO_havok.bik attempted true status 0 stack true;') == 1
+        assert '[NtCreateFile] FAILED:' not in text[text.index(f'Private native {route}: tick 300'):], 'Movie or later content open failed'
+        retail_mask, extra_mask = ('03', '0004') if direct_movie else ('00', '0000')
+        assert text.count(f'Native Room movie entry interrupted update: tick 300 actual retail Motion mask {retail_mask} extra mask {extra_mask};') == 1
+        assert text.count(f'Native Room cutscene input suspended: entry tick 300, input epoch 2; original state {mode}') == 1
         assert len(re.findall(r'Native Room movie sequence target retained: tick 301 object [0-9A-F]+;', text)) == 1
-        assert len(re.findall(r'Native Room movie playback clock admitted: tick 301 Bink [0-9A-F]+;', text)) == 1
+        clock_start = 300 if direct_movie else 301
+        assert len(re.findall(rf'Native Room movie playback clock admitted: tick {clock_start} Bink [0-9A-F]+;', text)) == 1
         assert 'Native Room movie camera retained: tick 360;' in text
         if not expect_skip:
             assert 'Native Room movie camera retained: tick 420;' in text
@@ -108,7 +117,7 @@ def verify(root, expect_skip=False):
     assert len(set(returns)) == 1, 'Movie exit differs between native clients'
     assert all(h == histories[0] for h in histories), 'Actual world or actor trajectories differ'
     assert all(result[k] for k in ('normal_user_files_unchanged', 'normal_config_unchanged', 'normal_crash_unchanged'))
-    return {'passed': True, 'skip_verified': expect_skip, 'skip_delay': skip_delay, 'binary_sha256': menu['binary_sha256'], 'matching_updates': len(histories[0]),
+    return {'passed': True, 'direct_movie': direct_movie, 'skip_verified': expect_skip, 'skip_delay': skip_delay, 'binary_sha256': menu['binary_sha256'], 'matching_updates': len(histories[0]),
             'shared_return': returns[0], 'captures': reports, 'scope': __doc__.strip()}
 
 
@@ -116,7 +125,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('root', type=Path)
     parser.add_argument('--expect-skip', action='store_true')
+    parser.add_argument('--direct-movie', action='store_true')
     args = parser.parse_args();root = args.root
-    report = verify(root, args.expect_skip)
+    report = verify(root, args.expect_skip, args.direct_movie)
     (root / 'native-movie-sequence-validation.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
     print(json.dumps(report, indent=2))

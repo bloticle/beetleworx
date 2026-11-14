@@ -48,7 +48,10 @@ bool BeginRetailPassiveTick(uint32_t registry,uint64_t tick,PPCContext&,uint8_t*
 bool FinishRetailPassiveTick(uint64_t tick,PPCContext&,uint8_t*);
 ActorInputResult PrepareRetailMovement(unsigned,const RoomMovement&,uint64_t tick,PPCContext&,uint8_t*);
 ActorInputResult ReplayRetailMovement(unsigned,const NativeActorAction&,uint64_t tick,PPCContext&,uint8_t*);
-bool RetailInputTickFor(unsigned,uint64_t,PPCContext&,uint8_t*,RetailActorInput&,bool& movement_delivered,RoomMovement* prepared_command=nullptr);
+bool RetailInputTickFor(unsigned,uint64_t,PPCContext&,uint8_t*,RetailActorInput&,bool& movement_delivered,RoomMovement* prepared_command=nullptr,bool movie_entry=false);
+// movie_entry is completion-only: revalidate the original movie state and
+// unchanged controller ownership after it disables gameplay controls. It does
+// not authorize callbacks or report omitted Motion work as consumed.
 bool FinishRetailInputTick(uint64_t,PPCContext&,uint8_t*);
 // Original movie entry can pause the world after inputs were delivered but
 // before Motion runs. Close that specific tick without fabricating consumption.

@@ -24,7 +24,7 @@ bool EnableRetailButtonDelivery(const std::array<RetailButtonReceiver*,2>&,PPCCo
 void DisarmRetailButtonDelivery();
 ActorInputResult ValidateRetailButtonFrame(const RoomFrame&,PPCContext&,uint8_t*);
 ActorInputResult ReplayRetailButtonBatch(unsigned,const RoomFrame&,PPCContext&,uint8_t*);
-ActorInputResult FinishRetailButtonTick(uint64_t,PPCContext&,uint8_t*);
+ActorInputResult FinishRetailButtonTick(uint64_t,PPCContext&,uint8_t*,bool movie_entry=false);
 enum class RetailButtonFilter { Unowned, Authorized, Suppressed };
 RetailButtonFilter FilterRetailButtonInput(PPCContext&,uint8_t*,bool base_handler);
 bool TestRetailButtonReceivers(PPCContext&,uint8_t*,const std::function<bool(const RoomFrame&,const std::function<void()>&)>& drive={});

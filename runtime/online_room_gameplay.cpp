@@ -867,13 +867,13 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
     if(s.game_over_entry || s.consumed_passive){
         if(!FinishRetailPassiveTick(tick,ctx,base))return s.Stop("Native GameOver passive quarantine completion failed");
     }else{
-        const auto finished=s.consumed->players[0].source==RoomMovementSource::NativeActionV3?
-            FinishRetailButtonTick(tick,ctx,base):FinishRetailJumpTick(tick,ctx,base);
-        if(finished!=ActorInputResult::Applied)return s.Stop("Native retail button/jump completion rejected (result "+std::to_string(int(finished))+")");
-        if(!s.actor_frames)return s.Stop("Native owned actor frame coordinator is missing at completion");
         NativeGameOverState control;uint32_t mode=0;
         const bool movie_entry=!s.cutscene_entry && ReadNativeControlState(ctx,base,control,mode) && NativeMovieControlMode(mode) &&
             control.registry==s.registry && ReadNativeCutsceneContext(ctx,base,s.registry);
+        const auto finished=s.consumed->players[0].source==RoomMovementSource::NativeActionV3?
+            FinishRetailButtonTick(tick,ctx,base,movie_entry):FinishRetailJumpTick(tick,ctx,base,movie_entry);
+        if(finished!=ActorInputResult::Applied)return s.Stop("Native retail button/jump completion rejected (result "+std::to_string(int(finished))+")");
+        if(!s.actor_frames)return s.Stop("Native owned actor frame coordinator is missing at completion");
         if(movie_entry){uint8_t retail_consumed=0;uint16_t extra_consumed=0;
             if(!FinishRetailMovieEntryTick(tick,ctx,base,retail_consumed))return s.Stop("Native movie entry could not close its delivered retail input tick");
             const auto owned_finished=s.actor_frames->FinishMovieEntry(tick,ctx,base,extra_consumed);
