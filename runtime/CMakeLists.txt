@@ -574,3 +574,6 @@ set_property(SOURCE online_voice_audio.cpp PROPERTY INCLUDE_DIRECTORIES "${beetl
 add_custom_command(TARGET EM2Recomp POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:EM2Recomp>/licenses"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${beetleworx_opus_SOURCE_DIR}/COPYING" "$<TARGET_FILE_DIR:EM2Recomp>/licenses/opus.txt")
+
+# Pinned SDK upload pool with correct COM ownership on Map failure.
+target_sources(EM2Recomp PRIVATE rex_upload_buffer_pool.cpp)

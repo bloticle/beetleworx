@@ -76,6 +76,7 @@
 #include "lto_dispatch_test.h"
 #include "shader_upload.h"
 #include "shader_storage.h"
+#include "upload_buffer_pool_test.h"
 #include "engine_workbench.h"
 #include "gameplay_mods.h"
 #include "scene_indirect_benchmark.h"
@@ -195,6 +196,7 @@ REXCVAR_DEFINE_BOOL(em2_test_content_setup,false,"Debug","Run isolated content s
 REXCVAR_DEFINE_STRING(em2_test_content_patch_directory,"","Debug","Optional distribution-patch directory to reconstruct against original game archives during isolated content tests");
 REXCVAR_DEFINE_BOOL(em2_test_video_blocks,false,"Debug","Test profiled video block kernels in this executable without starting the game");
 REXCVAR_DEFINE_BOOL(em2_test_shader_storage,false,"Debug","Test cold/reopen renderer storage with the real GPU, no window or guest game execution");
+REXCVAR_DEFINE_BOOL(em2_test_upload_pool,false,"Debug","With em2_test_shader_storage, verify upload map failure ownership using real GPU resources; no window or guest execution");
 REXCVAR_DEFINE_BOOL(em1_test_blend_pixels,false,"Debug","With shader storage diagnostic, verify Wii blend pixel programs on the GPU");
 REXCVAR_DEFINE_BOOL(em1_test_ink_pixels,false,"Debug","With shader storage diagnostic, execute the original ink ribbon pixel programs on the GPU");
 REXCVAR_DEFINE_STRING(em1_test_ink_effect_path,"","Debug","Exact staged original-ink FXLO for the GPU diagnostic");
@@ -766,6 +768,11 @@ public:
         verify_dispatch("after XEX load");
 
         if(shader_storage_test) {
+            if(REXCVAR_GET(em2_test_upload_pool)){
+                auto* cp=static_cast<em2::Em2CommandProcessor*>(runtime_->graphics_system()->command_processor());
+                const bool success=em2::TestUploadBufferPool(cp->GetD3D12Provider());
+                runtime_.reset();REXLOG_INFO("Upload pool diagnostic {} (no guest execution)",success?"passed":"failed");spdlog::shutdown();ExitProcess(success?0:1);
+            }
             if(!REXCVAR_GET(em2_test_shader_library_load_path).empty()){
                 const bool success=em2::TestPcShaderLibraryLoad(REXCVAR_GET(em2_test_shader_library_load_path),shader_storage_test_root);
                 runtime_.reset();REXLOG_INFO("PC shader library load diagnostic {} (no guest execution)",success?"passed":"failed");spdlog::shutdown();ExitProcess(success?0:1);

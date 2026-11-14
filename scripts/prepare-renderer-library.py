@@ -216,6 +216,12 @@ def main():
         if run(args.ar,'t',staged_ui).splitlines().count('d3d12_presenter.cpp.obj')!=1:
             raise RuntimeError('Expected one source-replaced presenter object')
         run(args.ar,'d',staged_ui,'d3d12_presenter.cpp.obj')
+        # Source-build the pinned upload pool to avoid double Release on Map
+        # failure. The SDK archive hash above fixes the source/header ABI.
+        upload_member='d3d12_upload_buffer_pool.cpp.obj'
+        if run(args.ar,'t',staged_ui).splitlines().count(upload_member)!=1:
+            raise RuntimeError('Expected one source-replaced upload-buffer pool object')
+        run(args.ar,'d',staged_ui,upload_member)
         shutil.copyfile(staged_ui,ui_output)
         # Source-build the matching render-target cache as well. HDR requires
         # coordinated resource/RTV/SRV, transfer and resolve changes inside it;
