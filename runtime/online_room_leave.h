@@ -12,6 +12,7 @@ bool NativeRoomTitleLeaveRenderRetired()noexcept;
 // 2791 reads the bounded explanation as UTF-8 bytes.
 bool NativeRoomRecoveryOption(int id,int choice,int& result);
 bool NativeRoomRecoveryKey(unsigned key,bool down);
+bool NativeRoomRecoveryPad(bool connected,unsigned short buttons);
 // Render-thread-only: invoke the dedicated HUD method without advancing movies.
 void PumpNativeRoomRecoveryHud(PPCContext&,unsigned char*,unsigned container);
 bool TestNativeRoomRecoveryRequests();

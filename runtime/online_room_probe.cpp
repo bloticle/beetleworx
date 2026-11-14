@@ -28,6 +28,7 @@
 REXCVAR_DECLARE(bool,em2_private_profile);
 REXCVAR_DECLARE(bool,em2_room_native_buttons);
 REXCVAR_DECLARE(bool,em2_probe_online_chat);
+REXCVAR_DECLARE(bool,em2_probe_room_recovery_controller);
 REXCVAR_DECLARE(std::string,em2_user_data_directory);
 REXCVAR_DECLARE(bool,em2_online_menu);
 REXCVAR_DECLARE(bool,em2_online_qa_prelaunch);
@@ -306,13 +307,22 @@ std::unique_ptr<rex::input::InputSystem> MakePrivateRoomInput(Room& room){
     const auto warmup=REXCVAR_GET(em2_room_probe_input_warmup_ticks);
     Require(warmup<=600,"Private SDK input warmup exceeds its bound");
     class Driver final:public rex::input::InputDriver {
-        Room& room_;std::optional<uint64_t> first_,last_;unsigned reads_=0,warmup_=0;bool warming_=false;
+        Room& room_;std::optional<uint64_t> first_,last_;unsigned reads_=0,warmup_=0,recovery_reads_=0;bool warming_=false;
     public:
         explicit Driver(Room& room,unsigned warmup):InputDriver(nullptr,0),room_(room),warmup_(warmup){}
         rex::X_STATUS Setup()override{return X_STATUS_SUCCESS;}
         rex::X_RESULT GetCapabilities(uint32_t,uint32_t,rex::input::X_INPUT_CAPABILITIES*)override{return X_ERROR_DEVICE_NOT_CONNECTED;}
         rex::X_RESULT GetState(uint32_t user,rex::input::X_INPUT_STATE* state)override{
-            if(user || !state || room_.state()!=RoomState::Running)return X_ERROR_DEVICE_NOT_CONNECTED;
+            if(user || !state)return X_ERROR_DEVICE_NOT_CONNECTED;
+            if(room_.state()!=RoomState::Running){
+                if(!REXCVAR_GET(em2_probe_room_recovery_controller) || !REXCVAR_GET(em2_private_profile) ||
+                   !NativeOnlineMenuQaActive() || PrivateNativeMenuRoom()!=&room_ ||
+                   (room_.state()!=RoomState::Error && room_.state()!=RoomState::Disconnected))return X_ERROR_DEVICE_NOT_CONNECTED;
+                *state={};const auto poll=recovery_reads_++;
+                state->gamepad.buttons=(poll<2 || poll>=3)?0x1000:0;
+                if(poll<=3)REXLOG_INFO("Private recovery SDK controller: peer {} poll {} buttons {}; held A, release, new A press",room_.local_peer(),poll,uint16_t(state->gamepad.buttons));
+                return X_ERROR_SUCCESS;
+            }
             *state={};++reads_;const auto tick=room_.next_tick();
             if(tick>=room_.identity().first_tick && tick-room_.identity().first_tick<warmup_){
                 if(!warming_){warming_=true;REXLOG_INFO("Private Room SDK neutral warmup: peer {} first tick {} duration {}",room_.local_peer(),tick,warmup_);}

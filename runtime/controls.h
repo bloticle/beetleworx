@@ -60,5 +60,9 @@ bool ControlBindingsOpen();
 // taps, dispatches actions, or changes canonical online input. False/zero while
 // controls are suppressed or a synchronized session owns the controllers.
 bool SampleLiveLook(rex::input::InputSystem&,unsigned user,LiveLookInput&);
+// Recovery UI only: physical buttons, bypassing agreed frames and gameplay
+// remapping. Does not publish, consume, or latch any gameplay sample.
+bool SampleLocalRecoveryButtons(rex::input::InputSystem&,unsigned user,uint16_t&);
+bool TestLocalRecoveryControls();
 std::unique_ptr<rex::input::InputDriver> CreateKeyboardFallback(rex::ui::Window* window);
 }

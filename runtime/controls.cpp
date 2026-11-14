@@ -658,6 +658,47 @@ bool SampleLiveLook(rex::input::InputSystem& input,unsigned user,LiveLookInput& 
     out=MapLiveLook(user,state.gamepad);
     return true;
 }
+bool SampleLocalRecoveryButtons(rex::input::InputSystem& input,unsigned user,uint16_t& buttons){
+    buttons=0;if(user>=2)return false;
+    struct Scope{bool prior=sampling_local_controls;Scope(){sampling_local_controls=true;}~Scope(){sampling_local_controls=prior;}}scope;
+    X_INPUT_STATE physical{};if(input.GetState(user,&physical)!=X_ERROR_SUCCESS)return false;
+    buttons=uint16_t(physical.gamepad.buttons);return true;
+}
+bool TestLocalRecoveryControls(){
+    class Device final:public rex::input::InputDriver{
+    public:bool connected=true;unsigned reads=0;
+        Device():InputDriver(nullptr,0){}
+        X_STATUS Setup()override{return X_STATUS_SUCCESS;}
+        X_RESULT GetCapabilities(uint32_t,uint32_t,X_INPUT_CAPABILITIES*)override{return X_ERROR_DEVICE_NOT_CONNECTED;}
+        X_RESULT GetState(uint32_t user,X_INPUT_STATE* state)override{
+            ++reads;if(!connected)return X_ERROR_DEVICE_NOT_CONNECTED;
+            if(ReadSynchronizedControls(user,state))return X_ERROR_SUCCESS;
+            *state={};state->gamepad.buttons=user?0x2000:0x1000;return X_ERROR_SUCCESS;
+        }
+        X_RESULT SetState(uint32_t,X_INPUT_VIBRATION*)override{return X_ERROR_DEVICE_NOT_CONNECTED;}
+        X_RESULT GetKeystroke(uint32_t,uint32_t,X_INPUT_KEYSTROKE*)override{return X_ERROR_EMPTY;}
+    };
+    if(!em2::BeginSynchronizedControls(0))return false;
+    struct End{~End(){em2::EndSynchronizedControls();}}end;
+    em2::net::Frame agreed{};agreed.players[0].buttons=0x4000;
+    if(!em2::PublishSynchronizedControls(agreed))return false;
+    rex::input::InputSystem input(nullptr);auto owned=std::make_unique<Device>();auto* device=owned.get();input.AddDriver(std::move(owned));
+    uint16_t buttons=0;uint64_t generation=0;em2::net::Frame before{},after{};
+    if(!em2::ReadPublishedSynchronizedControls(generation,before))return false;
+    X_INPUT_STATE initial{};
+    if(input.GetState(0,&initial)!=X_ERROR_SUCCESS || uint16_t(initial.gamepad.buttons)!=0x4000)return false;
+    const auto packets_before=packets;const auto raw_before=raw_pads;
+    if(!em2::SampleLocalRecoveryButtons(input,0,buttons) || buttons!=0x1000 || sampling_local_controls)return false;
+    if(!em2::SampleLocalRecoveryButtons(input,1,buttons) || buttons!=0x2000)return false;
+    const auto reads=device->reads;
+    if(em2::SampleLocalRecoveryButtons(input,2,buttons) || buttons || device->reads!=reads)return false;
+    device->connected=false;if(em2::SampleLocalRecoveryButtons(input,0,buttons) || buttons || sampling_local_controls)return false;
+    X_INPUT_STATE state{};device->connected=true;
+    if(input.GetState(0,&state)!=X_ERROR_SUCCESS || uint16_t(state.gamepad.buttons)!=0x4000)return false;
+    uint64_t current=0;
+    if(!em2::ReadPublishedSynchronizedControls(current,after) || generation!=current || before!=after || packets_before!=packets || std::memcmp(raw_before.data(),raw_pads.data(),sizeof(raw_before)))return false;
+    REXLOG_INFO("Recovery controller sampling passed physical source/user/disconnect bounds, agreed-frame bypass, scope restoration and unchanged canonical frame/cache");return true;
+}
 bool SampleLocalControls(rex::input::InputSystem& input,unsigned user,uint64_t tick,net::Pad& out) {
     out={};uint64_t generation;
     auto ready=[&]() {

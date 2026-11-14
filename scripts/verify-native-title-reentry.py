@@ -31,6 +31,7 @@ def verify(root):
     result = json.loads((root / 'result.json').read_text(encoding='utf-8-sig'))
     assert result.get('reenter_after_return') and result['return_to_title_probe']
     assert result['players'] == 4 and not result['close_participant']
+    assert not result.get('recovery_controller') or result.get('recovery_prompt'), 'Controller recovery requires prompt mode without auto return'
     assert result['failure_observed'] and result['startup_complete'] and not result.get('error')
     assert not result['observation_complete'] and not result['screenshots_taken']
     assert all(result[k] for k in ('normal_user_files_unchanged', 'normal_config_unchanged', 'normal_crash_unchanged'))
@@ -70,9 +71,17 @@ def verify(root):
         ]
         assert markers == sorted(markers) and len(set(markers)) == len(markers)
         if result.get('recovery_prompt'):
-            requested = text.index('Native recovery HUD return request accepted; queued for checked native boundary')
-            assert stop < requested < markers[1], 'Recovery did not originate from the HUD request before native transition'
-            assert text.count('Native recovery HUD return request accepted;') == 1, 'Recovery request repeated'
+            source = 'controller' if result.get('recovery_controller') else 'HUD'
+            request_marker = f'Native recovery {source} return request accepted;'
+            requested = text.index(request_marker)
+            assert stop < requested < markers[1], 'Recovery request did not precede native transition'
+            assert text.count(request_marker) == 1, 'Recovery request repeated'
+            if result.get('recovery_controller'):
+                assert 'Native recovery HUD return request accepted;' not in text, 'Controller test used HUD auto-click'
+                polls = list(re.finditer(r'Private recovery SDK controller: peer (\d+) poll (\d+) buttons (\d+);', text))
+                assert [(int(m[2]), int(m[3])) for m in polls] == [(0, 4096), (1, 4096), (2, 0), (3, 4096)]
+                assert stop < polls[0].start() < polls[-1].start() < requested
+                assert len({m[1] for m in polls}) == 1
         assert "phase 'complete' reads" in text[:stop]
         assert 'Native gameplay observation v' not in text[stop:fresh]
         assert not re.search(r'Native (?:Room title return|online title restore) (?:failed|rejected):', text)
@@ -81,6 +90,8 @@ def verify(root):
         fields = dict(line.split(': ', 1) for line in report.splitlines()[1:] if ': ' in line)
         assert fields['Phase'] == 'running (8)' and fields['Participant mask'] == '15'
         assert int(fields['Last verified tick']) >= 400
+        if result.get('recovery_controller'):
+            assert int(polls[0][1]) == int(fields['Local peer']), 'Recovery input came from a different local peer'
         source_peers.add(int(fields['Local peer']))
         summary = re.search(r'Native online title restore complete: saved campaign (true|false);', text)
         assert summary
@@ -105,7 +116,8 @@ def verify(root):
         (view / filename).write_text(json.dumps(projected, indent=2) + '\n', encoding='utf-8')
     active = runpy.run_path(str(Path(__file__).with_name('verify-native-menu-active-input.py')))['verify'](view)
     return {'passed': True, 'binary_sha256': result['exe_sha256'], 'roles': roles,
-            'hud_recovery_request': bool(result.get('recovery_prompt')),
+            'hud_recovery_request': bool(result.get('recovery_prompt')) and not result.get('recovery_controller', False),
+            'controller_recovery_request': bool(result.get('recovery_controller')),
             'fresh_session_nonce': True,
             'offline_campaigns': saved, 'fresh_session': active,
             'derived_log_view': str(view), 'scope': __doc__.strip()}

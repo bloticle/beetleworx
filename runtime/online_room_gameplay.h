@@ -50,6 +50,8 @@ public:
     // Owner-thread read only, outside the native update. Eligibility proves
     // completed input/physics ownership, not storage idle or renderer fences.
     const char* LeaveBoundaryBlocker(uint8_t*)const;
+    // Original local physical source only, on the stopped world's owner thread.
+    bool SampleRecoveryButtons(uint16_t&)const;
     std::unique_ptr<NativeRoomActors> PrepareTitleUnload(PPCContext&,uint8_t*);
     std::optional<uint64_t> last_native_completed_tick()const;
     const std::string& error()const;

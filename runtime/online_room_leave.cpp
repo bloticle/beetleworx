@@ -8,6 +8,7 @@
 #include "game_console.h"
 #include "allocation_trace.h"
 #include "players.h"
+#include "controls.h"
 #include "ppc_context.h"
 #include <rex/cvar.h>
 #include <rex/logging.h>
@@ -23,6 +24,7 @@
 PPC_EXTERN_FUNC(__imp__sub_829DA2C0);
 REXCVAR_DECLARE(bool,em2_private_profile);
 REXCVAR_DEFINE_BOOL(em2_probe_room_return_title,false,"Debug","Private native lobby QA only: return a stopped completed world to title and refresh original storage");
+REXCVAR_DEFINE_BOOL(em2_probe_room_recovery_controller,false,"Debug","Validated private native lobby only: confirm recovery with synthetic local SDK A release/press, never the HUD auto-click");
 REXCVAR_DEFINE_BOOL(em2_probe_room_recovery_prompt,false,"Debug","Validated private native lobby only: request recovery through the authored HUD button instead of automatic return");
 REXCVAR_DEFINE_UINT32(em2_probe_room_disconnect_tick,0xFFFFFFFFu,"Debug","Private native lobby QA only: disconnect at a completed outer boundary once at/after this tick");
 namespace em2::net {
@@ -42,8 +44,10 @@ std::atomic<Recovery> recovery{Recovery::Inactive};
 std::atomic<bool> recovery_requested{false};
 std::mutex recovery_mutex;
 std::string recovery_message;
+bool recovery_pad_armed=false; // native owner thread only
 void RecoveryHint(Recovery state,std::string message){
     {std::lock_guard lock(recovery_mutex);recovery_message=std::move(message);}
+    if(state!=Recovery::Available)recovery_pad_armed=false;
     recovery.store(state,std::memory_order_release);
 }
 bool RequestRecovery(){auto expected=Recovery::Available;if(!recovery.compare_exchange_strong(expected,Recovery::Requested))return false;recovery_requested.store(true,std::memory_order_release);return true;}
@@ -65,7 +69,7 @@ bool NativeRoomRecoveryOption(int id,int choice,int& result){
     result=0;
     if(id==2790){
         if(choice==1){result=int(RequestRecovery());if(result)REXLOG_INFO("Native recovery HUD return request accepted; queued for checked native boundary");}
-        else if(choice==2)result=REXCVAR_GET(em2_probe_room_recovery_prompt) && REXCVAR_GET(em2_private_profile) && NativeOnlineMenuQaActive();
+        else if(choice==2)result=!REXCVAR_GET(em2_probe_room_recovery_controller) && REXCVAR_GET(em2_probe_room_recovery_prompt) && REXCVAR_GET(em2_private_profile) && NativeOnlineMenuQaActive();
         else if(choice==-1 || choice==0)result=int(recovery.load(std::memory_order_acquire));
         return true;
     }
@@ -114,10 +118,26 @@ bool NativeRoomRecoveryKey(unsigned key,bool down){
     if(state!=Recovery::Available && state!=Recovery::Requested && state!=Recovery::Returning)return false;
     if(down && state==Recovery::Available)RequestRecovery();return true;
 }
+bool NativeRoomRecoveryPad(bool connected,unsigned short buttons){
+    if(recovery.load(std::memory_order_acquire)!=Recovery::Available || !connected){recovery_pad_armed=false;return false;}
+    if(!recovery_pad_armed){if(!(buttons&0x1000))recovery_pad_armed=true;return true;}
+    if(buttons&0x1000){recovery_pad_armed=false;if(RequestRecovery())REXLOG_INFO("Native recovery controller return request accepted; queued for checked native boundary");}
+    return true;
+}
 bool TestNativeRoomRecoveryRequests(){
     if(NativeRoomActive() || leave.phase!=Phase::Idle || recovery.load()!=Recovery::Inactive)return false;
     struct Restore{~Restore(){recovery_requested=false;RecoveryHint(Recovery::Inactive,{});}}restore;
+    if(!em2::TestLocalRecoveryControls())return false;
     int result=99;
+    RecoveryHint(Recovery::Available,"Controller recovery.");
+    if(!NativeRoomRecoveryPad(true,0x1000) || recovery_requested.load())return false;
+    if(!NativeRoomRecoveryPad(true,0) || !NativeRoomRecoveryPad(true,0x1000) || !recovery_requested.load() || recovery.load()!=Recovery::Requested)return false;
+    recovery_requested=false;RecoveryHint(Recovery::Available,"Reconnect requires release.");
+    if(NativeRoomRecoveryPad(false,0) || !NativeRoomRecoveryPad(true,0x1000) || recovery_requested.load())return false;
+    if(!NativeRoomRecoveryPad(true,0) || !NativeRoomRecoveryPad(true,0x1000) || !recovery_requested.load())return false;
+    recovery_requested=false;RecoveryHint(Recovery::RestartRequired,"Unsafe boundary.");
+    if(NativeRoomRecoveryPad(true,0) || NativeRoomRecoveryPad(true,0x1000) || recovery_requested.load())return false;
+    RecoveryHint(Recovery::Inactive,{});
     if(!NativeRoomRecoveryOption(2790,1,result) || result || NativeRoomRecoveryKey(VK_RETURN,true))return false;
     RecoveryHint(Recovery::Available,"Offline save retained.");
     if(!NativeRoomRecoveryOption(2790,-1,result) || result!=1 || !NativeRoomRecoveryKey(VK_RETURN,true) || !recovery_requested.load())return false;
@@ -168,6 +188,10 @@ void TickNativeRoomTitleLeave(PPCContext& ctx,uint8_t* base,bool completed){
             recovery_requested.store(false,std::memory_order_release);
             RecoveryHint(Recovery::RestartRequired,std::string("Cannot safely return: ")+reason+". Restart Beetleworx; your offline save is retained.");
             if(private_auto){REXLOG_ERROR("Native Room title return rejected: {}",reason);leave.phase=Phase::Failed;}return;
+        }
+        if(!private_auto && recovery.load(std::memory_order_acquire)==Recovery::Available){
+            uint16_t buttons=0;const bool connected=gameplay->SampleRecoveryButtons(buttons);
+            NativeRoomRecoveryPad(connected,buttons);
         }
         if(!private_auto && !recovery_requested.load(std::memory_order_acquire)){
             RecoveryHint(Recovery::Available,"Online connection lost. Return to the title menu to restore your offline save and start another lobby.");return;

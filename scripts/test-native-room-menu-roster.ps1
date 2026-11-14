@@ -9,7 +9,7 @@ param(
  [ValidatePattern('^([a-z0-9_.]{1,63})?$')][string]$NativeLevelTarget='',
  [switch]$DebugCleanLevelLoad,
  [ValidateRange(0,16)][int]$CloseParticipant=0,
- [switch]$ReturnToTitle,[switch]$ReenterAfterReturn,[switch]$RecoveryPrompt,
+ [switch]$ReturnToTitle,[switch]$ReenterAfterReturn,[switch]$RecoveryPrompt,[switch]$RecoveryController,
  [ValidateRange(0,16)][int]$PartialDeliveryParticipant=0,
  [ValidateRange(400,100000)][int]$PartialDeliveryTick=500,
  [string]$ReuseVerifiedContent='', [string]$ReplayInvitationFile='',
@@ -17,6 +17,7 @@ param(
  [ValidateRange(120,600)][int]$StartupTimeoutSeconds=360
 )
 $ErrorActionPreference='Stop'
+if($RecoveryController -and !$RecoveryPrompt){throw 'Controller recovery QA requires RecoveryPrompt mode; the HUD auto-click will be disabled.'}
 if($RecoveryPrompt -and (!$ReenterAfterReturn -or !$ReturnToTitle)){throw 'Recovery prompt QA requires the native return and re-entry capture.'}
 if($ReturnToTitle -and !$CloseParticipant -and !$ReenterAfterReturn){throw 'Private title-return test requires participant-close injection or controlled disconnect/re-entry.'}
 if($ReenterAfterReturn -and (!$ReturnToTitle -or !$ScriptedInput -or $CloseParticipant -or $PartialDeliveryParticipant -or $CheckpointReloadTick)){throw 'Private re-entry requires scripted input and title return, without other failure/reload injection.'}
@@ -67,7 +68,7 @@ $record.native_level_target=$NativeLevelTarget
 $record.native_level_method=if($NativeLevelTarget){if($DebugCleanLevelLoad){'original-level'}else{'original-transition'}}else{''}
 $record.reused_verified_content=$ReuseVerifiedContent
 $record.close_participant=$CloseParticipant;$record.failure_observed=$false;$record.leave_boundary_probe=[bool]($CloseParticipant -or $PartialDeliveryParticipant)
-$record.partial_delivery_participant=$PartialDeliveryParticipant;$record.partial_delivery_tick=$PartialDeliveryTick;$record.return_to_title_probe=[bool]$ReturnToTitle;$record.reenter_after_return=[bool]$ReenterAfterReturn;$record.recovery_prompt=[bool]$RecoveryPrompt
+$record.partial_delivery_participant=$PartialDeliveryParticipant;$record.partial_delivery_tick=$PartialDeliveryTick;$record.return_to_title_probe=[bool]$ReturnToTitle;$record.reenter_after_return=[bool]$ReenterAfterReturn;$record.recovery_prompt=[bool]$RecoveryPrompt;$record.recovery_controller=[bool]$RecoveryController
 if(-not ('BWNativeMenuWindows' -as [type])){Add-Type -TypeDefinition @'
 using System;using System.Text;using System.Runtime.InteropServices;
 public static class BWNativeMenuWindows {
@@ -173,6 +174,7 @@ try {
   if($CloseParticipant -or $PartialDeliveryParticipant){$info.ArgumentList.Add('--em2_probe_room_leave_boundary=true')}
   if($ReturnToTitle){$info.ArgumentList.Add('--em2_probe_room_return_title=true')}
   if($RecoveryPrompt){$info.ArgumentList.Add('--em2_probe_room_recovery_prompt=true')}
+  if($RecoveryController){$info.ArgumentList.Add('--em2_probe_room_recovery_controller=true')}
   if($ReenterAfterReturn){foreach($arg in @('--em2_native_lobby_qa_reenter=true','--em2_room_probe_input_warmup_ticks=180','--em2_probe_room_hud_properties=true')){$info.ArgumentList.Add($arg)};if($peer.role -eq 'host'){$info.ArgumentList.Add('--em2_probe_room_disconnect_tick=800')}}
   if($PartialDeliveryParticipant -and $peer.role -eq $records[$PartialDeliveryParticipant-1].role){$info.ArgumentList.Add('--em2_probe_room_partial_delivery_tick='+$PartialDeliveryTick)}
   $process=[Diagnostics.Process]::Start($info);$peer.pid=$process.Id;$peer.started_utc=$process.StartTime.ToUniversalTime().ToString('o')

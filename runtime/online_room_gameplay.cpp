@@ -34,6 +34,7 @@
 #include <vector>
 #include <rex/cvar.h>
 REXCVAR_DECLARE(bool,em2_private_profile);
+REXCVAR_DECLARE(bool,em2_probe_room_recovery_controller);
 REXCVAR_DEFINE_UINT32(em2_probe_room_partial_delivery_tick,0xFFFFFFFFu,"Debug","Explicit private native lobby QA fault: stop after original input delivery but before native physics/post-update at this tick");
 REXCVAR_DEFINE_BOOL(em2_probe_room_hud_properties,false,"Debug","Private native Room QA only: observe actual authored life-property callback ownership");
 REXCVAR_DEFINE_BOOL(em2_room_native_buttons,false,"Debug","Enable experimental two-player native button production and delivery in retained Room gameplay");
@@ -594,6 +595,15 @@ bool NativeRoomGameplay::halted()const{return impl_->stopped;}
 bool NativeRoomGameplay::waiting()const{return gameplay_waiting.load(std::memory_order_acquire);}
 bool NativeRoomGameplay::completion_pending()const{return impl_->pending;}
 uint64_t NativeRoomGameplay::committed_tick()const{return impl_->committed;}
+bool NativeRoomGameplay::SampleRecoveryButtons(uint16_t& buttons)const{
+    Environment environment;const auto& s=*impl_;buttons=0;
+    if(!s.Configured() || !s.Owner() || (s.room->state()!=RoomState::Error && s.room->state()!=RoomState::Disconnected) ||
+       em2::InAgreedSimulationTick())return false;
+    auto* input=s.original_input;
+    if(REXCVAR_GET(em2_probe_room_recovery_controller) && REXCVAR_GET(em2_private_profile) && NativeOnlineMenuQaActive() && s.scripted_input)
+        input=s.scripted_input.get();
+    return input && em2::SampleLocalRecoveryButtons(*input,s.physical,buttons);
+}
 const char* NativeRoomGameplay::LeaveBoundaryBlocker(uint8_t* base)const{
     Environment environment;const auto& s=*impl_;
     if(!s.Configured() || !s.Owner())return "native gameplay owner unavailable";
