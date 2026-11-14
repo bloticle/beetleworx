@@ -1,7 +1,7 @@
 param(
  [ValidateRange(3,16)][int]$Players=3,
  
- [switch]$ScriptedInput,[switch]$ChatProbe,[switch]$VoiceProbe,[switch]$ButtonTaskProbe,[switch]$PolicyCycle,
+ [switch]$ScriptedInput,[switch]$ChatProbe,[switch]$VoiceProbe,[switch]$ButtonTaskProbe,[switch]$PolicyCycle,[switch]$CaptureShutdownHang,
  [switch]$NavigationTrace,[switch]$FaceTargetPoison,[switch]$UnfixedFaceTarget,[switch]$NativeReload,
  [ValidateRange(0,100000)][int]$CheckpointReloadTick=0,
  [ValidateRange(1,4)][int]$CheckpointReloadCount=1,
@@ -15,6 +15,7 @@ param(
  [ValidateRange(400,100000)][int]$PartialDeliveryTick=500,
  [string]$ReuseVerifiedContent='', [string]$ReplayInvitationFile='',
  [ValidateRange(20,180)][int]$ObserveSeconds=30,
+ [ValidateRange(256,8192)][int]$MinimumFreeMemoryMB=1024,
  [ValidateRange(120,600)][int]$StartupTimeoutSeconds=360
 )
 $ErrorActionPreference='Stop'
@@ -64,6 +65,9 @@ $normalConfig=Join-Path $runtime 'pc-assets/ConfigFiles.ini';$configHash=(Get-Fi
 $normalCrash=Join-Path $runtime 'crash.log';$crashHash=if(Test-Path -LiteralPath $normalCrash){(Get-FileHash -LiteralPath $normalCrash).Hash}else{''}
 $records=[Collections.Generic.List[object]]::new();$owned=[Collections.Generic.List[object]]::new()
 $record=[ordered]@{root=$root;players=$Players;exe_sha256=$exeHash;native_room_menu=$true;checkpoint_reload_tick=$CheckpointReloadTick;voice_probe=[bool]$VoiceProbe;navigation_trace=[bool]$NavigationTrace;face_target_poison=[bool]$FaceTargetPoison;face_target_unfixed=[bool]$UnfixedFaceTarget;replay_invitation=$ReplayInvitationFile;chat_probe=[bool]$ChatProbe;scripted_sdk_input=[bool]$ScriptedInput;mixed_characters=$true;gameplay_input_sent=$false;screenshots_taken=$false;startup_complete=$false;observation_complete=$false;processes=@()}
+$record.capture_shutdown_hang=[bool]$CaptureShutdownHang
+$record.memory_guard_mb=$MinimumFreeMemoryMB;$record.memory_samples=@();$record.minimum_free_memory_mb=$null;$record.peak_owned_working_set_mb=0;$record.peak_owned_private_mb=0
+$nextMemorySample=[DateTime]::MinValue
 $record.native_reload=[bool]$NativeReload
 $record.button_task_probe=[bool]$ButtonTaskProbe
 $record.policy_cycle=[bool]$PolicyCycle
@@ -121,6 +125,20 @@ function ObserveControlledDisconnect([int]$Attempts=1){
  return $false
 }
 
+function SampleOwnedMemory {
+ $memory=Get-CimInstance Win32_OperatingSystem
+ $freeMB=[long]($memory.FreePhysicalMemory/1024)
+ $working=0L;$private=0L
+ foreach($entry in $owned){$process=$entry.process
+  if(!$process.HasExited){$process.Refresh();$working+=$process.WorkingSet64;$private+=$process.PrivateMemorySize64}
+ }
+ $sample=[ordered]@{utc=[DateTime]::UtcNow.ToString('o');free_mb=$freeMB;owned_working_set_mb=[long]($working/1MB);owned_private_mb=[long]($private/1MB)}
+ if($record.memory_samples.Count -lt 256){$record.memory_samples+=@($sample)}
+ if($null -eq $record.minimum_free_memory_mb -or $freeMB -lt $record.minimum_free_memory_mb){$record.minimum_free_memory_mb=$freeMB}
+ $record.peak_owned_working_set_mb=[Math]::Max([long]$record.peak_owned_working_set_mb,[long]$sample.owned_working_set_mb)
+ $record.peak_owned_private_mb=[Math]::Max([long]$record.peak_owned_private_mb,[long]$sample.owned_private_mb)
+ if($freeMB -lt $MinimumFreeMemoryMB){throw ('Isolated capture stopped for low memory: '+$freeMB+' MB available; guard '+$MinimumFreeMemoryMB+' MB. Only owned test processes will close.')}
+}
 try {
  Write-Output ('Preparing isolated native Room menu roster: '+$root)
  # Finish every link/copy before launching any fingerprint worker. Shared
@@ -163,6 +181,7 @@ try {
  if(Get-CimInstance Win32_Process -Filter "Name='beetleworx.exe' OR Name='EM2Recomp.exe'"){throw 'Another game appeared during preparation; nothing was launched.'}
  if($ReenterAfterReturn){foreach($peer in $records){$peer.offline_campaign_before=OfflineCampaignHashes $peer}}
  foreach($peer in $records){
+  SampleOwnedMemory
   $info=[Diagnostics.ProcessStartInfo]::new($exe);$info.UseShellExecute=$false;$info.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden;$info.WorkingDirectory=$runtime
   foreach($arg in @(('--em2_user_data_directory='+$peer.user),('--em2_content_directory='+$peer.content),('--log_file='+$peer.log),'--no-em2_online_menu','--no-em2_demo_build','--em2_private_profile=true','--em2_native_room_lobby=true','--em2_native_online_handoff=true',('--em2_native_lobby_qa_role='+$peer.role),('--em2_native_lobby_qa_players='+$Players),('--em2_native_lobby_qa_invitation_file='+(Join-Path $root 'native-menu-invitation.txt')),'--em2_online_auto_continue=true','--em2_auto_continue=false','--em2_online_world_random=true','--em2_online_single_view=true','--em2_trace_online_observations=true','--em2_trace_auto_continue=true','--em2_trace_online_clothing=true')){$info.ArgumentList.Add($arg)}
   if($ChatProbe){$info.ArgumentList.Add('--em2_probe_online_chat=true')}
@@ -212,6 +231,7 @@ try {
     $record.failure_injection_started_utc=[DateTime]::UtcNow.ToString('o')
    }
   }
+  if([DateTime]::UtcNow -ge $nextMemorySample){SampleOwnedMemory;$nextMemorySample=[DateTime]::UtcNow.AddSeconds(5)}
   if($ReenterAfterReturn){[void](ObserveControlledDisconnect)}
   if($record.Contains('failure_injection_started_utc')){
    $failed=0
@@ -284,7 +304,29 @@ finally{
  $record.close_started_local=[DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss.fff')
  foreach($entry in $owned){$p=OwnedProcess $entry;if($p){$entry.record.close_messages=[BWNativeMenuWindows]::Close([uint32]$p.Id)}}
  foreach($entry in $owned){
-  $p=$entry.process;if(!$p.WaitForExit(10000)){$verified=OwnedProcess $entry;if($verified){$verified.Kill();[void]$verified.WaitForExit(10000);$entry.record.forced_close=$true}}
+  $p=$entry.process;if(!$p.WaitForExit(10000)){
+   $verified=OwnedProcess $entry
+   if($verified -and $CaptureShutdownHang){
+    $entry.record.slow_shutdown=$true
+    $dumpTool=Join-Path $workspace 'tools/procdump/procdump64.exe'
+    if(Test-Path -LiteralPath $dumpTool){
+     $dump=Join-Path $entry.record.root 'shutdown-hang.dmp'
+     $dumpInfo=[Diagnostics.ProcessStartInfo]::new($dumpTool);$dumpInfo.UseShellExecute=$false;$dumpInfo.CreateNoWindow=$true
+     $dumpInfo.RedirectStandardOutput=$true;$dumpInfo.RedirectStandardError=$true
+     foreach($arg in @('-accepteula','-mm',[string]$p.Id,$dump)){$dumpInfo.ArgumentList.Add($arg)}
+     $dumpProcess=[Diagnostics.Process]::Start($dumpInfo);$dumpOutput=$dumpProcess.StandardOutput.ReadToEndAsync();$dumpError=$dumpProcess.StandardError.ReadToEndAsync()
+     if(!$dumpProcess.WaitForExit(15000)){$dumpProcess.Kill();[void]$dumpProcess.WaitForExit(5000)}
+     if($dumpProcess.HasExited){
+      $entry.record.shutdown_dump_exit=$dumpProcess.ExitCode
+      [IO.File]::WriteAllText((Join-Path $entry.record.root 'shutdown-dump-tool.log'),$dumpOutput.GetAwaiter().GetResult()+$dumpError.GetAwaiter().GetResult())
+      if(Test-Path -LiteralPath $dump){$entry.record.shutdown_dump=$dump}
+     }
+    }
+   }
+   # Revalidate after the read-only dump: a slow normal exit must not be killed.
+   $verified=OwnedProcess $entry
+   if($verified){$verified.Kill();[void]$verified.WaitForExit(10000);$entry.record.forced_close=$true}
+  }
   $entry.record.process_exited=$p.HasExited;if($p.HasExited){$entry.record.exit_code=$p.ExitCode}
  }
  $unchanged=@(Get-ChildItem -LiteralPath $normal -Recurse -File).Count -eq $baseline.Count
