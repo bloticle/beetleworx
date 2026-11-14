@@ -85,6 +85,20 @@ def main():
         staged = work / output.name
         shutil.copyfile(source, staged)
         run(args.ar, 'r', staged, obj)
+        shared_member='shared_memory.cpp.obj'
+        shared_symbol='?CompletedSubmissionUpdated@D3D12SharedMemory@d3d12@graphics@rex@@QEAAXXZ'
+        shared_candidates=[]
+        for index in range(1,members.count(shared_member)+1):
+            directory=work/f'shared-upload-{index}';directory.mkdir()
+            run(args.ar,'xN',index,source,shared_member,cwd=directory)
+            candidate=directory/shared_member
+            if any(line.endswith(' '+shared_symbol) for line in run(args.nm,'--defined-only',candidate).splitlines()):
+                shared_candidates.append((index,candidate))
+        if len(shared_candidates)!=1:raise RuntimeError('Expected one D3D12 shared-upload completion implementation')
+        shared_index,shared_object=shared_candidates[0]
+        run(args.objcopy,'--redefine-sym='+shared_symbol+'=EM2OriginalSharedUploadCompletion',shared_object)
+        run(args.ar,'dN',shared_index,staged,shared_member)
+        run(args.ar,'q',staged,shared_object)
         candidates = []
         for instance in range(1, members.count(FACTORY_MEMBER) + 1):
             candidate = work / f'factory-{instance}'
@@ -233,6 +247,7 @@ def main():
     manifest.write_text(json.dumps({'source': str(source), 'source_sha256': digest,
         'script_sha256': fingerprint, 'output_sha256': hashlib.sha256(output.read_bytes()).hexdigest(),
         'pipeline_retirement': pipeline_retirement_info,
+        'shared_upload_completion_bridge': 'EM2OriginalSharedUploadCompletion',
         'renamed_symbol': SYMBOL, 'bridge': BRIDGE, 'factory': factory_info,'packet':packet_info,'constant_writer':write_info,'type3_constants':type3_info,'pso_creation':pso_info,'pipeline_scope':pipeline_scope_info,'material_translation':material_translate_info,'ui_source_sha256':ui_digest,'ui_output_sha256':hashlib.sha256(ui_output.read_bytes()).hexdigest(),'root_signature_bridge':ROOT_BRIDGE,'deferred_execute_bridge':'EM2OriginalDeferredExecute','deferred_writer_bridge':'EM2OriginalDeferredWriteCommand','resolve_observer_bridges':resolve_bridges,'hdr_texture_bridges':texture_bridges}, indent=2)+'\n')
 
 
