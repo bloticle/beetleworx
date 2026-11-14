@@ -606,6 +606,7 @@ RoomGameplayAdmission NativeRoomGameplay::Prepare(PPCContext& ctx,uint8_t* base,
     if(s.cutscene_entry){
         if((!ReadNativeCutsceneContext(ctx,base,s.registry) && !s.return_pending) || !RefreshOwnedActorTaskPermissions(ctx,base)){
             s.Stop("Native cutscene context or authored permissions changed before suspension frame");return RoomGameplayAdmission::Stopped;}
+        TracePrivateNativeCutsceneUi(s.input_epoch,ctx,base,s.registry);
         if(s.prepared){output=*s.prepared;return RoomGameplayAdmission::Ready;}
         const auto tick=s.room->next_tick();
         if(!s.submitted){Pad discarded;

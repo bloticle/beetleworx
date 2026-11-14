@@ -118,3 +118,25 @@ canonical consumed-input fingerprints and completed-proof barriers. It does
 not substitute for sixteen actual native game clients. Protocol 8 changes
 are source-only here; a future binary package needs its own release version,
 and source builds must not be mixed with older protocol-7 demo binaries.
+
+
+Private cutscene UI inventory
+-----------------------------
+
+Private profiling now records the original UI_Global and CutScene action
+contexts, listeners and bindings once per input epoch. The inventory is
+read-only: it does not evaluate actions, dispatch callbacks or transmit
+process addresses. Ordinary launches do not enable this trace.
+
+Candidate `616521E1D7794A2FB7FF15017FC976E029478D637DDD080AA78B3858D5708DC2`
+compiled and passed the three-world boundary-movement regression in
+`analysis/native-lobby-20261114-121030-69160243`: 1,601 matching updates,
+controls restored at source tick 1302 / delivery tick 1304, successful
+movement and jumping afterward, normal process exits and unchanged user
+files. Verification used `scripts/verify-native-cutscene-return.py`.
+
+The observed native skip actions form a pressed/held/released sequence
+(`DisplaySkipMovieButton`, `MovieSkipStart`, `MovieSkipStop`) with a special
+user binding. This inventory does not implement online cutscene skipping or
+interactive cinematic choices. Those remain unfinished, along with full
+campaign and sixteen-native-client validation.

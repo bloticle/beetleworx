@@ -3,9 +3,75 @@
 #include "ppc_context.h"
 #include <rex/logging.h>
 #include <cstring>
+#include <windows.h>
+#include <immintrin.h>
 #include <rex/cvar.h>
 REXCVAR_DECLARE(bool,em2_private_profile);
+PPC_EXTERN_FUNC(__imp__sub_827C3D78);
 namespace em2::net {
+namespace {
+bool UiReadable(uint8_t* base,uint32_t p,size_t n){return base && p>=4096 && uint64_t(p)+n<=0x100000000ull && GuestReadBatch::Readable(base+p,n);}
+bool UiName(uint8_t* base,uint32_t p,std::string& out){
+    if(!UiReadable(base,p,96))return false;
+    const auto* first=reinterpret_cast<const char*>(base+p);const auto* end=static_cast<const char*>(std::memchr(first,0,96));
+    if(!end || first==end)return false;out.assign(first,end);return true;
+}
+struct UiPreserve {
+    PPCContext& ctx;PPCContext saved;unsigned fp=_mm_getcsr();DWORD error=GetLastError();uint8_t* stack=nullptr;std::array<uint8_t,8192> bytes{};
+    UiPreserve(PPCContext& c,uint8_t* base):ctx(c),saved(c){const auto top=c.r1.u32&~15u;
+        if(top>=12288 && UiReadable(base,top-8192,8192)){stack=base+top-8192;std::memcpy(bytes.data(),stack,bytes.size());ctx.r1.u64=top-4096;}}
+    ~UiPreserve(){if(stack)std::memcpy(stack,bytes.data(),bytes.size());ctx=saved;_mm_setcsr(fp);SetLastError(error);}
+};
+}
+bool InspectNativeCutsceneUi(PPCContext& ctx,uint8_t* base,uint32_t registry,NativeCutsceneUiSnapshot& out){
+    UiPreserve preserve(ctx,base);NativeGameOverState state;uint32_t mode=0;
+    if(!preserve.stack || !ReadNativeControlState(ctx,base,state,mode) || mode!=3 || state.registry!=registry || !UiReadable(base,0x833DBAD8,4))return false;
+    const auto manager=PPC_LOAD_U32(0x833DBAD8);if(!UiReadable(base,manager,48))return false;
+    const auto uid=PPC_LOAD_U32(manager+16);std::string name;if(!UiName(base,uid,name) || name!="CutScene")return false;
+    ctx.r3.u64=manager;ctx.r4.u64=manager+16;__imp__sub_827C3D78(ctx,base);const auto selected=ctx.r3.u32;
+    if(!UiReadable(base,selected,24) || PPC_LOAD_U32(selected)!=uid)return false;
+    NativeCutsceneUiSnapshot candidate;candidate.manager=manager;
+    const std::array<uint32_t,2> events{manager+24,selected};
+    for(unsigned context=0;context<2;++context){const auto event=events[context];if(context && event==events[0])continue;
+        if(!UiReadable(base,event,24))return false;
+        NativeCutsceneUiEvent snapshot;snapshot.event=event;
+        if(!UiName(base,PPC_LOAD_U32(event),snapshot.name))return false;
+        const auto listeners=PPC_LOAD_U32(event+4),listener_count=PPC_LOAD_U32(event+8),actions=PPC_LOAD_U32(event+16),count=PPC_LOAD_U32(event+20);
+        if(listener_count>128 || count>256 || (listener_count && !UiReadable(base,listeners,size_t(listener_count)*4)) || (count && !UiReadable(base,actions,size_t(count)*4)))return false;
+        for(unsigned i=0;i<listener_count;++i){const auto listener=PPC_LOAD_U32(listeners+i*4);
+            if(!UiReadable(base,listener,4))return false;const auto table=PPC_LOAD_U32(listener);
+            if(!UiReadable(base,table,4))return false;
+            snapshot.listeners.push_back({listener,table,PPC_LOAD_U32(table)});
+        }
+        for(unsigned i=0;i<count;++i){const auto action=PPC_LOAD_U32(actions+i*4);if(!UiReadable(base,action,436))return false;
+            NativeCutsceneUiAction item;item.event=event;item.ordinal=i;item.action=action;item.kind=PPC_LOAD_U32(action+80);item.condition=PPC_LOAD_U32(action+412);item.curve=PPC_LOAD_U32(action+432);
+            if(!UiName(base,PPC_LOAD_U32(action),item.name))return false;
+            const auto bindings=PPC_LOAD_U32(action+408);if(bindings>10)return false;
+            for(unsigned b=0;b<bindings;++b){std::array<uint32_t,8> words{};for(unsigned k=0;k<8;++k)words[k]=PPC_LOAD_U32(action+88+b*32+k*4);item.bindings.push_back(words);}
+            snapshot.actions.push_back(std::move(item));
+        }
+        if(PPC_LOAD_U32(event+4)!=listeners || PPC_LOAD_U32(event+8)!=listener_count || PPC_LOAD_U32(event+16)!=actions || PPC_LOAD_U32(event+20)!=count)return false;
+        candidate.contexts.push_back(std::move(snapshot));
+    }
+    if(PPC_LOAD_U32(0x833DBAD8)!=manager || PPC_LOAD_U32(manager+16)!=uid)return false;
+    out=std::move(candidate);return true;
+}
+void TracePrivateNativeCutsceneUi(uint64_t epoch,PPCContext& ctx,uint8_t* base,uint32_t registry){
+    if(!REXCVAR_GET(em2_private_profile))return;
+    static thread_local uint64_t recorded=0;if(recorded==epoch)return;
+    NativeCutsceneUiSnapshot snapshot;if(!InspectNativeCutsceneUi(ctx,base,registry,snapshot))return;
+    recorded=epoch;
+    REXLOG_INFO("Private native cutscene UI inventory: input epoch {} manager {:08X} contexts {}; read-only, no action evaluation or dispatch",epoch,snapshot.manager,snapshot.contexts.size());
+    for(const auto& context:snapshot.contexts){
+        REXLOG_INFO("Private native cutscene UI context: '{}' event {:08X} listeners {} actions {}",context.name,context.event,context.listeners.size(),context.actions.size());
+        for(const auto& listener:context.listeners)REXLOG_INFO("Private native cutscene UI listener: '{}' address {:08X} table {:08X} callback {:08X}",context.name,listener[0],listener[1],listener[2]);
+        for(const auto& action:context.actions){
+            REXLOG_INFO("Private native cutscene UI action: '{}' ordinal {} '{}' record {:08X} kind {} condition {} curve {} bindings {}",context.name,action.ordinal,action.name,action.action,action.kind,action.condition,action.curve,action.bindings.size());
+            for(const auto& b:action.bindings)REXLOG_INFO("Private native cutscene UI binding: '{}' '{}' user {} key {:08X} destination {:08X} repeat {:08X} flags {:08X} state {:08X}/{:08X}/{:08X}",context.name,action.name,b[0],b[1],b[2],b[5],b[4],b[3],b[6],b[7]);
+        }
+    }
+}
+
 bool ReadNativeInputContextName(uint8_t* base,std::string& out){
     if(!base || !GuestReadBatch::Readable(base+0x833DBAD8,4))return false;
     const auto manager=PPC_LOAD_U32(0x833DBAD8);
