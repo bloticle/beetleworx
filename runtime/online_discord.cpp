@@ -2,6 +2,7 @@
 #include "demo_support_json.h"
 #include <windows.h>
 #include <rex/cvar.h>
+#include <rex/logging.h>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -59,7 +60,10 @@ class Discord {
         // Discord delivers the actual join secret over local Discord RPC.
         set(L"shell\\open\\command",nullptr,L"\""+std::wstring(path.data(),length)+L"\" --em2_discord_launch=true");
     }
-    void Status(std::string value){std::lock_guard lock(mutex);status=std::move(value);}
+    void Status(std::string value){
+        std::lock_guard lock(mutex);if(status==value)return;
+        status=std::move(value);REXLOG_INFO("Discord integration: {}",status);
+    }
     // Every pending operation owns its buffer/event until completion, including
     // cancellation. No synchronous pipe I/O runs on the game's UI thread.
     bool Transfer(HANDLE pipe,void* memory,DWORD size,bool writing,std::stop_token stop){

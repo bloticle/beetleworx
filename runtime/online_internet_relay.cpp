@@ -6,6 +6,7 @@
 #include "online_discord.h"
 #include "online_invite.h"
 #include "demo_support_json.h"
+#include <rex/logging.h>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -44,6 +45,13 @@ struct InternetRelay::Impl {
     InternetRelayStatus view;
     std::atomic<bool> stopping=false;
     std::atomic<bool> completed=false;
+    std::atomic<const char*> phase="idle";
+    std::atomic<DWORD> http_status=0;
+    std::atomic<uint64_t> sent_payload=0,received_payload=0;
+    void Phase(const char* next){
+        phase.store(next,std::memory_order_release);
+        REXLOG_INFO("Internet relay {}: {}",host?"host":"guest",next);
+    }
     std::atomic<HINTERNET> websocket=nullptr;
     std::jthread main;
     bool started=false,host=false;
@@ -67,7 +75,13 @@ struct InternetRelay::Impl {
         for(auto& channel:channels)Close(channel.socket);
         Close(listener);if(winsock_started)WSACleanup();
     }
-    void Fail(std::string why){std::lock_guard lock(mutex);if(!view.failed){view.failed=true;view.ready=false;view.error=std::move(why);}}
+    void Fail(std::string why){std::lock_guard lock(mutex);if(!view.failed){
+        view.failed=true;view.ready=false;view.error=std::move(why);
+        // No endpoint, room code, host credential or packet contents in logs.
+        REXLOG_ERROR("Internet relay {} failed: phase {}, last HTTP status {}, tx payload {} bytes, rx payload {} bytes",
+            host?"host":"guest",phase.load(std::memory_order_acquire),http_status.load(),sent_payload.load(),received_payload.load());
+    }}
+    bool status_failed(){std::lock_guard lock(mutex);return view.failed;}
     void Check(){Need(!stopping,"Internet connection cancelled");}
     struct Endpoint {std::wstring host;INTERNET_PORT port=443;};
     Endpoint Origin(const std::string& text){
@@ -90,6 +104,7 @@ struct InternetRelay::Impl {
         Need(WinHttpSendRequest(request.value,headers.c_str(),DWORD(headers.size()),body.empty()?WINHTTP_NO_REQUEST_DATA:const_cast<char*>(body.data()),DWORD(body.size()),DWORD(body.size()),0) &&
             WinHttpReceiveResponse(request.value,nullptr),"Cannot reach the internet lobby service. Check your connection and retry.");
         DWORD status=0,size=sizeof(status);Need(WinHttpQueryHeaders(request.value,WINHTTP_QUERY_STATUS_CODE|WINHTTP_QUERY_FLAG_NUMBER,WINHTTP_HEADER_NAME_BY_INDEX,&status,&size,WINHTTP_NO_HEADER_INDEX),"Invalid internet service response");
+        http_status.store(status,std::memory_order_release);
         if(status!=(upgrade?101u:200u)){
             std::string text;std::array<char,1024> buffer{};DWORD count=0;
             const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);
@@ -115,7 +130,9 @@ struct InternetRelay::Impl {
         return demo_detail::ParseJson(text);
     }
     void Send(HINTERNET handle,const Bytes& bytes){Check();Need(WinHttpWebSocketSend(handle,WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE,
-        const_cast<uint8_t*>(bytes.data()),DWORD(bytes.size()))==NO_ERROR,"The internet game connection was interrupted");}
+        const_cast<uint8_t*>(bytes.data()),DWORD(bytes.size()))==NO_ERROR,"The internet game connection was interrupted");
+        if(bytes.size()>2 && bytes[0]==2)sent_payload.fetch_add(bytes.size()-2,std::memory_order_relaxed);
+    }
     void Pump(HINTERNET handle,uint16_t host_port){
         std::jthread receiver([&,this]{
             try{
@@ -139,6 +156,7 @@ struct InternetRelay::Impl {
                     }else if(kind==3){Need(frame.size()==2 && (host?id!=0:id==0),"Invalid internet guest close");Close(channel.socket);channel.incoming.clear();channel.sent=0;}
                     else if(kind==2){
                         Need(frame.size()>2 && (host?id!=0:id==0),"Invalid internet channel");
+                        received_payload.fetch_add(frame.size()-2,std::memory_order_relaxed);
                         // A native close can race buffered relay data; never
                         // recreate a socket or redirect those bytes elsewhere.
                         if(channel.socket!=INVALID_SOCKET){
@@ -211,7 +229,7 @@ struct InternetRelay::Impl {
     void Run(std::string origin,std::string version,std::string value){
         struct Completion{std::atomic<bool>& flag;~Completion(){flag.store(true,std::memory_order_release);}} completion{completed};
         try{
-            auto endpoint=Origin(origin);winsock_started=WSAStartup(MAKEWORD(2,2),&winsock)==0;Need(winsock_started,"Cannot initialize internet game sockets");
+            Phase("validating endpoint");auto endpoint=Origin(origin);winsock_started=WSAStartup(MAKEWORD(2,2),&winsock)==0;Need(winsock_started,"Cannot initialize internet game sockets");
             Http session(WinHttpOpen(L"Beetleworx/1",WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0));
             Need(session.value!=nullptr,"Cannot initialize internet connection");
             Need(WinHttpSetTimeouts(session.value,5000,5000,5000,5000),"Cannot bound internet connection waits");
@@ -219,12 +237,14 @@ struct InternetRelay::Impl {
             std::string code,key,invitation;uint16_t port=0;
             if(host){
                 const auto decoded=DecodeInvite(value);Need(decoded.has_value() && decoded->address=="127.0.0.1","Internet hosting requires an isolated loopback listener");port=decoded->port;
+                Phase("creating hosted room");
                 auto result=JsonRequest(connection.value,"/v1/rooms",version,"{\"version\":"+Quote(version)+",\"invitation\":"+Quote(value)+"}");
                 code=result.At("code").Str();key=result.At("hostKey").Str();
             }else code=value;
             Need(code.size()==8 && std::all_of(code.begin(),code.end(),[](char c){return std::string_view("ABCDEFGHJKLMNPQRSTUVWXYZ23456789").find(c)!=std::string_view::npos;}),"Use the host's eight-character room code");
             Check();
             if(!host){
+                Phase("looking up hosted room");
                 auto result=JsonRequest(connection.value,"/v1/rooms/"+code,version);auto decoded=DecodeInvite(result.At("invitation").Str());Need(decoded.has_value(),"Invalid internet session invitation");
                 listener=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);Need(listener!=INVALID_SOCKET && Nonblocking(listener),"Cannot create local internet bridge");
                 sockaddr_in address{};address.sin_family=AF_INET;address.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
@@ -232,11 +252,15 @@ struct InternetRelay::Impl {
                 int length=sizeof(address);Need(getsockname(listener,reinterpret_cast<sockaddr*>(&address),&length)==0,"Cannot identify local internet bridge");
                 decoded->address="127.0.0.1";decoded->port=ntohs(address.sin_port);auto encoded=EncodeInvite(*decoded);Need(encoded.has_value(),"Invalid local internet session");invitation=*encoded;
             }
+            Phase("opening TLS WebSocket");
             auto socket=Request(connection.value,"/v1/rooms/"+code+(host?"/host":"/join"),version,{},true,key);
             websocket=socket;
             {std::lock_guard lock(mutex);view.ready=true;view.code=code;view.invitation=invitation;}
             if(stopping){if(auto owned=websocket.exchange(nullptr))WinHttpCloseHandle(owned);return;}
+            Phase("bridging native Room stream");
             Pump(socket,port);
+            REXLOG_INFO("Internet relay {} ended: tx payload {} bytes, rx payload {} bytes, failure {}",
+                host?"host":"guest",sent_payload.load(),received_payload.load(),status_failed());
         }catch(const std::exception& error){if(!stopping)Fail(error.what());}
     }
     bool Start(bool hosting,std::string origin,std::string version,std::string value){
