@@ -36,6 +36,8 @@ EMR movement animations: `@llenarox` on Discord.
 
 Current source includes [cooperative title shutdown](docs/native-guest-shutdown.md), addressing a confirmed hang caused by killing a guest thread while it held a logger lock. Native three-client tests cover Mickey and Oswald recovery and normal process exit. This change is not in the existing demo.6 download.
 
+Current source also uses [mapped precompiled shader packs](docs/mapped-shader-packs.md). Alternating startup tests saved about 178 MiB of private memory while retaining the same preloaded shaders and pipelines. Shader data and cache fallback checks pass; the complete three-client level route still reaches the test machine's memory guard. No gameplay FPS gain is claimed from this change.
+
 See [Building Beetleworx](docs/BUILDING.md) for prerequisites and commands. The [development notes](DEVELOPMENT.md) cover the renderer, input, and experimental online code.
 
 Development setup accepts additional Xbox containers and archives, including CSO/ZSO, CCI, standalone CHD, GOD/SVOD, ZArchive, ZIP/ZIP64 and 7z, plus extracted EM1 disc folders. These readers are ahead of the public demo. See [disc format support and validation limits](docs/disc-formats-development.md) for tested cases and remaining work. Matching executable code is still required.

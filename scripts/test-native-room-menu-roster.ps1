@@ -2,7 +2,7 @@
 param(
  [ValidateRange(3,16)][int]$Players=3,
  
- [switch]$CooperativeShutdown,[switch]$WorldMemory,[switch]$TrimSharedUploads,
+ [switch]$CooperativeShutdown,[switch]$WorldMemory,[switch]$TrimSharedUploads,[switch]$ColdShaderStorage,
  [ValidateRange(0,10)][int]$MovieSkipDelay=0,
  [switch]$DirectMovie,[switch]$MovieSequence,[switch]$AuthoredConversation,[switch]$CutsceneCycle,[switch]$CutsceneBoundaryMovement,[switch]$CutsceneSkipInput,[switch]$CutsceneHeldReturn,[switch]$UnfencedCutsceneReturn,
  [switch]$ExtraOswald,
@@ -97,6 +97,7 @@ $nextMemorySample=[DateTime]::MinValue
 $record.native_reload=[bool]$NativeReload
 $record.profile_world_memory=[bool]$WorldMemory
 $record.trim_shared_uploads=[bool]$TrimSharedUploads
+$record.cold_shader_storage=[bool]$ColdShaderStorage
 $record.button_task_probe=[bool]$ButtonTaskProbe
 $record.policy_cycle=[bool]$PolicyCycle
 $record.checkpoint_reload_count=$CheckpointReloadCount
@@ -219,6 +220,7 @@ try {
   foreach($arg in @(('--em2_user_data_directory='+$peer.user),('--em2_content_directory='+$peer.content),('--log_file='+$peer.log),'--no-em2_online_menu','--no-em2_demo_build','--em2_private_profile=true','--em2_native_room_lobby=true','--em2_native_online_handoff=true',('--em2_native_lobby_qa_role='+$peer.role),('--em2_native_lobby_qa_players='+$Players),('--em2_native_lobby_qa_invitation_file='+(Join-Path $root 'native-menu-invitation.txt')),'--em2_online_auto_continue=true','--em2_auto_continue=false','--em2_online_world_random=true','--em2_online_single_view=true','--em2_trace_online_observations=true','--em2_trace_auto_continue=true','--em2_trace_online_clothing=true')){$info.ArgumentList.Add($arg)}
   if($WorldMemory){$info.ArgumentList.Add('--em2_profile_world_memory=true')}
   if($TrimSharedUploads){$info.ArgumentList.Add("--em2_trim_shared_upload_cache=true")}
+  if($ColdShaderStorage){$info.ArgumentList.Add('--no-em2_persistent_shader_cache')}
   if($DirectMovie){$info.ArgumentList.Add('--em2_native_lobby_qa_direct_movie=true')}
   if($MovieSequence){$info.ArgumentList.Add('--em2_native_lobby_qa_movie_sequence=true');$info.ArgumentList.Add('--em2_native_lobby_qa_movie_skip_delay='+$MovieSkipDelay)}
   if($AuthoredConversation){$info.ArgumentList.Add('--em2_native_lobby_qa_authored_conversation=true')}

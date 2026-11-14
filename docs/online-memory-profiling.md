@@ -71,3 +71,27 @@ The expanded capture again reached the commit guard (1,035 MiB available) and
 all three processes exited normally with normal user files unchanged. These
 results narrow the investigation; neither full-route completion nor a measured
 FPS improvement is claimed.
+
+## Shader-library allocation fix
+
+A cold-storage diagnostic reduced the host's initial private usage from about
+1,133 MiB to 770 MiB, but still reached the unchanged commit guard at 1,348 MiB
+available. The isolated harness accepts `-ColdShaderStorage` for reproducing
+that comparison. It disables persistence only in the owned test processes and
+is not the normal configuration or the shipped optimization.
+
+Limiting temporary native preload workers showed no material improvement and
+that prototype was removed. Further inspection identified eager loading of the
+197 MiB packaged PC shader library as a substantial avoidable allocation.
+[Mapped shader packs](mapped-shader-packs.md) now preserve precompiled shaders
+and native preloading while avoiding unused decoded payloads. Alternating
+startup measurements saved about 178 MiB of private memory on average, with
+the same native shader/pipeline counts and GPU usage. This is a measured memory
+improvement, not a gameplay FPS claim or complete-route acceptance.
+
+The subsequent three-process mapped-storage run admitted South and agreed on
+157 updates there before the unchanged guard stopped it at 1,154 MiB available.
+It also agreed on 661 Autotopia and 698 North updates. All three exited normally
+with normal user files unchanged. The separate private upload-trim candidate
+was enabled, as in the preceding diagnostic captures; this does not establish
+the full route under normal defaults.

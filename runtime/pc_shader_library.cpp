@@ -21,8 +21,10 @@
 #include <chrono>
 
 REXCVAR_DECLARE(bool,dxbc_switch);
+REXCVAR_DECLARE(bool,em2_profile_world_memory);
 REXCVAR_DEFINE_BOOL(em2_pretranslated_shaders,true,"GPU","Reuse validated PC shader bytecode and resource bindings across renderer rebuilds and runs");
 REXCVAR_DEFINE_BOOL(em2_skip_packed_shader_duplicates,true,"GPU","Skip loose shader records already represented in a validated shader pack");
+REXCVAR_DEFINE_BOOL(em2_mapped_shader_packs,true,"GPU","Keep validated packed PC shaders in read-only mapped storage and decode requested records on demand");
 extern "C" bool EM2OriginalTranslateShader(rex::graphics::ShaderTranslator*,rex::graphics::Shader::Translation*);
 namespace {
 using D=rex::graphics::DxbcShader;using T=rex::graphics::DxbcShaderTranslator;
@@ -79,6 +81,33 @@ Bytes Key(T& translator,Translation& translation){
 }
 struct Record {Bytes key,binary;std::vector<D::TextureBinding> textures;std::vector<D::SamplerBinding> samplers;uint32_t used=0;
     size_t size()const{return key.size()+binary.size()+textures.size()*sizeof(D::TextureBinding)+samplers.size()*sizeof(D::SamplerBinding);}};
+struct MappedPack {
+    HANDLE file=INVALID_HANDLE_VALUE,mapping=nullptr;const uint8_t* data=nullptr;size_t size=0;
+    MappedPack()=default;MappedPack(const MappedPack&)=delete;MappedPack& operator=(const MappedPack&)=delete;
+    ~MappedPack(){if(data)UnmapViewOfFile(data);if(mapping)CloseHandle(mapping);if(file!=INVALID_HANDLE_VALUE)CloseHandle(file);}
+    static std::shared_ptr<MappedPack> Open(const std::filesystem::path& path){
+        auto pack=std::make_shared<MappedPack>();
+        // Exclude in-place writes/truncation while mapped. Atomic replacement
+        // may publish a new file; this handle retains its validated old bytes.
+        pack->file=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+        LARGE_INTEGER size{};
+        if(pack->file==INVALID_HANDLE_VALUE || !GetFileSizeEx(pack->file,&size) || size.QuadPart<12 || uint64_t(size.QuadPart)>max_library+max_entries*128)throw std::runtime_error("shader pack extent/open invalid");
+        pack->size=size_t(size.QuadPart);pack->mapping=CreateFileMappingW(pack->file,nullptr,PAGE_READONLY,0,0,nullptr);
+        if(!pack->mapping)throw std::runtime_error("shader pack mapping failed");
+        pack->data=static_cast<const uint8_t*>(MapViewOfFile(pack->mapping,FILE_MAP_READ,0,0,0));
+        if(!pack->data)throw std::runtime_error("shader pack view failed");
+        return pack;
+    }
+    std::span<const uint8_t> BytesAt(size_t offset,size_t count)const{if(offset>size || count>size-offset)throw std::runtime_error("shader pack slice invalid");return {data+offset,count};}
+};
+bool ReplacePack(const std::filesystem::path& temp,const std::filesystem::path& path){
+    // Unlike MoveFileEx(REPLACE_EXISTING), ReplaceFile keeps mapped readers of
+    // the old file valid on Windows. A new destination needs a plain move.
+    if(ReplaceFileW(path.c_str(),temp.c_str(),nullptr,0,nullptr,nullptr))return true;
+    const auto error=GetLastError();if(error!=ERROR_FILE_NOT_FOUND && error!=ERROR_PATH_NOT_FOUND)return false;
+    // Do not overwrite a destination published by another writer in the gap.
+    return MoveFileExW(temp.c_str(),path.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE;
+}
 Bytes Encode(const Record& record){
     Bytes out;U64(out,0x3143424458324D45ull);Block(out,record.key);Block(out,record.binary);U32(out,uint32_t(record.textures.size()));
     for(const auto& t:record.textures){U32(out,t.bindless_descriptor_index);U32(out,t.fetch_constant);U32(out,uint32_t(t.dimension));U32(out,uint32_t(t.is_signed));}
@@ -122,7 +151,15 @@ bool Restore(const Record& record,Translation& translation,D& shader){
 class em2::PcShaderLibrary {
     friend bool em2::TestPcShaderLibraryLoad(const std::filesystem::path&,const std::filesystem::path&);
     std::filesystem::path root_;std::mutex mutex_;std::condition_variable changed_;bool closing_=false,busy_=false;
-    std::unordered_multimap<uint64_t,std::shared_ptr<const Record>> records_;size_t bytes_=0,queued_=0;
+    struct Entry {
+        std::shared_ptr<const Record> decoded;std::shared_ptr<const MappedPack> pack;size_t offset=0,size=0;Bytes key;
+        const Bytes& Key()const{return decoded?decoded->key:key;}
+        std::shared_ptr<const Record> Get(){
+            if(!decoded){auto record=Decode(pack->BytesAt(offset,size));if(record->key!=key)throw std::runtime_error("shader pack index key changed");decoded=std::move(record);Bytes{}.swap(key);pack.reset();}
+            return decoded;
+        }
+    };
+    std::unordered_multimap<uint64_t,Entry> records_;size_t bytes_=0,queued_=0;
     std::deque<std::shared_ptr<const Record>> queue_;std::thread writer_;
     void Write(){
         for(;;){std::shared_ptr<const Record> record;
@@ -137,6 +174,12 @@ class em2::PcShaderLibrary {
     bool LoadPack(const std::filesystem::path& path){
         if(!std::filesystem::exists(path))return false;
         try{
+            if(REXCVAR_GET(em2_mapped_shader_packs)){
+                auto pack=MappedPack::Open(path);if(std::memcmp(pack->data,"EM2DXPK1",8))throw std::runtime_error("shader pack header invalid");
+                Reader reader{{pack->data,pack->size}};reader.at=8;const auto count=reader.Word();if(count>max_entries)throw std::runtime_error("shader pack count invalid");
+                for(uint32_t i=0;i<count;++i){const auto size=reader.Word();const auto offset=reader.at;auto record=Decode(pack->BytesAt(offset,size));reader.at+=size;if(Add(record,false,pack,offset,size))++counters.loaded;}
+                if(reader.at!=pack->size)throw std::runtime_error("shader pack trailing data");return true;
+            }
             if(std::filesystem::file_size(path)>max_library+max_entries*128)throw std::runtime_error("shader pack exceeds budget");
             std::ifstream file(path,std::ios::binary);char magic[8];if(!file.read(magic,8) || std::memcmp(magic,"EM2DXPK1",8))throw std::runtime_error("shader pack header invalid");
             auto word=[&](){std::array<uint8_t,4> data;if(!file.read(reinterpret_cast<char*>(data.data()),4))throw std::runtime_error("shader pack truncated");Reader r{data};return r.Word();};
@@ -172,26 +215,27 @@ class em2::PcShaderLibrary {
 public:
     explicit PcShaderLibrary(const std::filesystem::path& root,const std::filesystem::path& seed):root_(root/"translated-dxbc-v1"){
         std::filesystem::create_directories(root_);Load(root_);if(!seed.empty())Load(seed/"translated-dxbc-v1",true);
+        if(REXCVAR_GET(em2_profile_world_memory)){uint64_t resident=0,decoded=0,keys=0;for(const auto& [hash,entry]:records_){if(entry.decoded){++resident;decoded+=entry.decoded->size();}keys+=entry.key.capacity();}REXLOG_INFO("PC shader library residency: available records {} decoded records {} decoded logical bytes {} indexed key capacity {} mapped storage {}; indexed records validated and available on demand",records_.size(),resident,decoded,keys,REXCVAR_GET(em2_mapped_shader_packs));}
         writer_=std::thread([this]{Write();});
     }
     ~PcShaderLibrary(){ {std::lock_guard lock(mutex_);closing_=true;}changed_.notify_all();if(writer_.joinable())writer_.join();}
     void Flush(){std::unique_lock lock(mutex_);changed_.wait(lock,[&]{return queue_.empty() && !busy_;});}
     bool SavePack(const std::filesystem::path& output){
-        try{Flush();std::vector<std::shared_ptr<const Record>> records;
+        try{Flush();std::vector<Entry> records;
             {std::lock_guard lock(mutex_);for(const auto& [hash,record]:records_)records.push_back(record);}
-            std::sort(records.begin(),records.end(),[](const auto&a,const auto&b){return a->key<b->key;});
+            std::sort(records.begin(),records.end(),[](const auto&a,const auto&b){return a.Key()<b.Key();});
             const auto directory=output/"translated-dxbc-v1";std::filesystem::create_directories(directory);auto path=directory/"library.em2dxbcpack",temp=path;temp+=L".tmp";
             std::ofstream file(temp,std::ios::binary|std::ios::trunc);file.write("EM2DXPK1",8);
             auto word=[&](uint32_t n){Bytes b;U32(b,n);file.write(reinterpret_cast<const char*>(b.data()),4);};word(uint32_t(records.size()));
-            for(const auto& record:records){auto bytes=Encode(*record);if(bytes.size()>max_record)return false;word(uint32_t(bytes.size()));file.write(reinterpret_cast<const char*>(bytes.data()),bytes.size());}
-            file.flush();file.close();return bool(file) && MoveFileExW(temp.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH);
+            for(const auto& record:records){Bytes encoded;std::span<const uint8_t> bytes;if(record.decoded){encoded=Encode(*record.decoded);bytes=encoded;}else bytes=record.pack->BytesAt(record.offset,record.size);if(bytes.size()>max_record)return false;word(uint32_t(bytes.size()));file.write(reinterpret_cast<const char*>(bytes.data()),bytes.size());}
+            file.flush();file.close();return bool(file) && ReplacePack(temp,path);
         }catch(...){return false;}
     }
-    std::shared_ptr<const Record> Find(const Bytes& key){std::lock_guard lock(mutex_);auto [first,last]=records_.equal_range(XXH3_64bits(key.data(),key.size()));for(;first!=last;++first)if(first->second->key==key)return first->second;return {};}
-    bool Add(std::shared_ptr<const Record> record,bool persist){
-        std::lock_guard lock(mutex_);const auto hash=XXH3_64bits(record->key.data(),record->key.size());auto [first,last]=records_.equal_range(hash);for(;first!=last;++first)if(first->second->key==record->key)return false;
+    std::shared_ptr<const Record> Find(const Bytes& key){std::lock_guard lock(mutex_);auto [first,last]=records_.equal_range(XXH3_64bits(key.data(),key.size()));for(;first!=last;++first)if(first->second.Key()==key)return first->second.Get();return {};}
+    bool Add(std::shared_ptr<const Record> record,bool persist,std::shared_ptr<const MappedPack> pack={},size_t offset=0,size_t size=0){
+        std::lock_guard lock(mutex_);const auto hash=XXH3_64bits(record->key.data(),record->key.size());auto [first,last]=records_.equal_range(hash);for(;first!=last;++first)if(first->second.Key()==record->key)return false;
         if(records_.size()>=max_entries || record->size()>max_library-bytes_){++counters.dropped;return false;}
-        records_.emplace(hash,record);bytes_+=record->size();
+        records_.emplace(hash,Entry{pack?std::shared_ptr<const Record>{}:record,pack,offset,size,pack?record->key:Bytes{}});bytes_+=record->size();
         if(persist){if(record->size()<=max_queue-queued_){queue_.push_back(std::move(record));queued_+=queue_.back()->size();changed_.notify_one();}else ++counters.dropped;}return true;
     }
 };
@@ -202,28 +246,54 @@ bool em2::SavePcShaderLibraryPack(const std::shared_ptr<PcShaderLibrary>& librar
 em2::PcShaderLibraryStats em2::GetPcShaderLibraryStats(){return {counters.hits.load(),counters.misses.load(),counters.loaded.load(),counters.rejected.load(),counters.saved.load(),counters.dropped.load(),counters.file_reads.load(),counters.packed_duplicates_skipped.load()};}
 bool em2::TestPcShaderLibraryLoad(const std::filesystem::path& source,const std::filesystem::path& output){
     if(!std::filesystem::is_regular_file(source/"translated-dxbc-v1"/"library.em2dxbcpack"))return false;
-    struct Restore {bool previous=REXCVAR_GET(em2_skip_packed_shader_duplicates);~Restore(){REXCVAR_SET(em2_skip_packed_shader_duplicates,previous);}} restore;
+    struct Restore {bool previous=REXCVAR_GET(em2_skip_packed_shader_duplicates),mapped=REXCVAR_GET(em2_mapped_shader_packs);~Restore(){REXCVAR_SET(em2_skip_packed_shader_duplicates,previous);REXCVAR_SET(em2_mapped_shader_packs,mapped);}} restore;
     std::filesystem::create_directories(output);std::ofstream report(output/"shader-load-results.json");
     report<<"{\"scope\":\"Same-process cache-load comparison; all decoded record bytes compared exactly. OS cache order can affect timing. No gameplay FPS claim.\",\"phases\":[";
     std::vector<Bytes> expected;unsigned phase=0;bool success=true;
-    for(bool skip:{false,true,false,true}){
+    for(unsigned configuration=0;configuration<4;++configuration){
+        const bool skip=(configuration&2)!=0,mapped=(configuration&1)!=0;
         REXCVAR_SET(em2_skip_packed_shader_duplicates,skip);
-        REXLOG_INFO("PC shader load comparison phase {}: skip packed duplicates {}",phase,skip);
+        REXCVAR_SET(em2_mapped_shader_packs,mapped);
+        REXLOG_INFO("PC shader load comparison phase {}: skip packed duplicates {} mapped storage {}",phase,skip,mapped);
         const auto before=GetPcShaderLibraryStats();const auto started=std::chrono::steady_clock::now();
         auto library=OpenPcShaderLibrary(source);
         const auto ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
         const auto after=GetPcShaderLibraryStats();std::vector<Bytes> records;
-        {std::lock_guard lock(library->mutex_);for(const auto& [hash,record]:library->records_)records.push_back(Encode(*record));}
+        size_t resident=0;
+        {std::lock_guard lock(library->mutex_);for(auto& [hash,record]:library->records_){resident+=bool(record.decoded);records.push_back(Encode(*record.Get()));}}
         std::sort(records.begin(),records.end());
         const bool identical=!phase || records==expected;
         if(!phase)expected=std::move(records);
         success=success && identical && !expected.empty();
         if(phase)report<<',';
-        report<<"{\"skip_duplicates\":"<<(skip?"true":"false")<<",\"milliseconds\":"<<ms<<",\"record_count\":"<<expected.size()<<",\"loose_file_reads\":"<<after.file_reads-before.file_reads<<",\"duplicates_skipped\":"<<after.packed_duplicates_skipped-before.packed_duplicates_skipped<<",\"identical\":"<<(identical?"true":"false")<<'}';report.flush();
+        report<<"{\"skip_duplicates\":"<<(skip?"true":"false")<<",\"mapped\":"<<(mapped?"true":"false")<<",\"milliseconds\":"<<ms<<",\"resident_records_before_comparison\":"<<resident<<",\"record_count\":"<<expected.size()<<",\"loose_file_reads\":"<<after.file_reads-before.file_reads<<",\"duplicates_skipped\":"<<after.packed_duplicates_skipped-before.packed_duplicates_skipped<<",\"identical\":"<<(identical?"true":"false")<<'}';report.flush();
         REXLOG_INFO("PC shader load phase {}: {:.2f}ms, {} loose reads, {} duplicates skipped, exact record equality {}",phase,ms,after.file_reads-before.file_reads,after.packed_duplicates_skipped-before.packed_duplicates_skipped,identical);
         ++phase;
     }
-    report<<"],\"passed\":"<<(success?"true":"false")<<"}\n";return success && report.good();
+    // Exercise the mapped file's lifetime independently of the decoded cache:
+    // in-place writes must fail, but atomic replacement keeps old readers valid.
+    bool lifetime=false;
+    try{
+        if(expected.size()<2)throw std::runtime_error("lifetime fixture needs distinct shader records");
+        const auto directory=output/"mapped-lifetime"/"translated-dxbc-v1";std::filesystem::create_directories(directory);
+        const auto path=directory/"library.em2dxbcpack",temp=directory/"replacement.tmp";
+        auto write=[&](const std::filesystem::path& target,const Bytes& record){std::ofstream file(target,std::ios::binary|std::ios::trunc);Bytes header;header.insert(header.end(),{'E','M','2','D','X','P','K','1'});U32(header,1);U32(header,uint32_t(record.size()));file.write(reinterpret_cast<const char*>(header.data()),header.size());file.write(reinterpret_cast<const char*>(record.data()),record.size());file.close();if(!file)throw std::runtime_error("lifetime fixture write failed");};
+        write(path,expected.front());auto old=MappedPack::Open(path);
+        HANDLE overwrite=CreateFileW(path.c_str(),GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+        if(overwrite!=INVALID_HANDLE_VALUE){CloseHandle(overwrite);throw std::runtime_error("mapped pack permitted in-place writes");}
+        REXCVAR_SET(em2_mapped_shader_packs,true);auto library=OpenPcShaderLibrary(output/"mapped-lifetime");
+        if(!library->SavePack(output/"mapped-lifetime"))throw std::runtime_error("mapped-source export/replacement failed");
+        write(temp,expected.back());if(!ReplacePack(temp,path))throw std::runtime_error("mapped pack replacement failed");
+        auto first=Decode(expected.front()),last=Decode(expected.back());auto replacement=OpenPcShaderLibrary(output/"mapped-lifetime");
+        auto original_record=library->Find(first->key),replacement_record=replacement->Find(last->key);
+        if(!original_record || !replacement_record || Encode(*Decode(old->BytesAt(16,expected.front().size())))!=expected.front() || Encode(*original_record)!=expected.front() || Encode(*replacement_record)!=expected.back() || replacement->Find(first->key))throw std::runtime_error("mapped reader changed across replacement");
+        auto bad=expected.back();bad.back()^=1;write(temp,bad);if(!ReplacePack(temp,path))throw std::runtime_error("bad fixture replacement failed");
+        const auto rejected=GetPcShaderLibraryStats().rejected;auto corrupt=OpenPcShaderLibrary(output/"mapped-lifetime");
+        if(corrupt->Find(last->key) || GetPcShaderLibraryStats().rejected<=rejected)throw std::runtime_error("corrupt mapped record accepted");
+        lifetime=true;
+    }catch(const std::exception& error){REXLOG_ERROR("Mapped shader pack lifetime regression: {}",error.what());}
+    success=success && lifetime;
+    report<<"],\"mapped_lifetime_and_corruption\":"<<(lifetime?"true":"false")<<",\"passed\":"<<(success?"true":"false")<<"}\n";return success && report.good();
 }
 em2::PcShaderLibraryScope::PcShaderLibraryScope(std::shared_ptr<PcShaderLibrary> library):had_previous_(local_library.has_value()){if(had_previous_)previous_=*local_library;local_library=std::move(library);}
 em2::PcShaderLibraryScope::~PcShaderLibraryScope(){if(had_previous_)local_library=std::move(previous_);else local_library.reset();}
