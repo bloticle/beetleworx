@@ -10,6 +10,7 @@
 #include "players.h"
 #include "controls.h"
 #include "allocation_trace.h"
+#include "gpu_sync.h"
 #include "guest_read_batch.h"
 #include "native_entity_probe.h"
 #include "native_engine.h"
@@ -489,6 +490,8 @@ PPC_FUNC_IMPL(sub_829E3178) {
         const std::string destination(actual,strnlen_s(actual,96));
         auto* room_gameplay=em2::net::CurrentNativeRoomGameplay();
         if(room_gameplay && !room_gameplay->NativeLoadPoint(destination,em2::net::LoadPhase::Begin,false,ctx,base)){ctx.r3.u64=0;return;}
+        em2::ReportWorldGraphicsMemory("level-begin",em2::CurrentNativeLoadGeneration());
+        struct MemoryEnd {~MemoryEnd(){em2::ReportWorldGraphicsMemory("level-end",em2::CurrentNativeLoadGeneration());}} memory_end;
         struct RoomEnd {
             em2::net::NativeRoomGameplay* gameplay;std::string_view destination;PPCContext& ctx;uint8_t* base;
             int exceptions=std::uncaught_exceptions();

@@ -5,6 +5,11 @@
 #include <rex/kernel/xthread.h>
 #include <rex/graphics/graphics_system.h>
 #include <rex/logging.h>
+#include <rex/cvar.h>
+#include <rex/graphics/d3d12/texture_cache.h>
+#include <rex/graphics/d3d12/shared_memory.h>
+#include <rex/graphics/d3d12/primitive_processor.h>
+#include <string>
 #include <future>
 #include <thread>
 #include <chrono>
@@ -12,11 +17,33 @@
 #include <cstring>
 #include <immintrin.h>
 #include <wrl/client.h>
+REXCVAR_DEFINE_BOOL(em2_profile_world_memory,false,"Debug","Read-only GPU texture-cache and system commit snapshots at native loads and agreed world boundaries");
 namespace {
 using CP=rex::graphics::d3d12::D3D12CommandProcessor;
 // The SDK has no public flush-and-wait method. Use its declared native method
 // without changing SDK headers/layout or reimplementing submission accounting.
 template<class Tag,auto Member>struct Access {friend auto MemberOf(Tag){return Member;}};
+using TC=rex::graphics::TextureCache;
+struct TexturePointerTag{friend auto MemberOf(TexturePointerTag);};template struct Access<TexturePointerTag,&CP::texture_cache_>;
+struct TextureBytesTag{friend auto MemberOf(TextureBytesTag);};template struct Access<TextureBytesTag,&TC::textures_total_host_memory_usage_>;
+struct TextureCountTag{friend auto MemberOf(TextureCountTag);};template struct Access<TextureCountTag,&TC::textures_>;
+using UP=rex::ui::GraphicsUploadBufferPool;
+struct ConstantPoolTag{friend auto MemberOf(ConstantPoolTag);};template struct Access<ConstantPoolTag,&CP::constant_buffer_pool_>;
+struct SharedPoolTag{friend auto MemberOf(SharedPoolTag);};template struct Access<SharedPoolTag,&rex::graphics::d3d12::D3D12SharedMemory::upload_buffer_pool_>;
+struct PrimitiveTag{friend auto MemberOf(PrimitiveTag);};template struct Access<PrimitiveTag,&CP::primitive_processor_>;
+struct IndexPoolTag{friend auto MemberOf(IndexPoolTag);};template struct Access<IndexPoolTag,&rex::graphics::d3d12::D3D12PrimitiveProcessor::frame_index_buffer_pool_>;
+struct WritableTag{friend auto MemberOf(WritableTag);};template struct Access<WritableTag,&UP::writable_first_>;
+struct SubmittedTag{friend auto MemberOf(SubmittedTag);};template struct Access<SubmittedTag,&UP::submitted_first_>;
+struct PageSizeTag{friend auto MemberOf(PageSizeTag);};template struct Access<PageSizeTag,&UP::page_size_>;
+struct GpuHeapsTag{friend auto MemberOf(GpuHeapsTag);};template struct Access<GpuHeapsTag,&rex::graphics::d3d12::D3D12SharedMemory::buffer_tiled_heaps_>;
+struct UploadStats{uint64_t writable=0,submitted=0,page_size=0;};
+UploadStats UploadState(UP* pool){
+    UploadStats result;if(!pool)return result;result.page_size=pool->*MemberOf(PageSizeTag{});
+    for(auto* page=pool->*MemberOf(WritableTag{});page && result.writable<4096;page=page->next_)++result.writable;
+    for(auto* page=pool->*MemberOf(SubmittedTag{});page && result.submitted<4096;page=page->next_)++result.submitted;
+    return result;
+}
+
 struct SharedTag{friend auto MemberOf(SharedTag);};template struct Access<SharedTag,&CP::shared_memory_>;
 struct WaitTag{friend auto MemberOf(WaitTag);};
 template struct Access<WaitTag,&CP::CheckSubmissionFence>;
@@ -76,6 +103,32 @@ bool em2::Em2CommandProcessor::DrainForResourceChange() {
     (this->*MemberOf(WaitTag{}))(GetCurrentSubmission());
     return !(this->*MemberOf(OpenTag{})) && !(this->*MemberOf(QueuePendingTag{})) &&
         SUCCEEDED(GetD3D12Provider().GetDevice()->GetDeviceRemovedReason()) && GetCompletedSubmission()+1>=GetCurrentSubmission();
+}
+void em2::ReportWorldGraphicsMemory(std::string_view phase,uint64_t generation) noexcept {
+    const auto csr=_mm_getcsr();const auto error=GetLastError();
+    struct Host {unsigned csr;DWORD error;~Host(){_mm_setcsr(csr);SetLastError(error);}} host{csr,error};
+    if(!REXCVAR_GET(em2_profile_world_memory))return;
+    try {
+        auto* runtime=rex::Runtime::instance();auto* graphics=runtime?runtime->graphics_system():nullptr;
+        if(!graphics || (graphics->name().find("D3D12")==std::string::npos && graphics->name().find("Direct3D 12")==std::string::npos))return;
+        auto* cp=static_cast<CP*>(graphics->command_processor());if(!cp)return;
+        cp->CallInThread([cp,generation,phase=std::string(phase)]{
+            const auto csr=_mm_getcsr();const auto error=GetLastError();
+            struct Host {unsigned csr;DWORD error;~Host(){_mm_setcsr(csr);SetLastError(error);}} host{csr,error};
+            auto* cache=(cp->*MemberOf(TexturePointerTag{})).get();if(!cache)return;
+            MEMORYSTATUSEX memory{};memory.dwLength=sizeof(memory);if(!GlobalMemoryStatusEx(&memory))return;
+            REXLOG_INFO("Native world graphics memory: phase '{}' generation {} textures {} texture bytes {} system available commit {}; GPU-worker snapshot only, no cache changes",phase,generation,
+                (cache->*MemberOf(TextureCountTag{})).size(),cache->*MemberOf(TextureBytesTag{}),memory.ullAvailPageFile);
+            auto* shared=(cp->*MemberOf(SharedTag{})).get();auto* primitive=(cp->*MemberOf(PrimitiveTag{})).get();
+            const auto constants=UploadState((cp->*MemberOf(ConstantPoolTag{})).get());
+            const auto uploads=UploadState(shared?(shared->*MemberOf(SharedPoolTag{})).get():nullptr);
+            const auto indices=UploadState(primitive?(primitive->*MemberOf(IndexPoolTag{})).get():nullptr);
+            uint64_t heap_bytes=0,heap_count=0;
+            if(shared)for(auto* heap:shared->*MemberOf(GpuHeapsTag{}))if(heap){heap_bytes+=heap->GetDesc().SizeInBytes;++heap_count;}
+            REXLOG_INFO("Native world GPU allocation pools: phase '{}' generation {} shared heaps {}/{} bytes; constant upload writable/submitted {}/{} page {}; shared upload {}/{} page {}; index upload {}/{} page {}; completed submission {}",phase,generation,heap_count,heap_bytes,
+                constants.writable,constants.submitted,constants.page_size,uploads.writable,uploads.submitted,uploads.page_size,indices.writable,indices.submitted,indices.page_size,cp->GetCompletedSubmission());
+        });
+    }catch(...){/* A diagnostic must not change native loading or input. */}
 }
 bool em2::SynchronizeGraphicsForResourceChange() {
     auto* kernel=rex::kernel::kernel_state();

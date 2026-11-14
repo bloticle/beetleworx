@@ -1,5 +1,7 @@
 #pragma once
 #include <mutex>
+#include <string_view>
+#include <cstdint>
 namespace rex::graphics {class GraphicsSystem;}
 namespace em2 {
 class Em2CommandProcessor;
@@ -25,6 +27,8 @@ private:
 // The caller must stop producing commands that reference the resources it will
 // replace. Drains published guest commands, then awaits native GPU submissions.
 bool SynchronizeGraphicsForResourceChange();
+// Optional GPU-worker-only cache snapshot; no eviction, fences or guest reads.
+void ReportWorldGraphicsMemory(std::string_view phase,uint64_t generation) noexcept;
 bool TestGraphicsResourceSynchronization(rex::graphics::GraphicsSystem&);
 bool TestGraphicsResourceSynchronizationDispatch();
 }

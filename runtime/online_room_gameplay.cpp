@@ -1,3 +1,4 @@
+#include "gpu_sync.h"
 #include "online_room_gameplay.h"
 #include "online_gameover_input.h"
 #include "online_cutscene_input.h"
@@ -38,6 +39,7 @@
 #include <vector>
 #include <rex/cvar.h>
 REXCVAR_DECLARE(bool,em2_private_profile);
+REXCVAR_DECLARE(bool,em2_profile_world_memory);
 REXCVAR_DECLARE(bool,em2_probe_room_recovery_controller);
 REXCVAR_DEFINE_BOOL(em2_probe_unfenced_cutscene_return,false,"Debug","Private native lobby QA only: reproduce old carried-button behavior for the held-return regression");
 REXCVAR_DEFINE_UINT32(em2_probe_room_partial_delivery_tick,0xFFFFFFFFu,"Debug","Explicit private native lobby QA fault: stop after original input delivery but before native physics/post-update at this tick");
@@ -897,6 +899,7 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
     // GameOver promises no gameplay callbacks. Proof consensus may still fail.
     // This is only a physical update boundary, never authoritative agreement.
     s.native_completed=tick;
+    if(REXCVAR_GET(em2_profile_world_memory) && tick%300==0)em2::ReportWorldGraphicsMemory("agreed-world",em2::CurrentNativeLoadGeneration());
     if(!s.room->CompleteGameplay(tick,digest))return s.Stop("Native gameplay world verification failed");
     // A completed 30 Hz update does not itself mean presentation is stalled.
     // Freeze interpolation only when Prepare actually cannot admit a due tick.

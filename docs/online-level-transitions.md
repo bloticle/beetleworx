@@ -70,3 +70,23 @@ portal, all policy setter variants, full quest/cutscene/death progression,
 sixteen native clients, Internet conditions, or authoritative replay/correction.
 No new downloadable release includes this work; demo.6 remains the published
 binary.
+
+### Additional route investigation
+
+The transition verifier now checks the actual participating roster (3–16
+clients) rather than assuming four clients. It retains the same per-world
+history, actor trajectory, native permission and normal-exit requirements.
+This change passes the existing four-client Autotopia → Mean Street North →
+Autotopia capture; it does not establish support for sixteen native clients.
+
+A three-client route from Autotopia through Mean Street North to Mean Street
+South reached the South world, but the local machine's available-commit guard
+ended the run before the required observation window completed. That route is
+not an accepted regression result yet. The memory guards remain unchanged.
+
+For investigation, the isolated harness accepts `-WorldMemory`, which enables
+`em2_profile_world_memory`. This default-off diagnostic queues read-only
+GPU-worker snapshots of texture-cache usage, shared GPU heaps, upload-pool
+pages and available system commit at load/update boundaries. It does not trim
+caches, alter rendering quality or change native gameplay. No performance or
+memory-reduction fix is claimed by this diagnostic change.

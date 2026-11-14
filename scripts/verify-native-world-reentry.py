@@ -1,7 +1,8 @@
-"""Validate scheduled original native loads across four independent worlds.
+"""Validate scheduled original native loads across the actual participating worlds.
 
 This does not establish arbitrary level transitions, campaign completion,
-rollback/state correction, sixteen native players or Internet multiplayer.
+rollback/state correction or Internet multiplayer. A result covers only its
+actual participant count and destinations.
 """
 import argparse
 import json
@@ -18,7 +19,13 @@ CALL = runpy.run_path(str(Path(__file__).with_name('verify-private-room-multi-ac
 
 def verify(root, expect_default=False):
     result = json.loads((root / 'result.json').read_text(encoding='utf-8-sig'))
-    assert result['players'] == 4 and result['checkpoint_reload_tick'] == 700
+    players = result['players']
+    assert 3 <= players <= 16 and result['checkpoint_reload_tick'] == 700
+    assert len(result['processes']) == players
+    extra_peers = range(3, players+1)
+    full_mask = (1 << players)-1
+    extra_mask = full_mask & ~3
+    observed_peers = set()
     count = result.get('checkpoint_reload_count', 1)
     interval = result.get('checkpoint_reload_interval', 700)
     assert 1 <= count <= 4 and interval >= 600
@@ -46,6 +53,11 @@ def verify(root, expect_default=False):
         assert not process.get('forced_close') and not process.get('identity_rejected')
         text = Path(process['log']).read_text(encoding='utf-8', errors='replace')
         text = '\n'.join(line for line in text.splitlines() if not line.startswith('[') or line[1:24] < result['close_started_local'])
+        local = re.findall(r'Native Room menu QA appearance accepted: peer (\d+) color (\d+);', text)
+        assert len(local) == 1
+        peer_id, color = map(int, local[0])
+        assert 1 <= peer_id <= players and peer_id not in observed_peers and color == peer_id-1
+        observed_peers.add(peer_id)
         for failure in ('Native Room gameplay stopped:', 'Retained native Room stopped:', 'Native room initialization stopped:'):
             assert failure not in text, failure
         requests = re.findall(r'Native lobby QA restart requested: tick (\d+), attempted true, status 0, stack true', text)
@@ -54,7 +66,7 @@ def verify(root, expect_default=False):
         target_calls = re.findall(r'Native lobby QA level target: ([a-z0-9_.]+)', text)
         assert target_calls == [value for value in targets if value], 'Original level itinerary differs from requested route'
         exits = re.findall(r'Native reload camera mode deactivated: peer (\d+) mode [0-9A-F]+ method ([0-9A-F]+)', text)
-        assert exits == [('3', '82A5DEC0'), ('4', '82A5DEC0')]*count, exits
+        assert exits == [(str(peer), '82A5DEC0') for peer in extra_peers]*count, exits
         for index, tick in enumerate(reloads):
             destination = destinations[index]
             for sequence, phase in ((0, 0), (1, 1)):
@@ -71,11 +83,11 @@ def verify(root, expect_default=False):
         firsts = starts
         assert text.count("phase 'complete' reads") == epochs, 'Every native input program must complete'
         admissions = re.findall(r'Native Room extra humans admitted: count (\d+) mask ([0-9A-F]+);', text)
-        assert admissions == [('2', '000C')]*epochs, admissions
+        assert admissions == [(str(players-2), f'{extra_mask:04X}')]*epochs, admissions
         frames = HISTORY.findall(text)
         assert len(frames) == epochs
         frame_scopes = [(int(first), int(last), int(mask, 16), digest) for _, first, last, mask, digest in frames]
-        assert all(last-first+1 == 224 and mask == 15 for first, last, mask, _ in frame_scopes)
+        assert all(last-first+1 == 224 and mask == full_mask for first, last, mask, _ in frame_scopes)
         assert [(row[0], row[1]) for row in frame_scopes] == [(start+288, start+511) for start in starts]
         assert len({row[3] for row in frame_scopes}) == epochs
         assert histories is None or histories == frame_scopes
@@ -96,7 +108,7 @@ def verify(root, expect_default=False):
             end = reloads[epoch] if epoch < count else float('inf')
             scoped_worlds.append({tick: digest for tick, digest in updates.items() if origin <= tick < end})
             trajectories, movement = {}, []
-            for peer in (3, 4):
+            for peer in extra_peers:
                 rows = {int(row[1]): tuple(map(float, row[2:8]))+(int(row[8]),)
                         for row in all_rows if int(row[0]) == peer and origin <= int(row[1]) < end
                         and row[9:] == ('true', 'true')}
@@ -107,7 +119,7 @@ def verify(root, expect_default=False):
                 jump = [row for tick, row in rows.items() if origin+132 <= tick <= origin+212]
                 height = max(row[1] for row in jump)-rows[origin+131][1]
                 assert height > 1 and max(row[4] for row in jump) > 5 and rows[max(rows)][6] == 0, f'Epoch {epoch}: actor did not jump and land'
-                profile = 0 if peer & 1 else 1  # Matches the harness's mixed-character roster.
+                profile = 1 if result.get('extra_oswald') else (0 if peer & 1 else 1)
                 names = ('SpinAttack', 'Start Paint Brush', 'End Paint Brush') if profile == 0 else ('SpinAttack2', 'Start Electric Stream2', 'End Electric Stream2')
                 calls = [row for row in all_calls if origin <= int(row[0]) < end and int(row[1]) == peer]
                 assert all(row[2] == str(profile) and row[4] == '0' for row in calls), 'Native action targeted another character profile'
@@ -139,7 +151,7 @@ def verify(root, expect_default=False):
                 trajectories[peer] = rows
                 movement.append({'peer': peer, 'jump_height': height, 'post_reload_samples': len(rows)})
             if epoch in native_bodies:
-                for peer in (3, 4):
+                for peer in extra_peers:
                     common = native_bodies[epoch][peer].keys() & trajectories[peer].keys()
                     assert len(common) >= 512 and all(native_bodies[epoch][peer][tick] == trajectories[peer][tick] for tick in common), f'Epoch {epoch}: body trajectories differ between worlds'
             else:
@@ -151,6 +163,7 @@ def verify(root, expect_default=False):
             assert f'process_id={process["pid"]}\n' not in crash_path.read_text()
         captures.append({'role': process['role'], 'gameplay_starts': starts, 'world_admissions': len(admissions),
                          'history_scopes': frame_scopes, 'post_reload_observations': len(scoped_worlds[-1]), 'active_actors': activity[-1]['actors'], 'active_epochs': activity})
+    assert observed_peers == set(range(1, players+1))
     matching = []
     for epoch in range(epochs):
         selected = [scopes[epoch] for scopes in worlds]
@@ -167,7 +180,7 @@ def verify(root, expect_default=False):
     if result.get('button_task_probe'):
         assert policy_checks and any(row['allowed'] for row in policy_checks), 'No unrestricted native electric-stream acceptance'
         assert any(not row['allowed'] for row in policy_checks), 'No authored tool restriction exercised'
-    return {'passed': True, 'native_policy_checks': policy_checks, 'binary_sha256': result['exe_sha256'], 'reload_ticks': reloads,
+    return {'passed': True, 'players': players, 'extra_oswald': bool(result.get('extra_oswald')), 'native_policy_checks': policy_checks, 'binary_sha256': result['exe_sha256'], 'reload_ticks': reloads,
             'native_level_target': target, 'native_level_targets': targets,
             'matching_updates_by_epoch': matching, 'post_reload_matching_updates': matching[-1],
             'captures': captures, 'scope': __doc__.strip()}
