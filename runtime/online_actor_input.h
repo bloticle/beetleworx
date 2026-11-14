@@ -65,6 +65,7 @@ ActorInputResult ValidateOwnedActorMovement(uint64_t peer,const NativeActorActio
 ActorInputResult ReplayOwnedActorMovement(uint64_t peer,const NativeActorAction&,uint64_t tick,PPCContext&,uint8_t* base);
 // Read-only completed-tick evidence; no native calls or staging changes.
 bool OwnedActorBasisConsumed(uint64_t peer,uint64_t generation,uint64_t tick);
+bool OwnedActorBasisDeliveryState(uint64_t peer,uint64_t generation,uint64_t tick,bool& consumed);
 // Generic action replay stays blocked. Movement must use the explicit staged-
 // tick API above; all other native actions return UnsupportedAction.
 ActorInputResult ReplayOwnedActorAction(uint64_t peer,const NativeActorAction&,const ActorLookBasis&,PPCContext&,uint8_t* base);

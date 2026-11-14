@@ -355,6 +355,14 @@ bool em2::net::OwnedActorBasisConsumed(uint64_t peer,uint64_t actor_generation,u
         return entry.input_claimed && entry.consumed;
     return false;
 }
+bool em2::net::OwnedActorBasisDeliveryState(uint64_t peer,uint64_t actor_generation,uint64_t tick,bool& consumed){
+    if(!Owner() || basis_update)return false;std::lock_guard lock(mutex);
+    if(!basis_clock.valid || basis_clock.tick!=tick)return false;
+    for(const auto& entry:basis_entries)if(entry.staged && entry.actor.peer==peer && entry.actor.generation==actor_generation && entry.basis.tick==tick){
+        if(!entry.input_claimed)return false;consumed=entry.consumed;return true;
+    }
+    return false;
+}
 em2::net::ActorInputResult em2::net::detail::DispatchOwnedActorJump(uint64_t peer,const em2::net::NativeActorJump& command,PPCContext& ctx,uint8_t* base){
     // Preserve the exact caller bytes, including ABI padding. This backend is
     // callable only during the Jump module's private, exact-command permit.

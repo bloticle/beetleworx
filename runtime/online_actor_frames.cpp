@@ -2,6 +2,8 @@
 #include "online_room.h"
 #include "online_actor_jump.h"
 #include "online_button_actions.h"
+#include "online_cutscene_input.h"
+#include "simulation.h"
 #include <algorithm>
 #include "guest_read_batch.h"
 #include "ppc_context.h"
@@ -204,6 +206,30 @@ OwnedFrameResult OwnedMovementFrames::Finish(uint64_t tick,uint8_t* base){
     }
     delivered_.reset();if(next_tick_==UINT64_MAX)exhausted_=true;else ++next_tick_;return OwnedFrameResult::Ready;
 }
+OwnedFrameResult OwnedMovementFrames::FinishMovieEntry(uint64_t tick,PPCContext& ctx,uint8_t* base,uint16_t& consumed_mask){
+    Environment environment;uint64_t agreed=0;
+    if(!configured_)return OwnedFrameResult::NotConfigured;
+    if(owner_thread_!=GetCurrentThreadId())return OwnedFrameResult::WrongThread;
+    if(faulted_)return OwnedFrameResult::Faulted;
+    if(!delivered_ || delivered_->tick!=tick || tick!=next_tick_ || tick==UINT64_MAX ||
+       !em2::CurrentAgreedSimulationTick(agreed) || agreed!=tick)return OwnedFrameResult::IncompleteTick;
+    if(!SameWorld(registry_,base))return OwnedFrameResult::StaleActor;
+    NativeGameOverState control;uint32_t mode=0;
+    if(!ReadNativeControlState(ctx,base,control,mode) || mode!=2 || control.registry!=registry_ ||
+       !ReadNativeCutsceneContext(ctx,base,registry_))return OwnedFrameResult::NativeNotReady;
+    uint16_t mask=0;
+    for(unsigned i=0;i<kOnlineRoomCapacity;++i)if((roster_&~retail_)&(1u<<i)){
+        const auto& binding=bindings_[i];OwnedActorInput actor;bool consumed=false;
+        if(!OwnedActorInputFor(binding.native_peer,ctx,base,actor) || !actor.enabled || actor.generation!=binding.generation ||
+           actor.entity!=binding.entity || actor.controller!=binding.controller)return OwnedFrameResult::StaleActor;
+        if(!OwnedActorBasisDeliveryState(binding.native_peer,binding.generation,tick,consumed))return OwnedFrameResult::IncompleteTick;
+        if(consumed)mask|=uint16_t(1u<<i);
+    }
+    // Retire the coordinator transaction, retaining the original per-actor
+    // consumption flags and quarantine. The next owned basis tick clears old
+    // staging; no omitted Motion work is replayed or labelled consumed.
+    delivered_.reset();++next_tick_;consumed_mask=mask;return OwnedFrameResult::Ready;
+}
 bool TestOwnedMovementFrames(PPCContext& ctx,uint8_t* base,uint64_t first_peer,uint64_t second_peer,OwnedFrameUpdate update){
     if(!update)return false;Environment environment;
     OwnedActorInput a,b;if(!OwnedActorInputFor(first_peer,ctx,base,a) || !OwnedActorInputFor(second_peer,ctx,base,b))return false;
@@ -363,6 +389,10 @@ bool TestOwnedJumpMovementFrames(PPCContext& ctx,uint8_t* base,uint64_t first_pe
             "one agreed frame delivers Movement for all actors before ordered original Jump callbacks"))return false;
         if(!check(coordinator.Finish(tick,base)==OwnedFrameResult::IncompleteTick && coordinator.next_tick()==tick,
             "Jump stimulus delivery alone does not prove the native motion stage ran"))return false;
+        {uint16_t receipt=0xA55A;bool consumed=true;
+            if(!check(OwnedActorBasisDeliveryState(a.peer,a.generation,tick,consumed) && !consumed &&
+                coordinator.FinishMovieEntry(tick,ctx,base,receipt)!=OwnedFrameResult::Ready && receipt==0xA55A && coordinator.next_tick()==tick,
+                "delivered but unconsumed extra input cannot close without an agreed native movie transition"))return false;}
         {auto call=ctx;call.r3.u64=a.controller+24;update(call,base);}
         if(!check(coordinator.Finish(tick,base)==OwnedFrameResult::IncompleteTick,
             "Jump frame waits for both native actor updates"))return false;

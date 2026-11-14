@@ -50,6 +50,9 @@ ActorInputResult PrepareRetailMovement(unsigned,const RoomMovement&,uint64_t tic
 ActorInputResult ReplayRetailMovement(unsigned,const NativeActorAction&,uint64_t tick,PPCContext&,uint8_t*);
 bool RetailInputTickFor(unsigned,uint64_t,PPCContext&,uint8_t*,RetailActorInput&,bool& movement_delivered,RoomMovement* prepared_command=nullptr);
 bool FinishRetailInputTick(uint64_t,PPCContext&,uint8_t*);
+// Original movie entry can pause the world after inputs were delivered but
+// before Motion runs. Close that specific tick without fabricating consumption.
+bool FinishRetailMovieEntryTick(uint64_t,PPCContext&,uint8_t*,uint8_t& consumed_mask);
 bool SuppressRetailMovement(PPCContext&,uint8_t*);
 void UpdateRetailBasisController(PPCContext&,uint8_t*,PPCFunc* continuation);
 bool ApplyRetailBasisMotion(PPCContext&,uint8_t*,PPCFunc* native);

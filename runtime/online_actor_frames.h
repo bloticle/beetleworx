@@ -33,6 +33,7 @@ public:
     OwnedFrameResult Preflight(const RoomFrame&,PPCContext&,uint8_t* base)const;
     OwnedFrameResult Deliver(const RoomFrame&,PPCContext&,uint8_t* base);
     OwnedFrameResult Finish(uint64_t tick,uint8_t* base);
+    OwnedFrameResult FinishMovieEntry(uint64_t tick,PPCContext&,uint8_t* base,uint16_t& consumed_mask);
     bool faulted()const{return faulted_;}
     uint64_t next_tick()const{return next_tick_;}
 private:

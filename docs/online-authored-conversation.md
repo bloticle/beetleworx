@@ -66,8 +66,8 @@ this sequence, not continuous equality of every conversation-internal field.
 
 `EnterCutscene(entity, variant)` (82852A30) sends original entity action 11;
 it does not start a cinematic player. `StartSequence` (82772F20, helper
-82772D50) selects native **state 2**. The existing online suspended-input
-implementation recognizes restriction state 3 and validated state 6; adding
-and testing state 2 remains necessary. Starting this Apprentice conversation
-does not validate either the state-2 or state-6 cinematic path. Movie state 1,
-choices, nested scenes and complete campaign traversal also remain unproven.
+82772D50) selects native **state 2**, which queues movies and frontend
+commands. Its [movie-only path now has separate native coverage](online-movie-sequence.md).
+Starting this Apprentice conversation does not validate that movie path or
+state-6 cinematic completion. Direct movie state 1, choices, nested scenes,
+credits/menu routes and complete campaign traversal remain unproven.

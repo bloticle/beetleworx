@@ -38,6 +38,9 @@ public:
     bool transition_pending()const;
     bool CompleteWorldTransition(PPCContext&,uint8_t*);
     void UpdateExtraCameras(PPCContext&,uint8_t*);
+    // Movie-only owner-thread lease for original Bink playback scheduling.
+    // Between native updates the media clock holds the last completed tick.
+    bool ReadMovieClock(uint32_t movie_manager,PPCContext&,uint8_t*,uint64_t& tick)const;
     bool Readiness(PPCContext&,uint8_t*);
     RoomGameplayAdmission Prepare(PPCContext&,uint8_t*,RoomFrame&);
     bool Commit(const RoomFrame&,PPCContext&,uint8_t*);

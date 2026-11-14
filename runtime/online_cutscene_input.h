@@ -5,7 +5,10 @@
 #include <array>
 namespace em2::net {
 bool ReadNativeInputContextName(uint8_t*,std::string&);
-bool ReadNativeCutsceneContext(PPCContext&,uint8_t*,uint32_t registry);
+// State 2 is admitted only after its original target and movie-only queue
+// validate. Menu/credits entries share the state and are not cutscenes.
+constexpr bool NativeCutsceneControlMode(uint32_t mode){return mode==2 || mode==3 || mode==6;}
+bool ReadNativeCutsceneContext(PPCContext&,uint8_t*,uint32_t registry,uint32_t owned_movie_sequence=0);
 RoomMovement NativeCutsceneCommand(uint64_t input_epoch);
 RoomMovement NativeCutsceneUiCommand(uint64_t input_epoch,bool down);
 // Entry fence: a carried gameplay press must release before UI intent begins.
@@ -24,4 +27,5 @@ struct NativeCutsceneUiSnapshot {uint32_t manager=0;std::vector<NativeCutsceneUi
 bool InspectNativeCutsceneUi(PPCContext&,uint8_t*,uint32_t registry,NativeCutsceneUiSnapshot&);
 void TracePrivateNativeCutsceneUi(uint64_t input_epoch,PPCContext&,uint8_t*,uint32_t registry);
 bool TestNativeCutsceneInput();
+bool TestNativeMovieClock();
 }

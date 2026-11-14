@@ -23,6 +23,17 @@ struct UiPreserve {
         if(top>=12288 && UiReadable(base,top-8192,8192)){stack=base+top-8192;std::memcpy(bytes.data(),stack,bytes.size());ctx.r1.u64=top-4096;}}
     ~UiPreserve(){if(stack)std::memcpy(stack,bytes.data(),bytes.size());ctx=saved;_mm_setcsr(fp);SetLastError(error);}
 };
+bool MovieOnlySequence(uint8_t* base,uint32_t object,bool allow_completed=false){
+    if(!UiReadable(base,object,40))return false;
+    const auto current=PPC_LOAD_U32(object+12),queue=PPC_LOAD_U32(object+16),count=PPC_LOAD_U32(object+20);
+    if(count>64 || (count && !UiReadable(base,queue,size_t(count)*4)))return false;
+    // Original 82B1D850 classifies .bik as kind 0. MainMenu/EndGame/
+    // StartScreen/Credits share the state but are not passive movies.
+    auto movie=[&](uint32_t entry){return UiReadable(base,entry,16) && PPC_LOAD_U32(entry)==0;};
+    if(current && !movie(current))return false;
+    for(unsigned i=0;i<count;++i)if(!movie(PPC_LOAD_U32(queue+i*4)))return false;
+    return current || count || (allow_completed && PPC_LOAD_U8(object+4)==1);
+}
 }
 bool InspectNativeCutsceneUi(PPCContext& ctx,uint8_t* base,uint32_t registry,NativeCutsceneUiSnapshot& out){
     UiPreserve preserve(ctx,base);NativeGameOverState state;uint32_t mode=0;
@@ -84,10 +95,14 @@ bool ReadNativeInputContextName(uint8_t* base,std::string& out){
     if(!end || begin==end)return false;
     out.assign(begin,end);return true;
 }
-bool ReadNativeCutsceneContext(PPCContext& ctx,uint8_t* base,uint32_t registry){
+bool ReadNativeCutsceneContext(PPCContext& ctx,uint8_t* base,uint32_t registry,uint32_t owned_movie_sequence){
     NativeGameOverState state;uint32_t mode=0;
-    if(!ReadNativeControlState(ctx,base,state,mode) || (mode!=3 && mode!=6) || state.registry!=registry ||
+    if(!ReadNativeControlState(ctx,base,state,mode) || !NativeCutsceneControlMode(mode) || state.registry!=registry ||
        !GuestReadBatch::Readable(base+0x833DBAD8,4))return false;
+    if(mode==2){uint32_t profile=0,object=0,handler=0;
+        return ReadNativeControlTarget(ctx,base,registry,2,profile,object,handler) && handler==0x82B1DF70 &&
+            MovieOnlySequence(base,object,owned_movie_sequence && object==owned_movie_sequence);
+    }
     if(mode==6){uint32_t profile=0,object=0,handler=0;
         return ReadNativeControlTarget(ctx,base,registry,6,profile,object,handler) && handler==0x82B210B0;
     }
@@ -148,7 +163,29 @@ bool ValidNativeCutsceneFrame(const RoomFrame& frame,uint16_t mask,uint64_t entr
     }return true;
 }
 bool TestNativeCutsceneInput(){
+    if(!TestNativeMovieClock())return false;
     unsigned count=0;auto check=[&](bool yes,const char* why){++count;if(!yes)REXLOG_ERROR("Cutscene input epoch: {}",why);return yes;};
+    {
+        std::vector<uint8_t> memory(32768);auto* base=memory.data();
+        constexpr uint32_t object=0x1000,queue=0x2000,entry=0x3000;
+        if(!check(!MovieOnlySequence(base,object),"empty unstarted sequence cannot suspend gameplay"))return false;
+        PPC_STORE_U32(object+16,queue);PPC_STORE_U32(object+20,1);PPC_STORE_U32(queue,entry);
+        if(!check(MovieOnlySequence(base,object),"queued original movie can suspend before playback starts"))return false;
+        for(unsigned kind=1;kind<=5;++kind){PPC_STORE_U32(entry,kind);
+            if(!check(!MovieOnlySequence(base,object),"menu, end-game, title, credits and empty entries cannot masquerade as movies"))return false;}
+        PPC_STORE_U32(entry,0);PPC_STORE_U32(object+12,entry);PPC_STORE_U32(object+20,0);
+        if(!check(MovieOnlySequence(base,object),"active movie can outlive its now-empty queue"))return false;
+        PPC_STORE_U32(object+20,1);PPC_STORE_U32(queue,entry+16);PPC_STORE_U32(entry+16,4);
+        if(!check(!MovieOnlySequence(base,object),"active movie with a queued credits transition rejects"))return false;
+        PPC_STORE_U32(object+20,65);
+        if(!check(!MovieOnlySequence(base,object),"queue bound rejects before reading entries"))return false;
+        PPC_STORE_U32(object+20,0);PPC_STORE_U32(object+12,1);
+        if(!check(!MovieOnlySequence(base,object),"invalid active entry rejects"))return false;
+        PPC_STORE_U32(object+12,0);PPC_STORE_U8(object+4,1);
+        if(!check(!MovieOnlySequence(base,object) && MovieOnlySequence(base,object,true),"completion latch only admits the previously owned movie boundary"))return false;
+        PPC_STORE_U8(object+4,2);
+        if(!check(!MovieOnlySequence(base,object,true),"unrecognized completion latch rejects"))return false;
+    }
     auto pause=NativeCutsceneCommand(2);RoomTransportInputStream stream;RoomMovement active;active.actor_epoch=1;active.source=RoomMovementSource::NativeActionV2;active.jump_button_mask=0x1000;
     if(!check(AdvanceRoomTransportInput(stream,active) && AdvanceRoomTransportInput(stream,pause) && stream.suspended && stream.input_epoch==2,"explicit even epoch suspends existing gameplay stream"))return false;
     const auto frozen=stream;

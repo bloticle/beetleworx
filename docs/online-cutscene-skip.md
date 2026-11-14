@@ -107,7 +107,9 @@ claim follows from the isolated fixtures.
 The [authored conversation fixture](online-authored-conversation.md) now
 completes the original Autotopia intro in three matching native worlds.
 That Apprentice sequence does not enter the cinematic input state, so its
-completion does not establish skip delivery or state-2 `StartSequence` support.
+completion does not establish skip delivery. State-2 `StartSequence` movies
+now have [separate native entry/playback/return coverage](online-movie-sequence.md);
+their skip controls and direct movie state 1 remain unverified or unfinished.
 
 The real guard capture `analysis/native-lobby-20261114-124527-59fe6d76`
 (binary `1ADCC49ACB1B2EAD686A4B6E31EDFC2278DF223AEAFD66C493D1EED8309D5773`)

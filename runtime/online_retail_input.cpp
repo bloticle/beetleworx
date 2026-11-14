@@ -7,6 +7,7 @@
 #include "online_retail_jump.h"
 #include "online_retail_buttons.h"
 #include "online_actor_frames.h"
+#include "online_cutscene_input.h"
 #include "guest_read_batch.h"
 #include <windows.h>
 #include <immintrin.h>
@@ -343,6 +344,21 @@ bool FinishRetailInputTick(uint64_t tick,PPCContext& ctx,uint8_t* base){Environm
     for(unsigned i=0;i<2;++i)if(state.mask&(1u<<i))if(!Current(i,ctx,base) || !state.stages[i].prepared || !state.stages[i].delivered || !state.stages[i].consumed){state.faulted=true;return false;}
     state.active=false;state.next=tick+1;return true;
 }
+bool FinishRetailMovieEntryTick(uint64_t tick,PPCContext& ctx,uint8_t* base,uint8_t& consumed_mask){Environment environment;
+    if(!Active(tick,base) || replay_slot!=-1 || update_slot!=-1 || tick==UINT64_MAX)return false;
+    NativeGameOverState control;uint32_t mode=0;const auto registry=state.actors[0].registry;
+    if(!ReadNativeControlState(ctx,base,control,mode) || mode!=2 || control.registry!=registry ||
+       !ReadNativeCutsceneContext(ctx,base,registry))return false;
+    uint8_t mask=0;
+    for(unsigned i=0;i<2;++i)if(state.mask&(1u<<i)){
+        const auto& stage=state.stages[i];
+        if(!CurrentControllerOwner(i,ctx,base) || !stage.prepared || !stage.delivered)return false;
+        if(stage.consumed)mask|=uint8_t(1u<<i);
+    }
+    // Preserve each actual consumed flag. The original movie starter omitted
+    // the remaining world work; its inputs must never be replayed next tick.
+    state.active=false;state.next=tick+1;consumed_mask=mask;return true;
+}
 bool SuppressRetailMovement(PPCContext& ctx,uint8_t* base){Environment environment;
     // An armed reservation never changes bootstrap input. Once a gameplay
     // frame begins, a partial/stopped frame remains quarantined until explicit
@@ -527,6 +543,9 @@ bool TestNativeRetailInput(){
            PPC_LOAD_U32(motions[i]+180)==0 && std::bit_cast<float>(PPC_LOAD_U32(motions[i]+184))==frame.players[i].forward_z,
            "ORIGINAL controller projection and Motion setter receive own sender basis, not local pitched camera"))return false;
     }
+    {uint8_t receipt=0xA5;
+        if(!check(!FinishRetailMovieEntryTick(10,ctx,base,receipt) && receipt==0xA5 && state.active && state.next==10,
+            "ordinary gameplay cannot use movie interruption to bypass exact Movement completion"))return false;}
     if(!check(FinishRetailInputTick(10,ctx,base) && !FinishRetailInputTick(10,ctx,base),"full native Movement tick completes once"))return false;
     // Original target-frame path: resolve an authored entity through the real
     // registry and retain its full 3D transform direction, not sender camera yaw.

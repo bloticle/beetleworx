@@ -530,7 +530,7 @@ target_sources(EM2Recomp PRIVATE online_room_bootstrap.cpp)
 target_sources(EM2Recomp PRIVATE online_room_bootstrap_test.cpp)
 target_sources(EM2Recomp PRIVATE online_room_runtime.cpp online_room_probe.cpp online_room_leave.cpp)
 target_sources(EM2Recomp PRIVATE online_room_init_trace.cpp)
-target_sources(EM2Recomp PRIVATE online_room_gameplay.cpp online_retail_input.cpp online_retail_jump.cpp online_movement_target.cpp)
+target_sources(EM2Recomp PRIVATE online_room_gameplay.cpp online_movie_clock.cpp online_retail_input.cpp online_retail_jump.cpp online_movement_target.cpp)
 
 target_sources(EM2Recomp PRIVATE online_behavior_trace.cpp)
 target_sources(EM2Recomp PRIVATE native_turn_rate_defaults.cpp)
