@@ -104,6 +104,11 @@ cutscenes before gameplay admission still need native campaign tests and any
 corresponding fixes. No complete online playthrough
 claim follows from the isolated fixtures.
 
+The [authored conversation fixture](online-authored-conversation.md) now
+completes the original Autotopia intro in three matching native worlds.
+That Apprentice sequence does not enter the cinematic input state, so its
+completion does not establish skip delivery or state-2 `StartSequence` support.
+
 The real guard capture `analysis/native-lobby-20261114-124527-59fe6d76`
 (binary `1ADCC49ACB1B2EAD686A4B6E31EDFC2278DF223AEAFD66C493D1EED8309D5773`)
 passed with 1,601 matching updates. It observed private prompt/hold/release

@@ -36,6 +36,7 @@ PPC_EXTERN_FUNC(sub_82A27F80);
 REXCVAR_DEFINE_BOOL(em2_probe_native_policy_cycle,false,"Debug","Exact private four-player SDK fixture only: balanced native electric-stream restriction add at tick 300, remove at 500, second SDK tool attempt");
 REXCVAR_DECLARE(bool,em2_private_profile);
 REXCVAR_DECLARE(bool,em2_native_lobby_qa_cutscene_cycle);
+REXCVAR_DECLARE(bool,em2_native_lobby_qa_authored_conversation);
 REXCVAR_DEFINE_BOOL(em2_probe_cutscene_boundary_move,false,"Debug","Private cutscene QA only: hold SDK movement over the authored restriction boundary to test native stop behavior");
 REXCVAR_DEFINE_BOOL(em2_probe_cutscene_skip_input,false,"Debug","Private cutscene QA only: fresh skip hold from extra peer 3 after the carried entry press releases");
 REXCVAR_DEFINE_BOOL(em2_probe_cutscene_held_return,false,"Debug","Private cutscene QA only: hold A through native return, move during the held interval, then release and jump freshly");
@@ -349,7 +350,7 @@ std::unique_ptr<rex::input::InputSystem> MakePrivateRoomInput(Room& room){
             const auto extra_damage=REXCVAR_GET(em2_probe_extra_damage_peer);
             const bool damage_fixture=damage_player || extra_damage;
             const bool damage_target=damage_player==4 || room_.local_peer()==(damage_player?damage_player:extra_damage);
-            const bool cutscene_fixture=REXCVAR_GET(em2_native_lobby_qa_cutscene_cycle);
+            const bool cutscene_fixture=REXCVAR_GET(em2_native_lobby_qa_cutscene_cycle) || REXCVAR_GET(em2_native_lobby_qa_authored_conversation);
             const bool active=!cutscene_fixture && damage_player!=4 && (room_.lobby().players.size()>2?room_.local_peer()>=3:room_.local_peer()==2);
             const int direction=room_.lobby().players.size()>2 && !(room_.local_peer()&1)?-1:1;
             if(active){
@@ -454,6 +455,22 @@ void ObservePrivateRoomActors(uint64_t tick,std::span<const OwnedRosterActor> ac
     auto* room=prepared.load(std::memory_order_acquire)?prepared_room:PrivateNativeMenuRoom();
     if(!room || room->state()!=RoomState::Running)return;
     Environment environment;
+    if(REXCVAR_GET(em2_native_lobby_qa_authored_conversation) && NativeOnlineMenuQaActive() &&
+       (tick==699 || tick==700 || tick==701 || tick==720 || tick==840 || tick==1000 || tick==1300 || tick==1600 || tick==1900) && Readable(0x833DDE14,4,base)){
+        const auto manager=PPC_LOAD_U32(0x833DDE14);
+        if(Readable(manager,124,base)){
+            const auto player=PPC_LOAD_U32(manager+108),ui=PPC_LOAD_U32(manager+120);
+            if(Readable(player,128,base)){
+                const auto resource=PPC_LOAD_U32(player+20);
+                const auto flags=Readable(resource,38,base)?PPC_LOAD_U16(resource+34):0;
+                REXLOG_INFO("Private authored conversation state: tick {} active {} resource {:08X} flags {:04X} cursor {} current {} queued {} ui {:08X}",tick,PPC_LOAD_U8(player+36),resource,flags,PPC_LOAD_U32(player+24),PPC_LOAD_U32(player+28),PPC_LOAD_U32(player+4),ui);
+            }
+            if(Readable(ui,4,base)){
+                const auto table=PPC_LOAD_U32(ui);
+                if(Readable(table,100,base))REXLOG_INFO("Private authored conversation UI: tick {} table {:08X} start {:08X} allowed {:08X}; read-only original interface",tick,table,PPC_LOAD_U32(table+88),PPC_LOAD_U32(table+96));
+            }
+        }
+    }
     for(const auto& entry:actors){GameplayObservation::CharacterPhysics sample;
         if(!em2::ReadNativeActorPhysics(base,entry.actor.entity,sample)){
             REXLOG_ERROR("Private Room actor trajectory unavailable: room peer {} tick {}",entry.room_peer,tick);
