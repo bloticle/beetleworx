@@ -177,7 +177,7 @@ class Discord {
                 invite_nonce="bw-invite-"+std::to_string(++nonce);invite_deadline=Clock::now()+10s;
                 // The official Game SDK's OpenActivityInvite(Join) operation,
                 // over our existing local IPC connection; no helper or token.
-                Need(Send(pipe,1,"{\"cmd\":\"OPEN_OVERLAY_ACTIVITY_INVITE\",\"args\":{\"type\":1},\"nonce\":"+demo_detail::Quote(invite_nonce)+"}",stop),"Discord invite screen request failed");
+                Need(Send(pipe,1,"{\"cmd\":\"OPEN_OVERLAY_ACTIVITY_INVITE\",\"args\":{\"type\":1,\"pid\":"+std::to_string(GetCurrentProcessId())+"},\"nonce\":"+demo_detail::Quote(invite_nonce)+"}",stop),"Discord invite screen request failed");
             }
             if(!invite_nonce.empty() && Clock::now()>invite_deadline){invite_nonce.clear();{std::lock_guard lock(mutex);invite_busy=false;}Status("Discord did not open its invite screen. Use Copy room code instead.");}
             std::unique_lock lock(mutex);wake.wait_for(lock,50ms);
