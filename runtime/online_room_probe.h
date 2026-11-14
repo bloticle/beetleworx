@@ -25,5 +25,6 @@ void TickPrivateNativeTaskPolicy(PPCContext&,uint8_t*);
 // Explicit extra-actor fatal damage fixture; never arms the death interceptor.
 bool TickPrivateNativeExtraDamage(PPCContext&,uint8_t*);
 void ObservePrivateExtraDamage(uint64_t tick,PPCContext&,uint8_t*);
+void TracePrivateExtraPosition(PPCContext&,uint8_t*,const char* operation,unsigned offset);
 void ObservePrivateRoomActors(uint64_t tick,std::span<const OwnedRosterActor>,uint8_t*);
 }

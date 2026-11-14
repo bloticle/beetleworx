@@ -100,3 +100,16 @@ void em2::net::ObservePrivateExtraDamage(uint64_t tick,PPCContext& ctx,uint8_t* 
  }
  REXLOG_INFO("Private extra damage health: tick {} peer {} generation {} life {}; native property query",tick,probe.peer,current.generation,life);
 }
+
+void em2::net::TracePrivateExtraPosition(PPCContext& ctx,uint8_t* base,const char* operation,unsigned offset){
+ if(!REXCVAR_GET(em2_probe_extra_damage_peer) || !probe.sent || !REXCVAR_GET(em2_private_profile) || !NativeOnlineMenuQaActive() || ctx.r3.u32!=probe.actor.entity)return;
+ uint64_t tick=0;if(!em2::CurrentAgreedSimulationTick(tick) || tick<930 || tick>980)return;
+ const uint64_t address=uint64_t(ctx.r4.u32)+offset;if(address+12>0x100000000ull || !Readable(uint32_t(address),12,base))return;
+ const auto input=uint32_t(address);
+ REXLOG_INFO("Private extra position write: tick {} peer {} operation {} caller {:08X} bits {:08X}/{:08X}/{:08X}",tick,probe.peer,operation,uint32_t(ctx.lr),PPC_LOAD_U32(input),PPC_LOAD_U32(input+4),PPC_LOAD_U32(input+8));
+ auto stack=ctx.r1.u32;
+ for(unsigned depth=0;depth<8 && Readable(stack,4,base);++depth){
+  const auto next=PPC_LOAD_U32(stack);if(next<=stack || next-stack>65536 || !Readable(next-8,4,base))break;
+  REXLOG_INFO("Private extra position caller: tick {} depth {} return {:08X}",tick,depth,PPC_LOAD_U32(next-8));stack=next;
+ }
+}

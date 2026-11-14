@@ -1,4 +1,8 @@
 #include "online_actor_death.h"
+#include "native_player_spawn.h"
+#include "native_character_physics.h"
+#include <bit>
+#include <cmath>
 #include "guest_read_batch.h"
 #include "ppc_context.h"
 #include <rex/logging.h>
@@ -12,6 +16,8 @@
 #include <immintrin.h>
 PPC_EXTERN_FUNC(__imp__sub_82A010E8);
 PPC_EXTERN_FUNC(__imp__sub_82A38FC8);
+PPC_EXTERN_FUNC(__imp__sub_8276CC90);
+PPC_EXTERN_FUNC(__imp__sub_82769518);
 PPC_EXTERN_FUNC(sub_82A010E8);
 namespace {
 using Actor=em2::net::OwnedActorInput;
@@ -90,6 +96,68 @@ bool em2::net::PeekOwnedActorDeath(uint64_t epoch,PPCContext& ctx,uint8_t* base,
 bool em2::net::ConfirmOwnedActorDeath(uint64_t epoch,const Ticket& ticket){
     Environment preserve;std::lock_guard lock(queue_mutex);if(native_event_depth || !Owner() || !epoch || epoch!=queue.epoch || ticket.consumer_epoch!=epoch)return false;
     for(auto& pending:queue.pending)if(pending.sequence && SameTicket(pending,ticket)){pending={};return true;}return false;
+}
+// Original respawn 82A37518 resolves a two-slot PlayerManager index, then
+// uses it unchecked to read the checkpoint matrix and select character tasks.
+// Extra humans have no retail record: the native lookup returns -1, producing
+// an invalid/uninitialized matrix and NaN physics. Resolve only this audited
+// actor-owned query to its pinned native character profile; no retail record
+// or global player identity is installed or changed.
+PPC_FUNC_IMPL(sub_8276CC90){
+    Actor actor;bool owned=false;
+    {
+        Context preserve(ctx);
+        owned=ctx.lr==0x82A37578 && Readable(0x833DAB60,4,base) &&
+            ctx.r3.u32==PPC_LOAD_U32(0x833DAB60) &&
+            em2::net::OwnedActorInputForController(ctx.r27.u32,ctx,base,actor) &&
+            actor.enabled && actor.entity==ctx.r4.u32 && actor.action_user<2;
+    }
+    if(owned){
+        ctx.r3.u64=actor.action_user;
+        REXLOG_INFO("Native extra respawn profile resolved: peer {} generation {} entity {:08X} profile {}; original checkpoint matrix and recovery tasks",actor.peer,actor.generation,actor.entity,actor.action_user);
+        return;
+    }
+    __imp__sub_8276CC90(ctx,base);
+}
+PPC_FUNC_IMPL(sub_82769518){
+    Actor actor;bool owned=false;const auto output=ctx.r5.u32;
+    {
+        Context preserve(ctx);
+        owned=ctx.lr==0x82A375A4 && Readable(0x833DAB60,4,base) &&
+            ctx.r3.u32==PPC_LOAD_U32(0x833DAB60) && Readable(output,64,base) &&
+            em2::net::OwnedActorInputForController(ctx.r27.u32,ctx,base,actor) &&
+            actor.enabled && actor.action_user<2 && ctx.r4.u32==actor.action_user;
+    }
+    __imp__sub_82769518(ctx,base);
+    if(!owned || !ctx.r3.u32)return;
+    Context preserve(ctx);
+    std::array<float,3> checkpoint;for(unsigned i=0;i<3;++i)checkpoint[i]=std::bit_cast<float>(PPC_LOAD_U32(output+48+i*4));
+    if(!std::all_of(checkpoint.begin(),checkpoint.end(),[](float value){return std::isfinite(value);}))return;
+    // Keep the authored checkpoint orientation and region, while finding an
+    // independent supported position. Spawning directly on the retail actor
+    // lets its collision hull push the extra human and corrupt fresh controls.
+    const auto place=[&](const std::array<float,3>& preferred){
+        std::array<float,3> grounded;std::string why;
+        if(!em2::FindNativePlayerSpawn(ctx,base,actor.entity,preferred,grounded,why,0,true))return false;
+        for(unsigned i=0;i<3;++i)PPC_STORE_U32(output+48+i*4,std::bit_cast<uint32_t>(grounded[i]));
+        REXLOG_INFO("Native extra respawn supported placement: peer {} generation {} position {}/{}/{}; authored checkpoint and native collision query",actor.peer,actor.generation,grounded[0],grounded[1],grounded[2]);
+        return true;
+    };
+    // Prefer an already separated supported point close to this checkpoint.
+    // Avoid needlessly moving a stationary dead human onto a different edge.
+    // Fallen actors and actors far from the checkpoint take the search below.
+    em2::net::GameplayObservation::CharacterPhysics sample;
+    if(em2::ReadNativeActorPhysics(base,actor.entity,sample) && sample.active){
+        std::array<float,3> current;for(unsigned i=0;i<3;++i)current[i]=std::bit_cast<float>(sample.position[i]);
+        if(std::hypot(current[0]-checkpoint[0],current[2]-checkpoint[2])<=4.f &&
+           std::abs(current[1]-checkpoint[1])<=1.f && place(current))return;
+    }
+    for(unsigned ring=1;ring<=4;++ring)for(unsigned point=0;point<24;++point){
+        const float angle=(float(point)+float(ring&1)*.5f)*6.28318530718f/24.f;
+        const std::array<float,3> preferred{checkpoint[0]+float(ring)*2.f*std::cos(angle),checkpoint[1],checkpoint[2]+float(ring)*2.f*std::sin(angle)};
+        if(place(preferred))return;
+    }
+    REXLOG_WARN("Native extra respawn could not separate a supported checkpoint placement; retaining original native checkpoint");
 }
 PPC_FUNC_IMPL(sub_82A010E8){RouteFade(ctx,base,__imp__sub_82A010E8);}
 // Traversal-depth guard only: original event forwarding and actor animation

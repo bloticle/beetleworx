@@ -22,6 +22,7 @@
 #include "simulation.h"
 #include "online_runtime.h"
 #include "online_room_gameplay.h"
+#include "online_room_probe.h"
 #include "online_viewport.h"
 #include "online_world_random.h"
 #include <rex/cvar.h>
@@ -312,6 +313,7 @@ void TraceSpawnBodies(const char* phase,uint8_t* base) {
     }
 }
 void TraceSpawnMutation(PPCContext& ctx,uint8_t* base,const char* operation,unsigned offset) {
+    em2::net::TracePrivateExtraPosition(ctx,base,operation,offset);
     if(!REXCVAR_GET(em2_trace_players) || !spawn_trace_steps || spawn_trace_load!=em2::CurrentNativeLoadGeneration() ||
        std::find(spawn_trace_entities.begin(),spawn_trace_entities.end(),ctx.r3.u32)==spawn_trace_entities.end())return;
     struct Host {DWORD error=GetLastError();unsigned csr=_mm_getcsr();~Host(){SetLastError(error);_mm_setcsr(csr);}} host;

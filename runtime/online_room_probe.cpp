@@ -432,7 +432,21 @@ void ObservePrivateRoomActors(uint64_t tick,std::span<const OwnedRosterActor> ac
     Environment environment;
     for(const auto& entry:actors){GameplayObservation::CharacterPhysics sample;
         if(!em2::ReadNativeActorPhysics(base,entry.actor.entity,sample)){
-            REXLOG_ERROR("Private Room actor trajectory unavailable: room peer {} tick {}",entry.room_peer,tick);continue;}
+            REXLOG_ERROR("Private Room actor trajectory unavailable: room peer {} tick {}",entry.room_peer,tick);
+            // Read-only diagnostics for native death/recovery component changes.
+            const auto word=[&](uint32_t p){return Readable(p,4,base)?PPC_LOAD_U32(p):0u;};
+            const auto entity=entry.actor.entity,types=word(entity+88),list=word(entity+36);
+            const auto component=[&](uint32_t kind_address){
+                if(!Readable(kind_address,1,base))return 0u;
+                const auto kind=PPC_LOAD_U8(kind_address);
+                if(!Readable(types+kind,1,base))return 0u;
+                const auto slot=PPC_LOAD_U8(types+kind);if(slot==255)return 0u;
+                const auto face=word(list+uint32_t(slot)*4);return face>=8?face-8:0u;
+            };
+            const auto motion=component(0x833DAF54),position=component(0x833DBC3C),physics=word(motion+80),controller=word(physics+176),body=word(controller+16);
+            if(tick==941 || tick==972 || tick==1041)
+                REXLOG_INFO("Private Room actor physics route: peer {} tick {} entity {:08X} motion {:08X} owner {:08X} position {:08X} physics {:08X} active {} controller {:08X} body {:08X} types {:08X}/{:08X} pos {:08X}/{:08X}/{:08X} vel {:08X}/{:08X}/{:08X}",entry.room_peer,tick,entity,motion,word(motion+48),position,physics,Readable(physics+145,1,base)?unsigned(PPC_LOAD_U8(physics+145)):0u,controller,body,word(body),word(body+224),word(position+172),word(position+176),word(position+180),word(body+432),word(body+436),word(body+440));
+            continue;}
         REXLOG_INFO("Private Room actor trajectory: room peer {} tick {} position {}/{}/{} velocity {}/{}/{} native state {} active {} consumed {}",entry.room_peer,tick,
             std::bit_cast<float>(sample.position[0]),std::bit_cast<float>(sample.position[1]),std::bit_cast<float>(sample.position[2]),
             std::bit_cast<float>(sample.velocity[0]),std::bit_cast<float>(sample.velocity[1]),std::bit_cast<float>(sample.velocity[2]),sample.state,sample.active,
