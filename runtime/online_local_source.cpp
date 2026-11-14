@@ -30,6 +30,7 @@ struct Route {
     Identity identity;LobbySnapshot lobby;
     NativeLocalMovementBinding binding;
     std::optional<NativeRoutedPadSample> last;
+    uint16_t blocked_buttons=0;bool release_fenced=false;
 };
 thread_local Route route;
 thread_local uint64_t issued=0;
@@ -65,16 +66,25 @@ bool ArmNativeLocalSource(const Room& room,unsigned physical,const NativeLocalMo
     route.physical=physical;route.peer=room.local_peer();route.identity=room.identity();route.lobby=room.lobby();route.binding=binding;return true;
 }
 void DisarmNativeLocalSource(){route={};}
+bool FenceNativeLocalSourceButtons(const Room& room,uint16_t held,PPCContext& ctx,uint8_t* base){
+    Environment environment;
+    if(sampling || !Current(room,ctx,base) || route.last || route.release_fenced)return false;
+    route.blocked_buttons=held;route.release_fenced=true;return true;
+}
 bool SampleNativeLocalSource(const Room& room,rex::input::InputSystem& input,uint64_t tick,PPCContext& ctx,uint8_t* base,NativeRoutedPadSample& output){
     Environment environment;output={};if(sampling || !Current(room,ctx,base))return false;
     if(route.last && route.last->source_tick()==tick){output=*route.last;return true;}
     const auto generation=route.generation;const auto controls=route.controls;const auto physical=route.physical;
     struct Scope {bool previous=sampling;Scope(){sampling=true;}~Scope(){sampling=previous;}} scope;
     Pad pad;if(!em2::SampleLocalControls(input,physical,tick,pad) || route.generation!=generation || !Current(room,ctx,base))return false;
+    // Stage fence progression only after the genuine SDK sample and complete
+    // route revalidation succeed. Never rewrite the shared physical cache.
+    const auto blocked=uint16_t(route.blocked_buttons&pad.buttons);
+    pad.buttons=uint16_t(pad.buttons&~blocked);
     NativeRoutedPadSample sample;sample.pad_=pad;sample.route_generation_=generation;sample.controls_generation_=controls;
     sample.source_tick_=tick;sample.physical_user_=physical;sample.native_user_=route.binding.user;sample.retail_slot_=route.binding.retail_slot;
     sample.room_peer_=route.peer;
-    route.last=sample;output=sample;return true;
+    route.blocked_buttons=blocked;route.last=sample;output=sample;return true;
 }
 bool ValidateNativeLocalSource(const Room& room,const NativeRoutedPadSample& sample,const NativeLocalMovementBinding& binding,PPCContext& ctx,uint8_t* base){
     Environment environment;
@@ -258,7 +268,37 @@ bool TestNativeLocalSource(PPCContext& ctx,uint8_t* base,const NativeLocalMoveme
     RoomFrame cohort_frame;
     if(!check(cohort_pump([&]{return cohort_host.PeekFrame(cohort_frame);}) && cohort_frame.players_mask==0xFFFF && cohort_frame.players[15]==final_movement &&
         !ValidateNativeLocalSource(cohort_host,final_sample,binding,ctx,base),"full authoritative sixteen-peer frame preserves the sealed peer16 commands and rejects host impersonation"))return false;
-    if(ok)REXLOG_INFO("Native local source passed {} checks: actual hardware0/canonicalOswald1, raw-boundary arm without polling/vote, sealed tick/control/binding provenance, typed native Movement/Jump, strict API mismatch rejection, cache/reentrancy/thread/Room lifecycle",checks);
+    // A fresh context must not manufacture Jump from an already-held skip
+    // button. Exercise the sealed source and BOTH original native producers.
+    const auto held=final_sample.pad().buttons;
+    if(!check(held==jump.button_mask && !FenceNativeLocalSourceButtons(**final,held,ctx,base),"sampled active route cannot retrofit a release fence"))return false;
+    DisarmNativeLocalSource();DisarmNativeLocalJump();
+    if(!check(!FenceNativeLocalSourceButtons(**final,held,ctx,base) && ArmNativeLocalSource(**final,0,binding,ctx,base) &&
+        !FenceNativeLocalSourceButtons(cohort_host,held,ctx,base) && FenceNativeLocalSourceButtons(**final,held,ctx,base) &&
+        !FenceNativeLocalSourceButtons(**final,held,ctx,base),"context fence requires a fresh exact Room route and installs only once"))return false;
+    NativeTriggerSource fenced_buttons;
+    if(!ArmNativeLocalJump(jump,3,2002,ctx,base) || !ArmNativeTriggers(fenced_buttons,button_binding,3,2002,ctx,base))return false;
+    for(uint64_t tick=2002;tick<=2006;++tick){
+        hardware->pads[0]=configured_pad;
+        if(tick>=2003)hardware->pads[0].buttons=uint16_t(uint16_t(hardware->pads[0].buttons)|0x4000);
+        if(tick==2004 || tick==2006)hardware->pads[0].buttons=0x4000;
+        NativeRoutedPadSample fenced,repeated;Pad raw;
+        if(!check(SampleNativeLocalSource(**final,input,tick,ctx,base,fenced) && em2::SampleLocalControls(input,0,tick,raw),"context-fenced source uses the real cached physical sample"))return false;
+        auto expected=raw;if(tick<=2003)expected.buttons=uint16_t(expected.buttons&~held);
+        if(!check(fenced.pad()==expected && SampleNativeLocalSource(**final,input,tick,ctx,base,repeated) && repeated==fenced &&
+            hardware->reads[0]==unsigned(tick-2000) && hardware->reads[1]==0 && ValidateNativeLocalSource(**final,fenced,binding,ctx,base),
+            "fence preserves axes/triggers/fresh buttons, raw cache, once-only polling and sealed provenance"))return false;
+        if(tick==2003 && !check((raw.buttons&~held)!=0 && (fenced.pad().buttons&held)==0,"new digital action is forwarded while the old held action is blocked"))return false;
+        NativeLocalJumpEvents edges;NativeTriggerBatch fired;
+        if(!check(ProduceNativeLocalJump(**final,jump,fenced,3,ctx,base,edges) &&
+            ProduceNativeTriggers(**final,fenced_buttons,button_binding,fenced,3,ctx,base,fired),"both original Jump and complete-button interpreters use the fenced sample"))return false;
+        if(tick<2005){if(!check(!edges.count && !fired.actions[0].dispatch && !fired.actions[1].dispatch,"carried press and its first physical release produce no synthetic Jump edges"))return false;}
+        else if(tick==2005){if(!check(edges.count==1 && edges.events[0]==RoomJumpEvent{1,RoomJumpEdge::Pressed} && fired.actions[0].dispatch && !fired.actions[1].dispatch,
+            "a new post-release press reaches both original native interpreters exactly once"))return false;}
+        else if(!check(edges.count==1 && edges.events[0]==RoomJumpEvent{2,RoomJumpEdge::Released} && !fired.actions[0].dispatch && fired.actions[1].dispatch,
+            "post-release press retains its normal original release edge"))return false;
+    }
+    if(ok)REXLOG_INFO("Native local source passed {} checks: actual hardware0/canonicalOswald1, raw-boundary arm without polling/vote, sealed tick/control/binding provenance, typed native Movement/Jump, strict API mismatch rejection, cache/reentrancy/thread/Room lifecycle and context-held button release fence",checks);
     return ok;
 }
 }

@@ -38,6 +38,7 @@ REXCVAR_DECLARE(bool,em2_private_profile);
 REXCVAR_DECLARE(bool,em2_native_lobby_qa_cutscene_cycle);
 REXCVAR_DEFINE_BOOL(em2_probe_cutscene_boundary_move,false,"Debug","Private cutscene QA only: hold SDK movement over the authored restriction boundary to test native stop behavior");
 REXCVAR_DEFINE_BOOL(em2_probe_cutscene_skip_input,false,"Debug","Private cutscene QA only: fresh skip hold from extra peer 3 after the carried entry press releases");
+REXCVAR_DEFINE_BOOL(em2_probe_cutscene_held_return,false,"Debug","Private cutscene QA only: hold A through native return, move during the held interval, then release and jump freshly");
 REXCVAR_DECLARE(bool,em2_room_native_buttons);
 REXCVAR_DECLARE(bool,em2_probe_online_chat);
 REXCVAR_DECLARE(bool,em2_probe_room_recovery_controller);
@@ -383,12 +384,16 @@ std::unique_ptr<rex::input::InputSystem> MakePrivateRoomInput(Room& room){
                 if(elapsed>=660 && elapsed<680){state->gamepad.buttons=0x1000;phase="held jump across cutscene";}
                 if(REXCVAR_GET(em2_probe_cutscene_skip_input) && room_.local_peer()==3 && elapsed>=800 && elapsed<820){state->gamepad.buttons=0x1000;phase="fresh cutscene skip hold";}
                 if(boundary_move && elapsed>=657 && elapsed<680){state->gamepad.thumb_ly=16000;phase=elapsed>=660?"move and jump across cutscene":"movement across cutscene";}
+                if(REXCVAR_GET(em2_probe_cutscene_held_return)){
+                    if(elapsed>=1250 && elapsed<1300){state->gamepad.buttons=0x1000;phase="held button across return";}
+                    if(elapsed>=1265 && elapsed<1271){state->gamepad.thumb_ly=16000;phase="movement with held return button";}
+                }
                 if(elapsed>=1400 && elapsed<1406){state->gamepad.thumb_ly=16000;phase="forward after cutscene";}
                 if(elapsed>=1440 && elapsed<1446){state->gamepad.thumb_ly=-16000;phase="backward after cutscene";}
                 if(elapsed>=1480 && elapsed<1484){state->gamepad.buttons=0x1000;phase="jump after cutscene";}
             }
             const auto complete=cutscene_fixture?1600u:damage_fixture?1200u:REXCVAR_GET(em2_probe_native_policy_cycle)?560u:360u;
-            if((!last_ || *last_!=tick) && ((cutscene_fixture && (elapsed==657 || elapsed==200 || elapsed==204 || elapsed==660 || elapsed==680 || elapsed==1400 || elapsed==1406 || elapsed==1440 || elapsed==1446 || elapsed==1480 || elapsed==1484 || elapsed==1600)) || (damage_player==3 && (elapsed==720 || elapsed==732 || elapsed==760 || elapsed==772 || elapsed==800 || elapsed==804)) || (extra_damage && (elapsed==720 || elapsed==740 || elapsed==744 || elapsed==760)) || (damage_fixture && (elapsed==1000 || elapsed==1012 || elapsed==1040 || elapsed==1052 || elapsed==1080 || elapsed==1084 || elapsed==1200)) || elapsed==0 || elapsed==60 || elapsed==72 || elapsed==90 || elapsed==102 || elapsed==130 || elapsed==134 || elapsed==175 || elapsed==195 || elapsed==240 || elapsed==252 || elapsed==280 || elapsed==284 || elapsed==300 || elapsed==320 || elapsed==330 || elapsed==345 || elapsed==360 || (REXCVAR_GET(em2_probe_native_policy_cycle) && (elapsed==530 || elapsed==545 || elapsed==560)) || (REXCVAR_GET(em2_probe_online_chat) && (elapsed==480 || elapsed==492))))
+            if((!last_ || *last_!=tick) && ((cutscene_fixture && ((REXCVAR_GET(em2_probe_cutscene_held_return) && (elapsed==1250 || elapsed==1265 || elapsed==1271 || elapsed==1300)) || elapsed==657 || elapsed==200 || elapsed==204 || elapsed==660 || elapsed==680 || elapsed==1400 || elapsed==1406 || elapsed==1440 || elapsed==1446 || elapsed==1480 || elapsed==1484 || elapsed==1600)) || (damage_player==3 && (elapsed==720 || elapsed==732 || elapsed==760 || elapsed==772 || elapsed==800 || elapsed==804)) || (extra_damage && (elapsed==720 || elapsed==740 || elapsed==744 || elapsed==760)) || (damage_fixture && (elapsed==1000 || elapsed==1012 || elapsed==1040 || elapsed==1052 || elapsed==1080 || elapsed==1084 || elapsed==1200)) || elapsed==0 || elapsed==60 || elapsed==72 || elapsed==90 || elapsed==102 || elapsed==130 || elapsed==134 || elapsed==175 || elapsed==195 || elapsed==240 || elapsed==252 || elapsed==280 || elapsed==284 || elapsed==300 || elapsed==320 || elapsed==330 || elapsed==345 || elapsed==360 || (REXCVAR_GET(em2_probe_native_policy_cycle) && (elapsed==530 || elapsed==545 || elapsed==560)) || (REXCVAR_GET(em2_probe_online_chat) && (elapsed==480 || elapsed==492))))
                 REXLOG_INFO("Private Room SDK input: peer {} tick {} elapsed {} phase '{}' reads {}; synthetic SDK driver, original native interpreters",room_.local_peer(),tick,elapsed,elapsed==complete?"complete":phase,reads_);
             last_=tick;return X_ERROR_SUCCESS;
         }

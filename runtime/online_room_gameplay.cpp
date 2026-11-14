@@ -39,6 +39,7 @@
 #include <rex/cvar.h>
 REXCVAR_DECLARE(bool,em2_private_profile);
 REXCVAR_DECLARE(bool,em2_probe_room_recovery_controller);
+REXCVAR_DEFINE_BOOL(em2_probe_unfenced_cutscene_return,false,"Debug","Private native lobby QA only: reproduce old carried-button behavior for the held-return regression");
 REXCVAR_DEFINE_UINT32(em2_probe_room_partial_delivery_tick,0xFFFFFFFFu,"Debug","Explicit private native lobby QA fault: stop after original input delivery but before native physics/post-update at this tick");
 REXCVAR_DEFINE_BOOL(em2_probe_room_hud_properties,false,"Debug","Private native Room QA only: observe actual authored life-property callback ownership");
 REXCVAR_DEFINE_BOOL(em2_room_native_buttons,false,"Debug","Enable experimental two-player native button production and delivery in retained Room gameplay");
@@ -149,6 +150,7 @@ struct NativeRoomGameplay::Impl {
     std::optional<uint64_t> cutscene_entry,cutscene_resume;
     std::unique_ptr<NativeCutsceneSkipSource> private_skip_source;
     NativeCutsceneUiGate skip_gate;
+    std::optional<uint16_t> departing_cutscene_buttons;
     bool skip_target_available=false;
     std::optional<uint64_t> skip_target_entry;
     std::unique_ptr<NativeCutsceneSkipReceiver> skip_receiver;
@@ -546,6 +548,11 @@ bool NativeRoomGameplay::RearmInputContext(uint64_t tick,PPCContext& ctx,uint8_t
     step="retail Jump receiver";if(!ArmRetailJump(ctx,base))return false;
     step="local Jump definitions";if(!DiscoverNativeLocalJumpBinding(s.movement,ctx,base,s.jump))return false;
     step="local source route";if(!ArmNativeLocalSource(*s.room,s.physical,s.movement,ctx,base))return false;
+    step="departing cutscene button fence";
+    if(!s.departing_cutscene_buttons)return false;
+    const bool unfenced=REXCVAR_GET(em2_private_profile) && NativeOnlineMenuQaActive() && REXCVAR_GET(em2_probe_unfenced_cutscene_return);
+    if(!unfenced && !FenceNativeLocalSourceButtons(*s.room,*s.departing_cutscene_buttons,ctx,base))return false;
+    if(unfenced)REXLOG_INFO("Private native cutscene return fence bypassed: source tick {} held {:04X}; old behavior reproduction only",tick,*s.departing_cutscene_buttons);
     step="local Jump source baseline";if(!ArmNativeLocalJump(s.jump,next_epoch,tick,ctx,base))return false;
     if(s.native_buttons){
         step="local button source and delivery";
@@ -614,7 +621,7 @@ RoomGameplayAdmission NativeRoomGameplay::Prepare(PPCContext& ctx,uint8_t* base,
             s.Stop("Native cutscene entry lacks a completed owned input epoch");return RoomGameplayAdmission::Stopped;}
         for(const auto& player:s.roster.players)s.cutscene_schemas[player.peer-1]=s.button_schemas[player.character==LobbyCharacter::Mickey?0:1];
         s.cutscene_entry=*s.native_completed;s.cutscene_resume.reset();++s.input_epoch;
-        s.private_skip_source.reset();s.private_skip_armed=false;s.private_skip_failed=false;s.skip_gate={};s.skip_receiver.reset();s.skip_target_available=false;s.skip_target_entry.reset();
+        s.private_skip_source.reset();s.private_skip_armed=false;s.private_skip_failed=false;s.skip_gate={};s.skip_receiver.reset();s.skip_target_available=false;s.skip_target_entry.reset();s.departing_cutscene_buttons.reset();
         REXLOG_INFO("Native Room cutscene input suspended: entry tick {}, input epoch {}; original state {} and native cutscene ownership, actor incarnations unchanged",*s.cutscene_entry,s.input_epoch,mode);
     }
     if(s.cutscene_entry && mode!=3 && mode!=6){
@@ -649,6 +656,7 @@ RoomGameplayAdmission NativeRoomGameplay::Prepare(PPCContext& ctx,uint8_t* base,
             const auto command=available?NativeCutsceneUiCommand(s.input_epoch,down):NativeCutsceneCommand(s.input_epoch);
             if(!s.room->SubmitLocal(s.room->next_submit_tick(),command)){
                 s.Stop("Native cutscene source could not submit typed UI intent");return RoomGameplayAdmission::Stopped;}
+            s.departing_cutscene_buttons=sampled.buttons;
             s.ProbeSkip(sampled,tick,ctx,base);
             s.submitted=tick;
         }

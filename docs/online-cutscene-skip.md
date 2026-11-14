@@ -97,10 +97,11 @@ It checks native restriction/return, restored movement and jumping, matching
 updates and unchanged health/user files. It also requires zero cinematic
 callbacks despite both carried entry input and a fresh extra-peer hold.
 
-Real mode-6 scene completion, timer-driven skip, nested cinematics, held skip
-input on return to gameplay, cinematic choices, movie mode 1 and cutscenes
-before gameplay admission still need native
-campaign tests and any corresponding fixes. No complete online playthrough
+The [held-button return fix](online-cutscene-held-return.md) has a native
+three-world reproduction and fixed comparison. Real mode-6 scene completion,
+timer-driven skip, nested cinematics, cinematic choices, movie mode 1 and
+cutscenes before gameplay admission still need native campaign tests and any
+corresponding fixes. No complete online playthrough
 claim follows from the isolated fixtures.
 
 The real guard capture `analysis/native-lobby-20261114-124527-59fe6d76`

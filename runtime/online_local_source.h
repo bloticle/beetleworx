@@ -31,8 +31,13 @@ private:
 // Existing unsigned-user producer APIs remain strict and unchanged.
 bool ArmNativeLocalSource(const Room&,unsigned physical_user,const NativeLocalMovementBinding&,PPCContext&,uint8_t*);
 void DisarmNativeLocalSource();
+// Fresh route only, before its first sample. Suppress only digital buttons
+// observed held in the departing input context until each physically releases.
+// Axes, triggers, fresh buttons and the sampler's raw cache remain unchanged.
+// This can remove intent; it cannot mint a Pad or confer callback permission.
+bool FenceNativeLocalSourceButtons(const Room&,uint16_t held_buttons,PPCContext&,uint8_t*);
 // Performs the physical poll itself through the existing once-per-tick,
-// already-remapped sampler. No public API can wrap an arbitrary Pad as proof.
+// already-remapped sampler, then applies its owned context-release fence. No public API can wrap an arbitrary Pad as proof.
 bool SampleNativeLocalSource(const Room&,rex::input::InputSystem&,uint64_t source_tick,PPCContext&,uint8_t*,NativeRoutedPadSample&);
 // For typed producer overloads: validates the sealed sample against the current
 // controls lease, complete native binding and most recent sampled source tick.
