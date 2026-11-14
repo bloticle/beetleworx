@@ -89,3 +89,32 @@ The same final executable also passed the focused online input suite (exit 0,
 shutdown suite (exit 0, `analysis/native-gameover-shutdown-tests.log`). In the
 live run, cooperative guest joins took 75, 8 and 9 ms. These checks complement
 the live capture rather than replacing its gameplay/trajectory requirements.
+
+## Exact passive retail quarantine
+
+A subsequent review found that simply publishing a newer neutral frame left
+retail quarantine comparing against the previous gameplay frame. The owner now
+begins and finishes an explicit passive retail tick during native GameOver.
+It pins the same registry, actor/controller identities, controls generation,
+exact neutral publication and agreed native clock. It advances the retained
+quarantine frame without claiming Movement delivery or Motion consumption.
+Active delivery cannot begin inside that transaction; callback capabilities
+cannot be rearmed there. Missing/stale identity at completion faults it.
+
+The focused canonical online input suite passed with 67 retail Movement checks,
+including the passive-frame cases, in
+`analysis/native-passive-quarantine-tests.log` (exit 0). They reject quarantine
+from neutral publication alone, wrong registry/clock, duplicate admission or
+completion, active delivery inside a passive tick and non-neutral passive
+input. Both original retail Movement callbacks remain suppressed during a
+valid passive frame, and quarantine remains after its completion.
+
+The final candidate SHA-256
+`45D7673094318AEC72B48DD43BA701DC54EA4C7BCE50640E1106895B48D9A396`
+passed the live three-world GameOver verifier again in
+`analysis/native-lobby-20261114-111628-49c94218`: native restriction/death and
+loader timing remained 700/761/763, all three humans regained movement,
+reversal, Jump and landing, and 1,201 post-reload updates matched. All processes
+exited normally and normal files were unchanged. This does not enable general
+story-cutscene return; that separate retained-world failure is reproduced in
+the [input-context investigation](online-input-context-lifecycle.md).

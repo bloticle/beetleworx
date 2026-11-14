@@ -47,7 +47,7 @@ bool Readable(uint32_t p,size_t n,uint8_t* base){return base && p>=4096 && uint6
 struct Stage {RoomMovement command{};bool prepared=false,delivered=false,consumed=false;};
 struct RetailState {
     DWORD thread=0;uint8_t* base=nullptr;uint64_t serial=0,world=0,controls=0,next=0,tick=0;
-    uint16_t mask=0;bool active=false,started=false,faulted=false,camera=false;
+    uint16_t mask=0;bool active=false,passive=false,started=false,faulted=false,camera=false;
     Frame published{};std::array<RetailActorInput,2> actors{};std::array<Stage,2> stages{};
     RetailJumpAdmission jump=nullptr;
     RetailButtonAdmission buttons=nullptr;
@@ -218,7 +218,7 @@ namespace em2::net {
 bool ArmRetailInput(uint64_t world,uint32_t registry,uint64_t controls,uint16_t mask,const std::array<uint64_t,2>& epochs,uint64_t first,PPCContext& ctx,uint8_t* base){
     Environment environment;
     if(state.world){
-        if(!Owner(base) || state.world!=world || state.controls!=controls || state.mask!=mask || state.active || state.started || state.faulted ||
+        if(!Owner(base) || state.world!=world || state.controls!=controls || state.mask!=mask || state.active || state.passive || state.started || state.faulted ||
            controls!=em2::SynchronizedControlsGeneration())return false;
         for(unsigned i=0;i<2;++i)if((mask&(1u<<i)) &&
             (state.actors[i].actor_epoch!=epochs[i] || state.actors[i].registry!=registry || !Current(i,ctx,base)))return false;
@@ -255,9 +255,9 @@ bool RetailInputQuarantineFor(unsigned slot,PPCContext& ctx,uint8_t* base,Retail
     if(!em2::ReadPublishedSynchronizedControls(generation,frame) || generation!=state.controls || frame!=state.published)return false;
     out=state.actors[slot];return true;
 }
-bool SetRetailJumpAdmission(RetailJumpAdmission admission){if(!state.world || state.thread!=GetCurrentThreadId() || state.active || (admission && state.started))return false;state.jump=admission;return true;}
-bool SetRetailButtonAdmission(RetailButtonAdmission admission){if(!state.world || state.thread!=GetCurrentThreadId() || state.active || (admission && state.started))return false;state.buttons=admission;return true;}
-bool SetRetailCameraInputAllowed(bool allowed){if(!state.world || state.thread!=GetCurrentThreadId() || state.active || state.started)return false;state.camera=allowed;return true;}
+bool SetRetailJumpAdmission(RetailJumpAdmission admission){if(!state.world || state.thread!=GetCurrentThreadId() || state.active || state.passive || (admission && state.started))return false;state.jump=admission;return true;}
+bool SetRetailButtonAdmission(RetailButtonAdmission admission){if(!state.world || state.thread!=GetCurrentThreadId() || state.active || state.passive || (admission && state.started))return false;state.buttons=admission;return true;}
+bool SetRetailCameraInputAllowed(bool allowed){if(!state.world || state.thread!=GetCurrentThreadId() || state.active || state.passive || state.started)return false;state.camera=allowed;return true;}
 ActorInputResult ValidateRetailMovement(unsigned slot,const RoomMovement& c,PPCContext& ctx,uint8_t* base){Environment environment;return Validate(slot,c,ctx,base);}
 ActorInputResult ValidateRetailMovementFrame(const RoomFrame& frame,PPCContext& ctx,uint8_t* base){Environment environment;
     if(!Owner(base))return Result::WrongThread;if((frame.players_mask&3)!=state.mask || frame.tick!=state.next || state.active)return Result::InvalidTick;
@@ -272,8 +272,25 @@ ActorInputResult ValidateRetailMovementAction(unsigned slot,const NativeActorAct
     if(PPC_LOAD_U32(action.action)!=PPC_LOAD_U32(0x833DAEB8+slot*12))return Result::UnsupportedAction;
     return ActionFor(state.actors[slot],action,ctx,base)?Result::Applied:Result::InvalidContext;
 }
+bool BeginRetailPassiveTick(uint32_t registry,uint64_t tick,PPCContext& ctx,uint8_t* base){
+    Environment environment;uint64_t agreed=0,generation=0;Frame frame,neutral;neutral.tick=tick;
+    if(!Owner(base) || !state.started || state.faulted || state.active || state.passive ||
+       state.next!=tick || tick==UINT64_MAX || replay_slot!=-1 || update_slot!=-1 ||
+       !Clock(agreed,base) || agreed!=tick || !em2::ReadPublishedSynchronizedControls(generation,frame) ||
+       generation!=state.controls || frame!=neutral)return false;
+    for(unsigned i=0;i<2;++i)if((state.mask&(1u<<i)) &&
+        (state.actors[i].registry!=registry || !CurrentControllerOwner(i,ctx,base)))return false;
+    state.tick=tick;state.published=frame;state.passive=true;state.stages={};return true;
+}
+bool FinishRetailPassiveTick(uint64_t tick,PPCContext& ctx,uint8_t* base){
+    Environment environment;uint64_t agreed=0;
+    if(!Owner(base) || state.faulted || state.active || !state.passive || state.next!=tick || state.tick!=tick ||
+       tick==UINT64_MAX || replay_slot!=-1 || update_slot!=-1 || !Clock(agreed,base) || agreed!=tick || !Published(tick))return false;
+    for(unsigned i=0;i<2;++i)if(state.mask&(1u<<i)){RetailActorInput retained;if(!RetailInputQuarantineFor(i,ctx,base,retained)){state.faulted=true;return false;}}
+    state.passive=false;state.next=tick+1;return true;
+}
 bool BeginRetailBasisTick(uint32_t registry,uint64_t tick,PPCContext& ctx,uint8_t* base){Environment environment;uint64_t agreed=0;
-    if(!Owner(base) || state.faulted || state.active || state.next!=tick || !Clock(agreed,base) || agreed!=tick || !Published(tick))return false;
+    if(!Owner(base) || state.faulted || state.active || state.passive || state.next!=tick || !Clock(agreed,base) || agreed!=tick || !Published(tick))return false;
     for(unsigned i=0;i<2;++i)if((state.mask&(1u<<i)) && (state.actors[i].registry!=registry || !Current(i,ctx,base)))return false;
     uint64_t generation=0;Frame frame;if(!em2::ReadPublishedSynchronizedControls(generation,frame) || generation!=state.controls)return false;
     state.published=frame;state.tick=tick;state.active=true;state.started=true;state.stages={};return true;
@@ -535,6 +552,31 @@ bool TestNativeRetailInput(){
        "completed exact controls frame retains same retail quarantine lease"))return false;
     bool foreign_quarantine=true;std::thread foreign_owner([&]{auto c=context();RetailActorInput out;foreign_quarantine=RetailInputQuarantineFor(0,c,base,out);});foreign_owner.join();
     if(!check(!foreign_quarantine,"foreign thread cannot acquire retained quarantine"))return false;
+    // Passive native updates must retain exact current-frame quarantine while
+    // making no claim that an actor received Movement or consumed Motion.
+    raw={};raw.tick=12;fixture_tick=12;
+    if(!check(em2::PublishSynchronizedControls(raw) && !RetailInputQuarantineFor(0,ctx,base,retained),
+       "new neutral publication alone cannot inherit old-frame quarantine"))return false;
+    if(!check(!BeginRetailPassiveTick(registry+4,12,ctx,base) && BeginRetailPassiveTick(registry,12,ctx,base) &&
+       !BeginRetailPassiveTick(registry,12,ctx,base) && !BeginRetailBasisTick(registry,12,ctx,base),
+       "passive admission pins registry and exact once-only native tick without opening active delivery"))return false;
+    for(unsigned slot=0;slot<2;++slot){
+        auto callback=context();callback.r3.u64=state.actors[slot].listener;callback.r5.u64=0xA000u+slot*512;
+        if(!check(RetailInputQuarantineFor(slot,ctx,base,retained) && SuppressRetailMovement(callback,base) && callback.r3.u32==0,
+           "passive published frame suppresses each original retail Movement callback"))return false;
+    }
+    bool delivered=false;
+    if(!check(!RetailInputTickFor(0,12,ctx,base,retained,delivered) && !delivered &&
+       PrepareRetailMovement(0,targeted.players[0],12,ctx,base)!=Result::Applied && !FinishRetailInputTick(12,ctx,base),
+       "passive phase cannot fabricate active receiver delivery or completion"))return false;
+    fixture_tick=13;
+    if(!check(!FinishRetailPassiveTick(12,ctx,base) && state.passive,"wrong native clock cannot finish or mutate passive transaction"))return false;
+    fixture_tick=12;
+    if(!check(FinishRetailPassiveTick(12,ctx,base) && !FinishRetailPassiveTick(12,ctx,base) &&
+       RetailInputQuarantineFor(0,ctx,base,retained),"passive completion is once-only and keeps current exact-frame quarantine"))return false;
+    raw.tick=13;raw.players[1].buttons=0x1000;fixture_tick=13;
+    if(!check(em2::PublishSynchronizedControls(raw) && !BeginRetailPassiveTick(registry,13,ctx,base),
+       "non-neutral canonical input cannot masquerade as a passive native update"))return false;
     // Independent lifecycle for complete native button delivery. These are
     // private allocated-image callbacks, never injected into live gameplay.
     em2::EndSynchronizedControls(restore.controls);restore.controls=0;

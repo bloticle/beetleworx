@@ -36,6 +36,11 @@ ActorInputResult ValidateRetailMovementFrame(const RoomFrame&,PPCContext&,uint8_
 // before consuming a frame and again before delivering either native callback.
 ActorInputResult ValidateRetailMovementAction(unsigned,const NativeActorAction&,PPCContext&,uint8_t*);
 bool BeginRetailBasisTick(uint32_t registry,uint64_t tick,PPCContext&,uint8_t*);
+// Owner-admitted no-gameplay phase only. Keep exact neutral published controls
+// and the unchanged actors quarantined, without claiming Movement delivery or
+// controller/Motion consumption. Completion still requires a native update.
+bool BeginRetailPassiveTick(uint32_t registry,uint64_t tick,PPCContext&,uint8_t*);
+bool FinishRetailPassiveTick(uint64_t tick,PPCContext&,uint8_t*);
 ActorInputResult PrepareRetailMovement(unsigned,const RoomMovement&,uint64_t tick,PPCContext&,uint8_t*);
 ActorInputResult ReplayRetailMovement(unsigned,const NativeActorAction&,uint64_t tick,PPCContext&,uint8_t*);
 bool RetailInputTickFor(unsigned,uint64_t,PPCContext&,uint8_t*,RetailActorInput&,bool& movement_delivered,RoomMovement* prepared_command=nullptr);

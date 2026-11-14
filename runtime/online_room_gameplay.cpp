@@ -613,6 +613,7 @@ bool NativeRoomGameplay::Deliver(PPCContext& ctx,uint8_t* base){
     if(const auto reason=s.WorldFailure(base))return s.Stop(std::string("Native world changed before input delivery: ")+reason);
     if(s.game_over_entry){
         if(!s.GameOverFrame(*s.consumed,ctx,base))return s.Stop("Native GameOver phase changed before native update");
+        if(!BeginRetailPassiveTick(s.registry,tick,ctx,base))return s.Stop("Could not retain retail quarantine for native GameOver");
         s.delivered=true;return true; // No gameplay callbacks are promised.
     }
     if(!s.Actions(*s.consumed,ctx,base))return s.Stop("Native retail action bindings changed before delivery");
@@ -647,7 +648,9 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
     if(!s.Owner() || s.stopped || !s.pending || !s.delivered || !s.consumed ||
         !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed)return false;
     if(const auto failure=s.WorldFailure(base))return s.Stop(std::string("Native gameplay completion rejected: ")+failure);
-    if(!s.game_over_entry){
+    if(s.game_over_entry){
+        if(!FinishRetailPassiveTick(tick,ctx,base))return s.Stop("Native GameOver passive quarantine completion failed");
+    }else{
         const auto finished=s.consumed->players[0].source==RoomMovementSource::NativeActionV3?
             FinishRetailButtonTick(tick,ctx,base):FinishRetailJumpTick(tick,ctx,base);
         if(finished!=ActorInputResult::Applied)return s.Stop("Native retail button/jump completion rejected (result "+std::to_string(int(finished))+")");

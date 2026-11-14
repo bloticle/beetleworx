@@ -110,3 +110,47 @@ It freezes gameplay callbacks only after the original state-7/all-human-death
 admission and resumes through a fresh native world bootstrap. It does not
 rearm gameplay bindings inside an arbitrary story CutScene or solve that
 remaining context-epoch lifecycle.
+
+
+## Isolated authored restriction reproduction
+
+`analysis/native-lobby-20261114-111157-92bfe95a` uses the canonical candidate
+`A9DA0AEE5EA719CCB698FCB39B909E7585F61F04654896C0687535CA71F1DFA4`.
+Its `CutsceneCycle` fixture schedules original `RestrictCutSceneInput()` at
+agreed tick 700 and `UnrestrictCutSceneInput()` at 1300, through the existing
+protected native Lua scheduler. It requests no damage, manual level load,
+restart or direct context/state write. Only three isolated scripted humans
+are admitted; incompatible fixtures are rejected before dispatch.
+
+All three native worlds successfully executed the original restriction export
+at tick 700 (status 0, VM stack intact). The completed observation still had
+retail health 5/5/5/5 and matching state. The Oswald-source client then stopped
+with `The live local source could not produce original native Movement/Jump`.
+The host stopped when that peer disconnected. All processes exited normally
+and normal user files stayed unchanged. This is a confirmed retained-world
+source-lifecycle failure with living players, distinct from the corrected
+party-death policy and terminal GameOver recovery. The scheduled release and
+fresh post-cutscene control program were not reached; this capture remains
+rejected as playable cutscene evidence.
+
+```powershell
+.\scripts\test-native-room-menu-roster.ps1 -Players 3 -ScriptedInput -CaptureShutdownHang -CutsceneCycle -PipelineCreationThreads 2 -CheckpointReloadTick 700 -CheckpointReloadCount 2 -CheckpointReloadInterval 600 -ObserveSeconds 90 -StartupTimeoutSeconds 480
+```
+
+The switch intentionally uses the existing scheduled-tick/count parameters but
+disables the harness's checkpoint-memory reload flag. The harness now rejects
+unknown named parameters instead of silently starting a different fixture.
+The SDK program keeps actors still initially, then schedules short independent
+movement/reversal and Jump inputs after the original release. Successful
+export calls alone are insufficient; acceptance must include the release,
+new source/receiver admission, actual physical controls, matching worlds,
+normal shutdown and unchanged normal files.
+
+Required return behavior includes a separate input-context epoch, preserving
+actor incarnation while retiring old producer/receiver definitions. Delayed
+old-context commands need an explicit fenced drain, and already-completed
+native updates must remain distinct from new input admission. Owned Jump
+receivers also retain sequence and held state per actor generation: resetting
+only a producer or coordinator would violate that stream. Rearming must cover
+that state as well as retail capabilities and button schemas; it cannot be
+implemented by restoring old definition bytes or bypassing stale checks.
