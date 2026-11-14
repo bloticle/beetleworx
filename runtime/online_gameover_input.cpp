@@ -7,6 +7,7 @@
 #include <cstring>
 #include <limits>
 PPC_EXTERN_FUNC(__imp__sub_82770F00);
+PPC_EXTERN_FUNC(__imp__sub_82770EE8);
 namespace em2::net {
 namespace {
 bool Readable(uint8_t* base,uint32_t p,size_t n){return base && p>=4096 && uint64_t(p)+n<=0x100000000ull && GuestReadBatch::Readable(base+p,n);}
@@ -29,6 +30,19 @@ bool ReadNativeControlState(PPCContext& ctx,uint8_t* base,NativeGameOverState& o
     if(PPC_LOAD_U32(0x833DAD98)!=profile || PPC_LOAD_U32(0x833DA7E4)!=registry || PPC_LOAD_U32(0x833E36CC)!=dead)return false;
     output={registry,dead};mode=ctx.r3.u32;return true;
 }
+bool ReadNativeControlTarget(PPCContext& ctx,uint8_t* base,uint32_t registry,uint32_t mode,uint32_t& profile,uint32_t& object,uint32_t& handler){
+    Preserve preserve(ctx,base);NativeGameOverState state;uint32_t current_mode=0;
+    if(!preserve.stack || !ReadNativeControlState(ctx,base,state,current_mode) || state.registry!=registry || current_mode!=mode)return false;
+    const auto p=PPC_LOAD_U32(0x833DAD98);if(!Readable(base,p,16))return false;
+    const auto table=PPC_LOAD_U32(p+12);if(!Readable(base,table,32))return false;
+    const auto getter=PPC_LOAD_U32(table+28);
+    if((getter&3) || getter<PPC_CODE_BASE || uint64_t(getter)>=uint64_t(PPC_CODE_BASE)+PPC_CODE_SIZE || !PPC_LOOKUP_FUNC(base,getter))return false;
+    ctx.r3.u64=p;ctx.r4.u64=mode;__imp__sub_82770EE8(ctx,base);const auto result=ctx.r3.u32;
+    if(!Readable(base,result,4))return false;const auto target_table=PPC_LOAD_U32(result);if(!Readable(base,target_table,48))return false;
+    const auto method=PPC_LOAD_U32(target_table+44);
+    if(PPC_LOAD_U32(0x833DAD98)!=p || !ReadNativeControlState(ctx,base,state,current_mode) || state.registry!=registry || current_mode!=mode)return false;
+    profile=p;object=result;handler=method;return true;
+}
 bool ReadNativeGameOverState(PPCContext& ctx,uint8_t* base,NativeGameOverState& out){uint32_t mode=0;return ReadNativeControlState(ctx,base,out,mode) && mode==7;}
 RoomMovement NativeGameOverCommand(uint64_t input_epoch){RoomMovement result;result.actor_epoch=1;result.input_epoch=input_epoch;result.source=RoomMovementSource::NativeGameOverV4;return result;}
 bool ValidNativeGameOverFrame(const RoomFrame& frame,uint16_t roster,uint64_t entry,uint8_t delay,
@@ -37,12 +51,20 @@ bool ValidNativeGameOverFrame(const RoomFrame& frame,uint16_t roster,uint64_t en
     const auto end=entry+delay;
     for(unsigned i=0;i<kOnlineRoomCapacity;++i){const auto& c=frame.players[i];
         if(!(roster&(1u<<i))){if(c!=RoomMovement{})return false;continue;}
-        if(c.actor_epoch!=1 || c.input_epoch!=input_epoch || !ValidRoomMovement(c))return false;
+        if(c.actor_epoch!=1 || !ValidRoomMovement(c))return false;
+        // Death immediately after cutscene return can still have delayed UI
+        // commands from the previous even epoch in flight. They drain without
+        // callbacks only inside the terminal entry's bounded old prefix.
+        if(c.input_epoch!=input_epoch){
+            if(frame.tick<=end && input_epoch>=3 && (input_epoch&1) && c.input_epoch==input_epoch-1 &&
+               (c.source==RoomMovementSource::NativeCutsceneV5 || c.source==RoomMovementSource::NativeCutsceneUiV6))continue;
+            return false;
+        }
         if(frame.tick>end){if(c!=NativeGameOverCommand(input_epoch))return false;continue;}
         if(c.source==RoomMovementSource::NativeGameOverV4)return false;
         // Explicit startup-neutral frames have no interpreted actions.
         RoomMovement neutral;neutral.actor_epoch=1;neutral.input_epoch=input_epoch;neutral.source=RoomMovementSource::NativeActionV1;
-        if(c==neutral || c.source==RoomMovementSource::NativeCutsceneV5)continue;
+        if(c==neutral || c.source==RoomMovementSource::NativeCutsceneV5 || c.source==RoomMovementSource::NativeCutsceneUiV6)continue;
         if(buttons){
             if(c.source!=RoomMovementSource::NativeActionV3 || schemas[i]==std::array<uint8_t,32>{} ||
                c.button_actions.schema!=schemas[i] || frame.tick<delay || c.button_actions.source_tick!=frame.tick-delay)return false;
@@ -58,7 +80,7 @@ bool AdvanceRoomTransportInput(RoomTransportInputStream& state,const RoomMovemen
         next.terminal=true;state=next;return true;
     }
     if(next.terminal)return false;
-    if(command.source==RoomMovementSource::NativeCutsceneV5){
+    if(command.source==RoomMovementSource::NativeCutsceneV5 || command.source==RoomMovementSource::NativeCutsceneUiV6){
         if(next.suspended){if(command.input_epoch!=next.input_epoch)return false;}
         else{if(next.input_epoch==UINT64_MAX || command.input_epoch!=next.input_epoch+1)return false;
             next.suspended=true;next.input_epoch=command.input_epoch;}
@@ -105,6 +127,15 @@ bool TestNativeGameOverInput(){
         if(!check(!ValidNativeGameOverFrame(bad,7,700,2,schemas,true),"prefix schema/source tick/roster/actor identity remain checked"))return false;
     }
     if(!check(!ValidNativeGameOverFrame(frame,7,UINT64_MAX,2,schemas,true),"terminal timeline overflow rejected"))return false;
+    frame.tick=701;
+    for(unsigned i=0;i<3;++i){auto& c=frame.players[i];c={};c.actor_epoch=1;c.input_epoch=3;c.source=RoomMovementSource::NativeActionV3;
+        c.jump_button_mask=0x1000;c.button_actions.schema=schemas[i];c.button_actions.source_tick=699;}
+    frame.players[2]={};frame.players[2].actor_epoch=1;frame.players[2].input_epoch=2;frame.players[2].source=RoomMovementSource::NativeCutsceneUiV6;frame.players[2].pad.buttons=0x1000;
+    if(!check(ValidNativeGameOverFrame(frame,7,700,2,schemas,true,3),"death after cutscene return drains queued UI intent from previous input epoch without callbacks"))return false;
+    frame.tick=703;
+    if(!check(!ValidNativeGameOverFrame(frame,7,700,2,schemas,true,3),"previous cutscene epoch cannot outlive terminal delayed prefix"))return false;
+    frame.tick=701;frame.players[2].input_epoch=4;
+    if(!check(!ValidNativeGameOverFrame(frame,7,700,2,schemas,true,3),"future UI epoch cannot enter terminal prefix"))return false;
     REXLOG_INFO("Native game-over input passed {} typed intent, delayed-prefix, schema, roster and timeline checks; native game-over and reload require live validation",checks);return true;
 }
 }

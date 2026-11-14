@@ -37,6 +37,7 @@ REXCVAR_DEFINE_BOOL(em2_probe_native_policy_cycle,false,"Debug","Exact private f
 REXCVAR_DECLARE(bool,em2_private_profile);
 REXCVAR_DECLARE(bool,em2_native_lobby_qa_cutscene_cycle);
 REXCVAR_DEFINE_BOOL(em2_probe_cutscene_boundary_move,false,"Debug","Private cutscene QA only: hold SDK movement over the authored restriction boundary to test native stop behavior");
+REXCVAR_DEFINE_BOOL(em2_probe_cutscene_skip_input,false,"Debug","Private cutscene QA only: fresh skip hold from extra peer 3 after the carried entry press releases");
 REXCVAR_DECLARE(bool,em2_room_native_buttons);
 REXCVAR_DECLARE(bool,em2_probe_online_chat);
 REXCVAR_DECLARE(bool,em2_probe_room_recovery_controller);
@@ -380,6 +381,7 @@ std::unique_ptr<rex::input::InputSystem> MakePrivateRoomInput(Room& room){
                 const bool boundary_move=REXCVAR_GET(em2_probe_cutscene_boundary_move);
                 if(elapsed>=200 && elapsed<204){state->gamepad.buttons=0x1000;phase="jump before cutscene";}
                 if(elapsed>=660 && elapsed<680){state->gamepad.buttons=0x1000;phase="held jump across cutscene";}
+                if(REXCVAR_GET(em2_probe_cutscene_skip_input) && room_.local_peer()==3 && elapsed>=800 && elapsed<820){state->gamepad.buttons=0x1000;phase="fresh cutscene skip hold";}
                 if(boundary_move && elapsed>=657 && elapsed<680){state->gamepad.thumb_ly=16000;phase=elapsed>=660?"move and jump across cutscene":"movement across cutscene";}
                 if(elapsed>=1400 && elapsed<1406){state->gamepad.thumb_ly=16000;phase="forward after cutscene";}
                 if(elapsed>=1440 && elapsed<1446){state->gamepad.thumb_ly=-16000;phase="backward after cutscene";}

@@ -26,7 +26,7 @@ namespace {
 using Clock=std::chrono::steady_clock;
 using Bytes=std::vector<uint8_t>;
 constexpr size_t Window=64,MaxPacket=8192,MaxQueued=256*1024;
-constexpr uint8_t WireVersion=8;
+constexpr uint8_t WireVersion=9;
 constexpr auto Timeout=std::chrono::seconds(15);
 constexpr auto StartupTimeout=std::chrono::seconds(180);
 constexpr auto TransferTimeout=std::chrono::seconds(120);
@@ -1331,10 +1331,10 @@ bool TestOnlineRoom(){
         for(unsigned i=1;i<16;++i){RoomFrame actual;check(rooms[i]->TakeFrame(actual) && actual==expected,"maximum native button/Jump payload remains bit-exact across all sixteen peers");}
         check(complete_fixture_tick(tick),"full receive window drains only through per-tick completion barriers");}
     const auto suspend_tick=111+Window;
-    for(auto& room:rooms)check(room->SubmitLocal(suspend_tick,NativeCutsceneCommand(2)),"sixteen TCP peers submit explicit suspended input epoch");
+    for(unsigned i=0;i<rooms.size();++i)check(rooms[i]->SubmitLocal(suspend_tick,NativeCutsceneUiCommand(2,bool(i&1))),"sixteen TCP peers submit explicit suspended input epoch");
     check(pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& r){RoomFrame f;return r->PeekFrame(f);});}),"suspended epoch reaches every peer");
     RoomFrame suspend_frame;suspend_frame.tick=suspend_tick;suspend_frame.players_mask=0xFFFF;
-    for(auto& c:suspend_frame.players)c=NativeCutsceneCommand(2);
+    for(unsigned i=0;i<16;++i)suspend_frame.players[i]=NativeCutsceneUiCommand(2,bool(i&1));
     for(auto& room:rooms){RoomFrame actual;check(room->TakeFrame(actual) && actual==suspend_frame,"suspension keeps actor incarnation and exact independent input epoch across all peers");}
     check(complete_fixture_tick(suspend_tick),"suspension retains real world-proof barrier in transport fixture");
     const auto resume_tick=suspend_tick+1;RoomFrame resume_frame;resume_frame.tick=resume_tick;resume_frame.players_mask=0xFFFF;

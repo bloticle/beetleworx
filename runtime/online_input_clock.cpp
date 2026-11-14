@@ -1,4 +1,5 @@
 #include "online_input_clock.h"
+#include "online_cutscene_skip.h"
 #include "online.h"
 #include "controls.h"
 #include "guest_read_batch.h"
@@ -196,7 +197,10 @@ bool RunAgreedNativeInputClockHelper(PPCContext& ctx,uint8_t* base,PPCFunc* orig
     const bool button=original==__imp__sub_826572B8 && (caller==0x830A8C90 || caller==0x827C06F8);
     const bool start=original==__imp__sub_831C14E0 && caller==0x827C62BC;
     const bool elapsed=original==__imp__sub_831C1558 && (caller==0x827C6054 || caller==0x827C628C);
-    if(!button && !start && !elapsed)return false;
+    const bool cutscene=(original==__imp__sub_831C14E0 || original==__imp__sub_831C1558) &&
+        ((original==__imp__sub_831C14E0 && caller==0x82B211B8) || (original==__imp__sub_831C1558 && caller==0x82B22628)) &&
+        NativeCutsceneSkipTimerOwned(ctx.r3.u32,caller,ctx,base);
+    if(!button && !start && !elapsed && !cutscene)return false;
     uint64_t generation=0;Frame frame;
     if(!em2::ReadPublishedSynchronizedControls(generation,frame) || !generation || !Readable(button?ctx.r31.u32:ctx.r3.u32,button?20:8,base))return false;
     return RunLiveClockHelper(ctx,base,original,frame.tick);

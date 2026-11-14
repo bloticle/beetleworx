@@ -99,7 +99,7 @@ OwnedFrameResult OwnedMovementFrames::Preflight(const RoomFrame& frame,PPCContex
         if(!(roster_&(1u<<i))){if(movement!=RoomMovement{})return OwnedFrameResult::InvalidRoster;continue;}
         if(movement.actor_epoch!=epochs_[i] || movement.input_epoch!=input_epoch_)return OwnedFrameResult::EpochMismatch;
         if(!ValidRoomMovement(movement))return OwnedFrameResult::InvalidMovement;
-        if(movement.source==RoomMovementSource::NativeGameOverV4 || movement.source==RoomMovementSource::NativeCutsceneV5)return OwnedFrameResult::UnsupportedIntent;
+        if(movement.source==RoomMovementSource::NativeGameOverV4 || movement.source==RoomMovementSource::NativeCutsceneV5 || movement.source==RoomMovementSource::NativeCutsceneUiV6)return OwnedFrameResult::UnsupportedIntent;
         if(retail_&(1u<<i)){
             // Interpreted edges require a live native retail receiver, not a
             // boolean promise that some other code will consume them later.

@@ -13,7 +13,7 @@ inline constexpr std::size_t kOnlineRoomCapacity=16;
 // movement values until the original native action interpreter has run.
 // NativeActionV1 identifies post-interpreter x/y, including explicit neutral;
 // neither transport nor the actor coordinator may infer it from Pad values.
-enum class RoomMovementSource : uint8_t { UnconvertedPad=0, NativeActionV1=1, NativeActionV2=2, NativeActionV3=3, NativeGameOverV4=4, NativeCutsceneV5=5 };
+enum class RoomMovementSource : uint8_t { UnconvertedPad=0, NativeActionV1=1, NativeActionV2=2, NativeActionV3=3, NativeGameOverV4=4, NativeCutsceneV5=5, NativeCutsceneUiV6=6 };
 // Digital interpreter outputs are booleans, ordered default context then active
 // context and original ordinal. No guest address or guessed semantic ID travels.
 struct RoomButtonActions {
@@ -65,6 +65,13 @@ inline bool ValidRoomMovement(const RoomMovement& value){
     // Terminal no-gameplay phase: native state admission belongs to the world
     // owner, not the transport. No input or stale schema may hide in this type.
     if(!value.input_epoch)return false;
+    // V6 carries only synchronized cutscene A intent in pad.buttons. It is
+    // never published as a character Pad and cannot enter a Jump stream.
+    if(value.source==RoomMovementSource::NativeCutsceneUiV6){
+        RoomMovement expected;expected.actor_epoch=value.actor_epoch;expected.input_epoch=value.input_epoch;expected.source=value.source;
+        expected.pad.buttons=value.pad.buttons;
+        return value.actor_epoch!=0 && !(value.input_epoch&1) && (value.pad.buttons==0 || value.pad.buttons==0x1000) && value==expected;
+    }
     if(value.source==RoomMovementSource::NativeGameOverV4 || value.source==RoomMovementSource::NativeCutsceneV5){
         RoomMovement expected;expected.actor_epoch=value.actor_epoch;expected.input_epoch=value.input_epoch;expected.source=value.source;
         return value.actor_epoch!=0 && value==expected;
@@ -103,7 +110,7 @@ struct RoomJumpStream {
     bool operator==(const RoomJumpStream&)const=default;
 };
 inline bool AdvanceRoomJumpStream(RoomJumpStream& state,const RoomMovement& value){
-    if(value.source==RoomMovementSource::NativeGameOverV4 || value.source==RoomMovementSource::NativeCutsceneV5 || !ValidRoomMovement(value))return false;
+    if(value.source==RoomMovementSource::NativeGameOverV4 || value.source==RoomMovementSource::NativeCutsceneV5 || value.source==RoomMovementSource::NativeCutsceneUiV6 || !ValidRoomMovement(value))return false;
     if(state.input_epoch && state.input_epoch!=value.input_epoch)return false;
     if(value.source==RoomMovementSource::NativeActionV1)return !state.native;
     auto next=state;next.input_epoch=value.input_epoch;

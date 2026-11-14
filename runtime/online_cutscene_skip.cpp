@@ -1,6 +1,8 @@
 #include "online_cutscene_skip.h"
 #include "online_cutscene_input.h"
 #include "online_input_clock.h"
+#include "controls.h"
+#include "simulation.h"
 #include "guest_read_batch.h"
 #include "ppc_context.h"
 #include <windows.h>
@@ -13,6 +15,11 @@
 #include <fstream>
 #include <thread>
 #include <rex/logging.h>
+#include <rex/cvar.h>
+REXCVAR_DECLARE(bool,em2_private_profile);
+PPC_EXTERN_FUNC(__imp__sub_82770EE8);
+PPC_EXTERN_FUNC(__imp__sub_82770F58);
+PPC_EXTERN_FUNC(__imp__sub_82B210B0);
 PPC_EXTERN_FUNC(__imp__sub_830A8200);
 PPC_EXTERN_FUNC(__imp__sub_830ACA80);
 PPC_EXTERN_FUNC(__imp__sub_827C3278);
@@ -33,6 +40,13 @@ void Normalize(Record& a){
 constexpr std::array<const char*,3> Names{"DisplaySkipMovieButton","MovieSkipStart","MovieSkipStop"};
 constexpr std::array<uint32_t,3> Kinds{2,1,3};
 void FixtureControlMode(PPCContext& ctx,uint8_t*){ctx.r3.u64=3;}
+void FixtureSceneMode(PPCContext& ctx,uint8_t*){ctx.r3.u64=6;}
+void FixtureSceneObject(PPCContext& ctx,uint8_t*){ctx.r3.u64=0x5000;}
+thread_local uint8_t* fixture_base=nullptr;
+thread_local uint64_t fixture_tick=0;
+thread_local unsigned fixture_callbacks=0;
+bool AgreedTick(uint64_t& tick,uint8_t* base){if(fixture_base && fixture_base==base){tick=fixture_tick;return true;}return em2::CurrentAgreedSimulationTick(tick);}
+void FixtureSceneCallback(PPCContext& ctx,uint8_t* base){++fixture_callbacks;__imp__sub_82B210B0(ctx,base);}
 struct Binding {
     uint32_t registry=0,manager=0,input=0,device=0,buttons=0,threshold=0;unsigned user=0;
     std::array<uint32_t,3> actions{};std::array<Record,3> shapes{};
@@ -120,6 +134,104 @@ bool NativeCutsceneSkipSource::Produce(const Pad& pad,unsigned user,uint64_t epo
     out=s.committed.result;return true;
 }
 
+namespace {
+struct BorrowContext {
+    PPCContext& ctx;PPCContext saved;Environment env;uint8_t* stack=nullptr;std::array<uint8_t,8192> bytes{};
+    BorrowContext(PPCContext& c,uint8_t* base):ctx(c),saved(c){const auto top=c.r1.u32&~15u;
+        if(top>=12288 && Readable(base,top-8192,8192)){stack=base+top-8192;std::memcpy(bytes.data(),stack,8192);ctx.r1.u64=top-4096;}}
+    ~BorrowContext(){if(stack)std::memcpy(stack,bytes.data(),8192);ctx=saved;}
+};
+struct Target {
+    uint32_t registry=0,profile=0,object=0,table=0,event=0;std::array<uint32_t,3> actions{};
+    bool operator==(const Target&)const=default;
+};
+bool ReadTarget(uint32_t registry,PPCContext& ctx,uint8_t* base,Target& out){
+    BorrowContext preserve(ctx,base);if(!preserve.stack)return false;
+    NativeGameOverState state;uint32_t mode=0;NativeCutsceneUiSnapshot ui;
+    if(!ReadNativeControlState(ctx,base,state,mode) || mode!=6 || state.registry!=registry || !InspectNativeCutsceneUi(ctx,base,registry,ui))return false;
+    Target target;target.registry=registry;target.profile=PPC_LOAD_U32(0x833DAD98);
+    if(!Readable(base,target.profile,16))return false;
+    const auto profile_table=PPC_LOAD_U32(target.profile+12);if(!Readable(base,profile_table,32))return false;
+    const auto getter=PPC_LOAD_U32(profile_table+28);
+    if((getter&3) || getter<PPC_CODE_BASE || uint64_t(getter)>=uint64_t(PPC_CODE_BASE)+PPC_CODE_SIZE || !PPC_LOOKUP_FUNC(base,getter))return false;
+    ctx.r3.u64=target.profile;ctx.r4.u64=mode;__imp__sub_82770EE8(ctx,base);target.object=ctx.r3.u32;
+    if(!Readable(base,target.object,96))return false;target.table=PPC_LOAD_U32(target.object);
+    // Original authored mode-6 CutScene handler, not restriction/Movie/Pause/GameOver or a retail
+    // character listener. Keep its own unskippable guard and director state.
+    if(!Readable(base,target.table,48))return false;
+    if(REXCVAR_GET(em2_private_profile)){
+        static thread_local uint32_t observed=0;
+        if(observed!=target.object){observed=target.object;REXLOG_INFO("Private native cutscene UI target observed: object {:08X} table {:08X} handler {:08X}",target.object,target.table,PPC_LOAD_U32(target.table+44));}
+    }
+    if(PPC_LOAD_U32(target.table+44)!=0x82B210B0)return false;
+    unsigned contexts=0;
+    for(const auto& c:ui.contexts)if(c.name=="CutScene"){
+        ++contexts;target.event=c.event;unsigned listeners=0;
+        for(const auto& listener:c.listeners)if(listener[0]==target.profile){if(listener[2]!=0x82770F58)return false;++listeners;}
+        if(listeners!=1)return false;
+        for(const auto& a:c.actions)for(unsigned i=0;i<3;++i)if(a.name==Names[i]){
+            if(target.actions[i] || a.kind!=Kinds[i] || a.condition || a.curve || a.bindings.size()!=1 ||
+               a.bindings[0][0]!=7 || a.bindings[0][1]!=0x01400009)return false;
+            target.actions[i]=a.action;
+        }
+    }
+    if(contexts!=1 || std::any_of(target.actions.begin(),target.actions.end(),[](auto a){return !a;}))return false;
+    out=target;return true;
+}
+struct TimerLease {void* owner=nullptr;DWORD thread=0;uint8_t* base=nullptr;uint64_t controls=0;Target target;};
+thread_local TimerLease timer_lease;
+}
+struct NativeCutsceneSkipReceiver::Impl {
+    NativeCutsceneSkipSource source;Target target;DWORD thread=0;uint8_t* base=nullptr;
+    uint64_t epoch=0,next=0,controls=0;bool armed=false,faulted=false;
+};
+NativeCutsceneSkipReceiver::NativeCutsceneSkipReceiver():impl_(std::make_unique<Impl>()){}
+NativeCutsceneSkipReceiver::~NativeCutsceneSkipReceiver(){if(timer_lease.owner==impl_.get())timer_lease={};}
+bool NativeCutsceneSkipTargetAvailable(uint32_t registry,PPCContext& ctx,uint8_t* base){Target target;return ReadTarget(registry,ctx,base,target);}
+bool NativeCutsceneSkipTimerOwned(uint32_t timer,uint32_t caller,PPCContext& ctx,uint8_t* base){
+    Environment env;const auto lease=timer_lease;
+    if(!lease.owner || lease.thread!=GetCurrentThreadId() || lease.base!=base ||
+       lease.controls!=em2::SynchronizedControlsGeneration() || timer!=lease.target.object+88 ||
+       (caller!=0x82B211B8 && caller!=0x82B22628))return false;
+    Target current;if(!ReadTarget(lease.target.registry,ctx,base,current) || current!=lease.target)return false;
+    // The start stamp is a simulation mutation. Elapsed reads can also serve
+    // the retained prompt between native updates using the last published tick.
+    uint64_t tick=0;return caller==0x82B22628 || em2::CurrentAgreedSimulationTick(tick);
+}
+bool NativeCutsceneSkipReceiver::Consume(const RoomFrame& frame,uint32_t registry,uint64_t epoch,PPCContext& ctx,uint8_t* base){
+    Environment env;auto& s=*impl_;uint64_t tick=0,generation=0;Frame published,neutral;neutral.tick=frame.tick;
+    if(s.faulted || !AgreedTick(tick,base) || tick!=frame.tick || frame.tick==UINT64_MAX ||
+       !NativeCutsceneReturnPrefix(frame,frame.players_mask,epoch) ||
+       !em2::ReadPublishedSynchronizedControls(generation,published) || !generation || published!=neutral)return false;
+    Target target;if(!ReadTarget(registry,ctx,base,target))return false;
+    if(!s.armed){
+        if(timer_lease.owner || !s.source.Arm(registry,0,epoch,tick,ctx,base))return false;
+        s.target=target;s.thread=GetCurrentThreadId();s.base=base;s.epoch=epoch;s.next=tick;s.controls=generation;s.armed=true;
+        timer_lease={impl_.get(),s.thread,base,generation,target};
+        REXLOG_INFO("Native Room cutscene UI receiver armed: tick {} epoch {} handler 82B210B0; original authored guard retained",tick,epoch);
+    }
+    if(s.thread!=GetCurrentThreadId() || s.base!=base || s.epoch!=epoch || s.next!=tick || s.controls!=generation || s.target!=target)return false;
+    bool all_ui=true;Pad intent;
+    for(unsigned i=0;i<kOnlineRoomCapacity;++i)if(frame.players_mask&(1u<<i)){
+        const auto& command=frame.players[i];all_ui=all_ui && command.source==RoomMovementSource::NativeCutsceneUiV6;
+        intent.buttons|=command.pad.buttons;
+    }
+    // UI availability is part of each delayed command. Wait for every human's
+    // source to certify the same UI phase before any skip decision can fire.
+    if(!all_ui)intent={};
+    NativeCutsceneSkipSample sample;
+    if(!s.source.Produce(intent,0,epoch,tick,ctx,base,sample))return false;
+    s.faulted=true; // Partial callbacks may never be retried as a fresh frame.
+    for(unsigned i=0;i<3;++i)if(sample.dispatch[i]){
+        Target current;if(!ReadTarget(registry,ctx,base,current) || current!=target)return false;
+        BorrowContext preserve(ctx,base);if(!preserve.stack)return false;
+        ctx.r3.u64=target.profile;ctx.r4.u64=target.event;ctx.r5.u64=target.actions[i];ctx.f1.f64=0;ctx.f2.f64=0;
+        __imp__sub_82770F58(ctx,base);
+        REXLOG_INFO("Native Room cutscene UI callback delivered: tick {} epoch {} action '{}' native result {} timer {}; canonical UI only, no character input",tick,epoch,Names[i],ctx.r3.u32,PPC_LOAD_U64(target.object+88));
+    }
+    s.next=tick+1;s.faulted=false;return true;
+}
+
 bool TestNativeCutsceneSkipMath(){
     Environment environment;
     auto* base=static_cast<uint8_t*>(VirtualAlloc(nullptr,0x100000000ull,MEM_RESERVE,PAGE_NOACCESS));
@@ -188,6 +300,39 @@ bool TestNativeCutsceneSkipMath(){
     if(!check(stale && source.Produce({},2,2,103,ctx,base,sample),"stale definition rejects transactionally before source time commits"))return false;
     pad.buttons=0xFFFF;pad.left_trigger=255;pad.left_x=20000;
     if(!check(source.Produce(pad,2,2,104,ctx,base,sample) && sample.dispatch==std::array<bool,3>{true,false,false},"other buttons and axes cannot introduce pause, quick-exit, join or gameplay decisions"))return false;
-    REXLOG_INFO("Native cutscene skip math passed {} original-interpreter and source-lifecycle checks across four wildcard slots; no UI callback or online skip claim",checks);return true;
+    // Native receiver fixture uses original mode-6 handler with its authored
+    // unskippable guard. Only the state getter and agreed clock are injected.
+    // Count calls while forwarding every one to original 82B210B0.
+    if(!map(uint32_t(PPC_CODE_BASE),FixtureSceneMode) || !map(uint32_t(PPC_CODE_BASE)+4,FixtureSceneObject) ||
+       !map(0x82B210B0,FixtureSceneCallback))return false;
+    PPC_STORE_U32(table+28,uint32_t(PPC_CODE_BASE)+4);PPC_STORE_U32(profile,0x8207B4B4);
+    PPC_STORE_U32(0x5000,0x8215C7C8);PPC_STORE_U8(0x5000+56,1);
+    PPC_STORE_U32(event+4,list+256);PPC_STORE_U32(event+8,1);PPC_STORE_U32(list+256,profile);PPC_STORE_U32(input+72,device);
+    if(!check(NativeCutsceneSkipTargetAvailable(registry,ctx,base),"original mode-6 state and exact profile subscription admit the scene handler"))return false;
+    if(!check(em2::BeginSynchronizedControls(200),"receiver fixture owns a new controls generation"))return false;
+    struct FixtureScope {uint64_t controls=em2::SynchronizedControlsGeneration();~FixtureScope(){fixture_base=nullptr;em2::EndSynchronizedControls(controls);}}fixture_scope;
+    fixture_base=base;fixture_callbacks=0;
+    NativeCutsceneSkipReceiver receiver;RoomFrame ui;ui.players_mask=7;
+    for(unsigned i=0;i<3;++i)ui.players[i]=NativeCutsceneUiCommand(2,false);
+    for(uint64_t tick=200;tick<224;++tick){
+        fixture_tick=tick;ui.tick=tick;ui.players[2]=NativeCutsceneUiCommand(2,tick<220);
+        ui.players[0]=tick==200?NativeCutsceneCommand(2):NativeCutsceneUiCommand(2,false);Frame canonical;canonical.tick=tick;
+        if(!em2::PublishSynchronizedControls(canonical))return false;
+        if(!check(receiver.Consume(ui,registry,2,ctx,base),"extra-peer UI reaches original mode-6 handler under neutral character controls"))return false;
+        if(tick==200 && !check(fixture_callbacks==0,"one peer awaiting UI context prevents all skip callbacks despite another peer holding A"))return false;
+        const auto calls=fixture_callbacks;
+        if(!check(!receiver.Consume(ui,registry,2,ctx,base) && fixture_callbacks==calls,"duplicate native delivery cannot repeat callbacks"))return false;
+    }
+    if(!check(fixture_callbacks==3 && PPC_LOAD_U8(0x5000+80)==0 && PPC_LOAD_U64(0x5000+88)==0,
+        "prompt/hold/release each reach original handler once and authored unskippable guard leaves skip state and timer untouched"))return false;
+    fixture_tick=224;ui.tick=224;Frame wrong;wrong.tick=224;wrong.players[0].buttons=0x1000;
+    if(!check(em2::PublishSynchronizedControls(wrong) && !receiver.Consume(ui,registry,2,ctx,base) && fixture_callbacks==3,
+        "a UI receiver cannot publish or consume character button input"))return false;
+    Frame neutral;neutral.tick=225;fixture_tick=225;ui.tick=225;
+    if(!em2::PublishSynchronizedControls(neutral))return false;
+    PPC_STORE_U32(table+20,uint32_t(PPC_CODE_BASE));if(!map(uint32_t(PPC_CODE_BASE),FixtureControlMode))return false;
+    if(!check(!NativeCutsceneSkipTargetAvailable(registry,ctx,base) && !receiver.Consume(ui,registry,2,ctx,base) && fixture_callbacks==3,
+        "restriction mode3 cannot masquerade as the authored cinematic handler"))return false;
+    REXLOG_INFO("Native cutscene skip math passed {} original-interpreter, source-lifecycle and guarded callback checks across four wildcard slots; injected state/clock, no real story skip claim",checks);return true;
 }
 }

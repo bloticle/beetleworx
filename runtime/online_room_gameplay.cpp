@@ -148,6 +148,10 @@ struct NativeRoomGameplay::Impl {
     std::optional<uint64_t> return_wait_start;
     std::optional<uint64_t> cutscene_entry,cutscene_resume;
     std::unique_ptr<NativeCutsceneSkipSource> private_skip_source;
+    NativeCutsceneUiGate skip_gate;
+    bool skip_target_available=false;
+    std::optional<uint64_t> skip_target_entry;
+    std::unique_ptr<NativeCutsceneSkipReceiver> skip_receiver;
     bool private_skip_armed=false,private_skip_failed=false;
     void ProbeSkip(const Pad& pad,uint64_t tick,PPCContext& ctx,uint8_t* base){
         if(!REXCVAR_GET(em2_private_profile) || return_pending || private_skip_failed)return;
@@ -558,6 +562,7 @@ bool NativeRoomGameplay::RearmInputContext(uint64_t tick,PPCContext& ctx,uint8_t
     if(s.native_buttons)for(const auto& actor:s.actors->actors())
         if(!frames->BindButtons(actor.room_peer,s.button_definitions[actor.actor.action_user],ctx,base))return false;
     finished=true;s.actor_frames=std::move(frames);s.input_epoch=next_epoch;s.cutscene_resume=*s.native_completed;s.cutscene_entry.reset();s.return_pending=false;s.return_wait_start.reset();
+    s.skip_receiver.reset();
     REXLOG_INFO("Native Room cutscene bindings re-admitted: source tick {}, first delivery {}, input epoch {}; actor/world/controls incarnation retained, fresh producer/receiver leases",tick,first,next_epoch);
     return true;
 }
@@ -603,16 +608,16 @@ RoomGameplayAdmission NativeRoomGameplay::Prepare(PPCContext& ctx,uint8_t* base,
     }
     NativeGameOverState control;uint32_t mode=0;
     if(!ReadNativeControlState(ctx,base,control,mode) || control.registry!=s.registry){s.Stop("Native input control-state query lost world ownership");return RoomGameplayAdmission::Stopped;}
-    if(mode==3 && !s.cutscene_entry){
+    if((mode==3 || mode==6) && !s.cutscene_entry){
         if(!s.started || !s.native_completed || !s.normal_control_mode || s.input_epoch==UINT64_MAX ||
            !(s.input_epoch&1) || !ReadNativeCutsceneContext(ctx,base,s.registry)){
             s.Stop("Native cutscene entry lacks a completed owned input epoch");return RoomGameplayAdmission::Stopped;}
         for(const auto& player:s.roster.players)s.cutscene_schemas[player.peer-1]=s.button_schemas[player.character==LobbyCharacter::Mickey?0:1];
         s.cutscene_entry=*s.native_completed;s.cutscene_resume.reset();++s.input_epoch;
-        s.private_skip_source.reset();s.private_skip_armed=false;s.private_skip_failed=false;
-        REXLOG_INFO("Native Room cutscene input suspended: entry tick {}, input epoch {}; original state 3 and native cutscene restriction, actor incarnations unchanged",*s.cutscene_entry,s.input_epoch);
+        s.private_skip_source.reset();s.private_skip_armed=false;s.private_skip_failed=false;s.skip_gate={};s.skip_receiver.reset();s.skip_target_available=false;s.skip_target_entry.reset();
+        REXLOG_INFO("Native Room cutscene input suspended: entry tick {}, input epoch {}; original state {} and native cutscene ownership, actor incarnations unchanged",*s.cutscene_entry,s.input_epoch,mode);
     }
-    if(s.cutscene_entry && mode!=3){
+    if(s.cutscene_entry && mode!=3 && mode!=6){
         if(!s.normal_control_mode || mode!=*s.normal_control_mode){
             s.Stop("Native cutscene returned to an unowned control mode");return RoomGameplayAdmission::Stopped;}
         std::string selected;
@@ -628,14 +633,23 @@ RoomGameplayAdmission NativeRoomGameplay::Prepare(PPCContext& ctx,uint8_t* base,
         if((!ReadNativeCutsceneContext(ctx,base,s.registry) && !s.return_pending) || !RefreshOwnedActorTaskPermissions(ctx,base)){
             s.Stop("Native cutscene context or authored permissions changed before suspension frame");return RoomGameplayAdmission::Stopped;}
         TracePrivateNativeCutsceneUi(s.input_epoch,ctx,base,s.registry);
+        const bool target_available=!s.return_pending && mode==6 && NativeCutsceneSkipTargetAvailable(s.registry,ctx,base);
+        if(target_available!=s.skip_target_available){
+            s.skip_receiver.reset();s.skip_gate={};s.skip_target_available=target_available;
+            s.skip_target_entry=target_available?s.native_completed:std::nullopt;
+        }
         if(s.prepared){output=*s.prepared;return RoomGameplayAdmission::Ready;}
         const auto tick=s.room->next_tick();
-        if(!s.submitted){Pad discarded;
+        if(!s.submitted){Pad sampled;
             if(tick>UINT64_MAX-s.identity.input_delay || s.room->next_submit_tick()!=tick+s.identity.input_delay ||
-               !em2::SampleLocalControls(*s.input,s.physical,tick,discarded) ||
-               !s.room->SubmitLocal(s.room->next_submit_tick(),NativeCutsceneCommand(s.input_epoch))){
-                s.Stop("Native cutscene source could not poll its owned device and submit no-action epoch");return RoomGameplayAdmission::Stopped;}
-            s.ProbeSkip(discarded,tick,ctx,base);
+               !em2::SampleLocalControls(*s.input,s.physical,tick,sampled)){
+                s.Stop("Native cutscene source could not poll its owned device");return RoomGameplayAdmission::Stopped;}
+            const bool down=s.skip_gate.Sample(bool(sampled.buttons&0x1000));
+            const bool available=s.skip_target_available;
+            const auto command=available?NativeCutsceneUiCommand(s.input_epoch,down):NativeCutsceneCommand(s.input_epoch);
+            if(!s.room->SubmitLocal(s.room->next_submit_tick(),command)){
+                s.Stop("Native cutscene source could not submit typed UI intent");return RoomGameplayAdmission::Stopped;}
+            s.ProbeSkip(sampled,tick,ctx,base);
             s.submitted=tick;
         }
         if(*s.submitted!=tick){s.Stop("Native cutscene source crossed native ticks");return RoomGameplayAdmission::Stopped;}
@@ -763,7 +777,14 @@ bool NativeRoomGameplay::Deliver(PPCContext& ctx,uint8_t* base){
     if(s.game_over_entry || s.consumed_passive){
         if(s.game_over_entry?!s.GameOverFrame(*s.consumed,ctx,base):!s.CutsceneFrame(*s.consumed,ctx,base))return s.Stop("Native no-gameplay input phase changed before native update");
         if(!BeginRetailPassiveTick(s.registry,tick,ctx,base))return s.Stop("Could not retain retail quarantine for native GameOver");
-        s.delivered=true;return true; // No gameplay callbacks are promised.
+        if(!s.game_over_entry && s.cutscene_entry && !s.return_pending && s.skip_target_available && s.skip_target_entry && tick>*s.skip_target_entry+s.identity.input_delay){
+            const bool ui=std::any_of(s.consumed->players.begin(),s.consumed->players.end(),[](const auto& c){return c.source==RoomMovementSource::NativeCutsceneUiV6;});
+            if(ui || s.skip_receiver){
+                if(!s.skip_receiver)s.skip_receiver=std::make_unique<NativeCutsceneSkipReceiver>();
+                if(!s.skip_receiver->Consume(*s.consumed,s.registry,s.input_epoch,ctx,base))return s.Stop("Native cutscene UI could not deliver its agreed frame to the original handler");
+            }
+        }
+        s.delivered=true;return true; // Character gameplay callbacks remain quarantined.
     }
     if(!s.Actions(*s.consumed,ctx,base))return s.Stop("Native retail action bindings changed before delivery");
     if(!s.ButtonFrame(*s.consumed,ctx,base))return s.Stop("Native retail button frame failed delivery admission");

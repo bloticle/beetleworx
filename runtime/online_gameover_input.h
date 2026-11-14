@@ -7,6 +7,8 @@ struct NativeGameOverState {uint32_t registry=0,dead=0;bool operator==(const Nat
 // alone does not authorize a Room frame: its owner also pins world and roster.
 bool ReadNativeGameOverState(PPCContext&,uint8_t*,NativeGameOverState&);
 bool ReadNativeControlState(PPCContext&,uint8_t*,NativeGameOverState&,uint32_t& mode);
+// Bounded original state-object getter; read-only, grants no callback rights.
+bool ReadNativeControlTarget(PPCContext&,uint8_t*,uint32_t registry,uint32_t mode,uint32_t& profile,uint32_t& object,uint32_t& handler);
 RoomMovement NativeGameOverCommand(uint64_t input_epoch=1);
 // Metadata validation after the gameplay owner has certified native game-over.
 // Previously produced delayed commands may drain only inside the old window.

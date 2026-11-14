@@ -3,7 +3,7 @@ param(
  [ValidateRange(3,16)][int]$Players=3,
  
  [switch]$CooperativeShutdown,
- [switch]$CutsceneCycle,[switch]$CutsceneBoundaryMovement,
+ [switch]$CutsceneCycle,[switch]$CutsceneBoundaryMovement,[switch]$CutsceneSkipInput,
  [switch]$ExtraOswald,
  [switch]$ScriptedInput,[switch]$ChatProbe,[switch]$VoiceProbe,[switch]$ButtonTaskProbe,[switch]$PolicyCycle,[switch]$CaptureShutdownHang,
  [switch]$NavigationTrace,[switch]$FaceTargetPoison,[switch]$UnfixedFaceTarget,[switch]$NativeReload,
@@ -27,6 +27,7 @@ param(
  [ValidateRange(120,600)][int]$StartupTimeoutSeconds=360
 )
 $ErrorActionPreference='Stop'
+if($CutsceneSkipInput -and !$CutsceneCycle){throw 'CutsceneSkipInput requires CutsceneCycle.'}
 if($CutsceneBoundaryMovement -and !$CutsceneCycle){throw 'CutsceneBoundaryMovement requires CutsceneCycle.'}
 if($CutsceneCycle -and ($Players -ne 3 -or !$ScriptedInput -or $CheckpointReloadTick -ne 700 -or $CheckpointReloadCount -ne 2 -or $CheckpointReloadInterval -ne 600 -or $DamagePlayer -or $DamageExtraPeer -or $NativeLevelTarget -or $NativeLevelTargets.Count -or $PolicyCycle -or $ReenterAfterReturn -or $CloseParticipant -or $PartialDeliveryParticipant)){throw 'CutsceneCycle requires three scripted humans, original restriction at tick 700/release at 1300, and no other fixture.'}
 if($DamagePlayer -eq 4){if($Players -ne 3 -or ($DamageExtraPeer -and $DamageExtraPeer -ne 3)){throw 'Whole-party damage requires exactly three players and extra peer 3.'};$DamageExtraPeer=3}
@@ -82,7 +83,7 @@ $record.capture_shutdown_hang=[bool]$CaptureShutdownHang
 $record.cooperative_shutdown_override=[bool]$CooperativeShutdown
 $record.damage_extra_peer=$DamageExtraPeer;
 $record.extra_dead_input=[bool]$DamageExtraPeer;$record.extra_oswald=[bool]$ExtraOswald;$record.mixed_characters=!$ExtraOswald;
-$record.cutscene_boundary_movement=[bool]$CutsceneBoundaryMovement;$record.cutscene_cycle=[bool]$CutsceneCycle;$record.whole_party_damage=($DamagePlayer -eq 4);$record.damage_player=$DamagePlayer;$record.pipeline_creation_threads=$PipelineCreationThreads
+$record.cutscene_skip_input=[bool]$CutsceneSkipInput;$record.cutscene_boundary_movement=[bool]$CutsceneBoundaryMovement;$record.cutscene_cycle=[bool]$CutsceneCycle;$record.whole_party_damage=($DamagePlayer -eq 4);$record.damage_player=$DamagePlayer;$record.pipeline_creation_threads=$PipelineCreationThreads
 $record.commit_guard_mb=$MinimumFreeCommitMB;$record.minimum_free_commit_mb=$null
 $record.memory_guard_mb=$MinimumFreeMemoryMB;$record.memory_samples=@();$record.minimum_free_memory_mb=$null;$record.peak_owned_working_set_mb=0;$record.peak_owned_private_mb=0
 $nextMemorySample=[DateTime]::MinValue
@@ -208,6 +209,7 @@ try {
   $info=[Diagnostics.ProcessStartInfo]::new($exe);$info.UseShellExecute=$false;$info.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden;$info.WorkingDirectory=$runtime
   foreach($arg in @(('--em2_user_data_directory='+$peer.user),('--em2_content_directory='+$peer.content),('--log_file='+$peer.log),'--no-em2_online_menu','--no-em2_demo_build','--em2_private_profile=true','--em2_native_room_lobby=true','--em2_native_online_handoff=true',('--em2_native_lobby_qa_role='+$peer.role),('--em2_native_lobby_qa_players='+$Players),('--em2_native_lobby_qa_invitation_file='+(Join-Path $root 'native-menu-invitation.txt')),'--em2_online_auto_continue=true','--em2_auto_continue=false','--em2_online_world_random=true','--em2_online_single_view=true','--em2_trace_online_observations=true','--em2_trace_auto_continue=true','--em2_trace_online_clothing=true')){$info.ArgumentList.Add($arg)}
   if($CutsceneCycle){$info.ArgumentList.Add('--em2_native_lobby_qa_cutscene_cycle=true')}
+  if($CutsceneSkipInput){$info.ArgumentList.Add('--em2_probe_cutscene_skip_input=true')}
   if($CutsceneBoundaryMovement){$info.ArgumentList.Add('--em2_probe_cutscene_boundary_move=true')}
   if($ExtraOswald){$info.ArgumentList.Add('--em2_native_lobby_qa_extra_oswald=true')}
   if($CooperativeShutdown){$info.ArgumentList.Add('--em2_cooperative_title_shutdown=true')}

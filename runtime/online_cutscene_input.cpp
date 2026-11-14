@@ -26,7 +26,7 @@ struct UiPreserve {
 }
 bool InspectNativeCutsceneUi(PPCContext& ctx,uint8_t* base,uint32_t registry,NativeCutsceneUiSnapshot& out){
     UiPreserve preserve(ctx,base);NativeGameOverState state;uint32_t mode=0;
-    if(!preserve.stack || !ReadNativeControlState(ctx,base,state,mode) || mode!=3 || state.registry!=registry || !UiReadable(base,0x833DBAD8,4))return false;
+    if(!preserve.stack || !ReadNativeControlState(ctx,base,state,mode) || (mode!=3 && mode!=6) || state.registry!=registry || !UiReadable(base,0x833DBAD8,4))return false;
     const auto manager=PPC_LOAD_U32(0x833DBAD8);if(!UiReadable(base,manager,48))return false;
     const auto uid=PPC_LOAD_U32(manager+16);std::string name;if(!UiName(base,uid,name) || name!="CutScene")return false;
     ctx.r3.u64=manager;ctx.r4.u64=manager+16;__imp__sub_827C3D78(ctx,base);const auto selected=ctx.r3.u32;
@@ -86,8 +86,11 @@ bool ReadNativeInputContextName(uint8_t* base,std::string& out){
 }
 bool ReadNativeCutsceneContext(PPCContext& ctx,uint8_t* base,uint32_t registry){
     NativeGameOverState state;uint32_t mode=0;
-    if(!ReadNativeControlState(ctx,base,state,mode) || mode!=3 || state.registry!=registry ||
+    if(!ReadNativeControlState(ctx,base,state,mode) || (mode!=3 && mode!=6) || state.registry!=registry ||
        !GuestReadBatch::Readable(base+0x833DBAD8,4))return false;
+    if(mode==6){uint32_t profile=0,object=0,handler=0;
+        return ReadNativeControlTarget(ctx,base,registry,6,profile,object,handler) && handler==0x82B210B0;
+    }
     const auto manager=PPC_LOAD_U32(0x833DBAD8);
     if(manager<4096 || !GuestReadBatch::Readable(base+manager,20))return false;
     const auto name=PPC_LOAD_U32(manager+16);
@@ -120,9 +123,14 @@ bool ReadNativeCutsceneContext(PPCContext& ctx,uint8_t* base,uint32_t registry){
     return selected || restricted;
 }
 RoomMovement NativeCutsceneCommand(uint64_t epoch){RoomMovement c;c.actor_epoch=1;c.input_epoch=epoch;c.source=RoomMovementSource::NativeCutsceneV5;return c;}
+RoomMovement NativeCutsceneUiCommand(uint64_t epoch,bool down){auto c=NativeCutsceneCommand(epoch);c.source=RoomMovementSource::NativeCutsceneUiV6;c.pad.buttons=down?0x1000:0;return c;}
 bool NativeCutsceneReturnPrefix(const RoomFrame& frame,uint16_t mask,uint64_t epoch){
     if(!mask || frame.players_mask!=mask || !epoch || (epoch&1))return false;
-    for(unsigned i=0;i<kOnlineRoomCapacity;++i)if(frame.players[i]!=((mask&(1u<<i))?NativeCutsceneCommand(epoch):RoomMovement{}))return false;
+    for(unsigned i=0;i<kOnlineRoomCapacity;++i){const auto& c=frame.players[i];
+        if(!(mask&(1u<<i))){if(c!=RoomMovement{})return false;continue;}
+        if(c.actor_epoch!=1 || c.input_epoch!=epoch || !ValidRoomMovement(c) ||
+           (c.source!=RoomMovementSource::NativeCutsceneV5 && c.source!=RoomMovementSource::NativeCutsceneUiV6))return false;
+    }
     return true;
 }
 bool ValidNativeCutsceneFrame(const RoomFrame& frame,uint16_t mask,uint64_t entry,uint8_t delay,uint64_t epoch,
@@ -164,6 +172,21 @@ bool TestNativeCutsceneInput(){
     if(!check(ValidNativeCutsceneFrame(frame,7,700,2,2,schemas,true),"old schema/source epoch remains required inside delayed prefix"))return false;
     bad=frame;bad.players[2].input_epoch=3;
     if(!check(!ValidNativeCutsceneFrame(bad,7,700,2,2,schemas,true),"new gameplay epoch cannot be admitted as an old prefix"))return false;
+    NativeCutsceneUiGate gate;
+    if(!check(!gate.Sample(true) && !gate.Sample(true) && !gate.Sample(false) && gate.Sample(true) && !gate.Sample(false),"carried gameplay press cannot become cutscene UI until a real release"))return false;
+    auto ui=NativeCutsceneUiCommand(2,true);RoomJumpStream gameplay;
+    if(!check(ValidRoomMovement(ui) && !AdvanceRoomJumpStream(gameplay,ui),"typed skip intent is not native gameplay or Jump input"))return false;
+    for(unsigned field=0;field<9;++field){auto bad=ui;
+        if(field==0)bad.pad.buttons=0x2000;if(field==1)bad.pad.left_x=1;if(field==2)bad.pad.right_trigger=1;
+        if(field==3)bad.button_actions.schema[0]=1;if(field==4)bad.input_epoch=3;if(field==5)bad.x=-0.f;
+        if(field==6)bad.jump_button_mask=0x1000;if(field==7)bad.pad.menu_pause=true;if(field==8)bad.actor_epoch=0;
+        if(!check(!ValidRoomMovement(bad),"UI command cannot hide other controls, gameplay metadata or wrong lifecycle"))return false;
+    }
+    RoomTransportInputStream transport;
+    if(!check(AdvanceRoomTransportInput(transport,ui) && transport.suspended && transport.input_epoch==2 &&
+        AdvanceRoomTransportInput(transport,NativeCutsceneUiCommand(2,false)),"UI down/release crosses explicit suspended transport epoch"))return false;
+    frame.tick=704;for(unsigned i=0;i<3;++i)frame.players[i]=i==2?ui:NativeCutsceneCommand(2);
+    if(!check(ValidNativeCutsceneFrame(frame,7,700,2,2,schemas,true),"extra peer skip intent coexists with neutral suspended retail peers"))return false;
     REXLOG_INFO("Cutscene input epoch passed {} stream/prefix/intent checks; native return and controls require real worlds",count);return true;
 }
 }
