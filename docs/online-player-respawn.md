@@ -61,10 +61,11 @@ disassembly calls `CloseNativeRoomDiagnostics` and `TerminateTitle` immediately
 before this blocked shutdown log. The stack scan provides address candidates,
 not a full unwind; the separate mutex memory and thread-list evidence establish
 the missing owner. Stopping arbitrary guest threads can abandon host locks, so
-suppressing this log alone is not a complete shutdown solution. Cooperative
-thread exit is still required.
+suppressing this log alone is not a complete shutdown solution. The subsequent [cooperative shutdown implementation](native-guest-shutdown.md)
+addresses this confirmed failure; the failed original capture remains rejected.
 
 Extra-human death/replacement, whole-party death and checkpoint restoration,
 arbitrary campaign scenes, sixteen native clients, Internet conditions, and
-rollback/state correction remain unverified by these tests. The intermittent
-shutdown defect is not fixed. This source work does not update the public demo.
+rollback/state correction remain unverified by these tests. The confirmed shutdown failure is addressed in the newer cooperative-exit
+source; see its separate native validation above. This work does not update
+the public demo.

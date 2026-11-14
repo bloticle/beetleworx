@@ -4,6 +4,7 @@
 #include "debug_level_browser.h"
 #include "ppc_context.h"
 #include "simulation.h"
+#include "guest_shutdown.h"
 #include "camera_targets.h"
 #include "camera_cadence.h"
 #include "camera_projection.h"
@@ -1926,6 +1927,7 @@ bool FixedTimingPolicy(int cap,bool native_delta,bool force_fixed,bool network,b
 }
 }
 PPC_FUNC_IMPL(sub_829EC348) {
+    em2::PollGuestShutdown();
     // Reserve the capped frame before input polling, the native frame gate,
     // and our elapsed-time measurement. Sleeping at Present kept a completed
     // scene waiting and made the controls older by the remaining cap interval.

@@ -34,6 +34,8 @@ EMR movement animations: `@llenarox` on Discord.
 
 ## Build from source
 
+Current source includes [cooperative title shutdown](docs/native-guest-shutdown.md), addressing a confirmed hang caused by killing a guest thread while it held a logger lock. Native three-client tests cover Mickey and Oswald recovery and normal process exit. This change is not in the existing demo.6 download.
+
 See [Building Beetleworx](docs/BUILDING.md) for prerequisites and commands. The [development notes](DEVELOPMENT.md) cover the renderer, input, and experimental online code.
 
 Development setup accepts additional Xbox containers and archives, including CSO/ZSO, CCI, standalone CHD, GOD/SVOD, ZArchive, ZIP/ZIP64 and 7z, plus extracted EM1 disc folders. These readers are ahead of the public demo. See [disc format support and validation limits](docs/disc-formats-development.md) for tested cases and remaining work. Matching executable code is still required.

@@ -42,10 +42,9 @@ add_custom_target(em2_core_library DEPENDS "${EM2_CORE_LIBRARY}")
 set_property(TARGET rex::core PROPERTY IMPORTED_LOCATION_RELEASE "${EM2_CORE_LIBRARY}")
 set(EM2_KERNEL_LIBRARY "${CMAKE_CURRENT_BINARY_DIR}/core/rexkernel.lib")
 add_custom_command(OUTPUT "${EM2_KERNEL_LIBRARY}"
-    COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/core"
-    COMMAND "${CMAKE_COMMAND}" -E copy "${REXSDK}/lib/rexkernel.lib" "${EM2_KERNEL_LIBRARY}"
-    COMMAND "${EM2_LLVM_AR}" d "${EM2_KERNEL_LIBRARY}" content_manager.cpp.obj
-    DEPENDS "${REXSDK}/lib/rexkernel.lib"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/prepare-kernel-library.py"
+        "${REXSDK}/lib/rexkernel.lib" "${EM2_KERNEL_LIBRARY}" --ar "${EM2_LLVM_AR}"
+    DEPENDS "${REXSDK}/lib/rexkernel.lib" "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/prepare-kernel-library.py"
     VERBATIM)
 add_custom_target(em2_kernel_library DEPENDS "${EM2_KERNEL_LIBRARY}")
 set_property(TARGET rex::kernel PROPERTY IMPORTED_LOCATION_RELEASE "${EM2_KERNEL_LIBRARY}")
@@ -577,3 +576,5 @@ add_custom_command(TARGET EM2Recomp POST_BUILD
 
 # Pinned SDK upload pool with correct COM ownership on Map failure.
 target_sources(EM2Recomp PRIVATE rex_upload_buffer_pool.cpp)
+
+target_sources(EM2Recomp PRIVATE guest_shutdown.cpp rex_xthread.cpp rex_xobject.cpp)

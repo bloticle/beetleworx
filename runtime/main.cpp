@@ -137,6 +137,7 @@
 #include "camera_projection.h"
 #include "allocation_trace.h"
 #include "gpu_interrupt_lifetime.h"
+#include "guest_shutdown.h"
 #include "audio_lifetime.h"
 #include "platform_allocations.h"
 #include "movie_texture_memory.h"
@@ -185,6 +186,7 @@ REXCVAR_DECLARE(std::string,em2_online_qa_role);
 REXCVAR_DECLARE(std::string,em2_room_probe_role);
 REXCVAR_DEFINE_BOOL(em2_online_menu,false,"Online","Show experimental direct-connect co-op Host/Join before starting the game");
 REXCVAR_DEFINE_BOOL(em2_test_pc_settings,false,"Debug","Run PC menu settings tests without opening the game");
+REXCVAR_DEFINE_BOOL(em2_test_guest_shutdown,false,"Debug","Run isolated cancellable guest wait and C++ unwind checks without guest execution");
 REXCVAR_DEFINE_BOOL(em2_test_online_input,false,"Debug","Run online room/native-slot and sealed local-source regressions headlessly in the canonical executable");
 REXCVAR_DEFINE_BOOL(em2_test_online_voice,false,"Debug","Test native voice codec/mixing; SDL dummy backend only for device tests, never real microphone hardware");
 REXCVAR_DEFINE_STRING(em2_test_voice_relay_origin,"","Debug","Optional explicit HTTPS relay for headless native encrypted voice integration; never opens audio devices");
@@ -354,7 +356,7 @@ public:
             const std::filesystem::path report=REXCVAR_GET(em2_allocation_crash_output);
             if(!report.is_absolute() || std::filesystem::exists(report) || !std::filesystem::is_directory(report.parent_path()))ExitProcess(2);
             InstallCrashHandler(report);
-        } else if(REXCVAR_GET(em2_test_online_voice) || REXCVAR_GET(em2_test_online_input) || REXCVAR_GET(em2_test_content_setup) || REXCVAR_GET(em2_test_mickey_ears) || REXCVAR_GET(em2_test_pc_settings) || REXCVAR_GET(em2_test_demo_support) || REXCVAR_GET(em2_test_update_swap) || REXCVAR_GET(em2_test_video_blocks) || REXCVAR_GET(em2_test_shader_storage) || REXCVAR_GET(em2_test_screen_upscale) || !REXCVAR_GET(em2_analyze_shadow_shader_path).empty() || !REXCVAR_GET(em2_analyze_bloom_shader_path).empty()) {
+        } else if(REXCVAR_GET(em2_test_guest_shutdown) || REXCVAR_GET(em2_test_online_voice) || REXCVAR_GET(em2_test_online_input) || REXCVAR_GET(em2_test_content_setup) || REXCVAR_GET(em2_test_mickey_ears) || REXCVAR_GET(em2_test_pc_settings) || REXCVAR_GET(em2_test_demo_support) || REXCVAR_GET(em2_test_update_swap) || REXCVAR_GET(em2_test_video_blocks) || REXCVAR_GET(em2_test_shader_storage) || REXCVAR_GET(em2_test_screen_upscale) || !REXCVAR_GET(em2_analyze_shadow_shader_path).empty() || !REXCVAR_GET(em2_analyze_bloom_shader_path).empty()) {
             const auto reports=exe_dir/"diagnostic-crashes"/(std::to_string(GetCurrentProcessId())+"-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
             if(!std::filesystem::create_directories(reports))ExitProcess(2);
             InstallCrashHandler(reports/"crash.log");
@@ -392,6 +394,9 @@ public:
                 log_config.category_levels[std::to_underlying(rex::LogCategory::GPU)] = spdlog::level::warn;
         }
         rex::InitLogging(log_config);
+        if(REXCVAR_GET(em2_test_guest_shutdown)){
+            const bool success=em2::TestGuestShutdown();spdlog::shutdown();ExitProcess(success?0:1);
+        }
         if(!REXCVAR_GET(em2_test_live_update_path).empty()){
             std::string error;const bool success=em2::TestLiveDemoUpdate(REXCVAR_GET(em2_test_live_update_path),error);
             REXLOG_INFO("Live published update diagnostic {}: {}",success?"passed":"failed",error);
@@ -1089,11 +1094,18 @@ private:
             // Drain interrupts only after those jobs have finished.
             REXLOG_INFO("Title shutdown: draining GPU interrupts");
             em2::CloseGuestGPUInterrupts();
-            REXLOG_INFO("Title shutdown: terminating title workers");
-            // TerminateTitle can stop a guest inside synchronous logging,
-            // abandoning a host logger/heap lock. Drain the retained Room's
-            // potentially large failure history before stopping its owner.
+            REXLOG_INFO("Title shutdown: draining title workers");
+            // Drain diagnostics before joining their owner. Never unload the
+            // title until cooperative guest scopes have unwound their host
+            // locks and the actual host thread handles have signaled.
             em2::net::CloseNativeRoomDiagnostics();
+            if(em2::CooperativeGuestShutdownEnabled()){
+                REXLOG_INFO("Title shutdown: requesting cooperative guest exit");
+                em2::RequestGuestShutdown();
+                while(!em2::JoinGuestShutdown(*runtime_->kernel_state(),std::chrono::seconds(2)))
+                    REXLOG_WARN("Title shutdown: waiting for guest threads to exit; no thread was force-terminated");
+                REXLOG_INFO("Title shutdown: guest threads exited before module teardown");
+            }
             runtime_->kernel_state()->TerminateTitle();
             REXLOG_INFO("Title shutdown: releasing stopped audio clients");
             if(runtime_->audio_system())em2::ReleaseStoppedAudioClients(*runtime_->audio_system());

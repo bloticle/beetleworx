@@ -1,6 +1,7 @@
 param(
  [ValidateRange(3,16)][int]$Players=3,
  
+ [switch]$CooperativeShutdown,
  [switch]$ScriptedInput,[switch]$ChatProbe,[switch]$VoiceProbe,[switch]$ButtonTaskProbe,[switch]$PolicyCycle,[switch]$CaptureShutdownHang,
  [switch]$NavigationTrace,[switch]$FaceTargetPoison,[switch]$UnfixedFaceTarget,[switch]$NativeReload,
  [ValidateRange(0,100000)][int]$CheckpointReloadTick=0,
@@ -70,6 +71,7 @@ $normalCrash=Join-Path $runtime 'crash.log';$crashHash=if(Test-Path -LiteralPath
 $records=[Collections.Generic.List[object]]::new();$owned=[Collections.Generic.List[object]]::new()
 $record=[ordered]@{root=$root;players=$Players;exe_sha256=$exeHash;native_room_menu=$true;checkpoint_reload_tick=$CheckpointReloadTick;voice_probe=[bool]$VoiceProbe;navigation_trace=[bool]$NavigationTrace;face_target_poison=[bool]$FaceTargetPoison;face_target_unfixed=[bool]$UnfixedFaceTarget;replay_invitation=$ReplayInvitationFile;chat_probe=[bool]$ChatProbe;scripted_sdk_input=[bool]$ScriptedInput;mixed_characters=$true;gameplay_input_sent=$false;screenshots_taken=$false;startup_complete=$false;observation_complete=$false;processes=@()}
 $record.capture_shutdown_hang=[bool]$CaptureShutdownHang
+$record.cooperative_shutdown_override=[bool]$CooperativeShutdown
 $record.damage_player=$DamagePlayer;$record.pipeline_creation_threads=$PipelineCreationThreads
 $record.commit_guard_mb=$MinimumFreeCommitMB;$record.minimum_free_commit_mb=$null
 $record.memory_guard_mb=$MinimumFreeMemoryMB;$record.memory_samples=@();$record.minimum_free_memory_mb=$null;$record.peak_owned_working_set_mb=0;$record.peak_owned_private_mb=0
@@ -195,6 +197,7 @@ try {
   SampleOwnedMemory
   $info=[Diagnostics.ProcessStartInfo]::new($exe);$info.UseShellExecute=$false;$info.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden;$info.WorkingDirectory=$runtime
   foreach($arg in @(('--em2_user_data_directory='+$peer.user),('--em2_content_directory='+$peer.content),('--log_file='+$peer.log),'--no-em2_online_menu','--no-em2_demo_build','--em2_private_profile=true','--em2_native_room_lobby=true','--em2_native_online_handoff=true',('--em2_native_lobby_qa_role='+$peer.role),('--em2_native_lobby_qa_players='+$Players),('--em2_native_lobby_qa_invitation_file='+(Join-Path $root 'native-menu-invitation.txt')),'--em2_online_auto_continue=true','--em2_auto_continue=false','--em2_online_world_random=true','--em2_online_single_view=true','--em2_trace_online_observations=true','--em2_trace_auto_continue=true','--em2_trace_online_clothing=true')){$info.ArgumentList.Add($arg)}
+  if($CooperativeShutdown){$info.ArgumentList.Add('--em2_cooperative_title_shutdown=true')}
   if($PipelineCreationThreads -ge 0){$info.ArgumentList.Add('--d3d12_pipeline_creation_threads='+$PipelineCreationThreads)}
   if($DamagePlayer){$info.ArgumentList.Add('--em2_native_lobby_qa_damage_player='+$DamagePlayer)}
   if($ChatProbe){$info.ArgumentList.Add('--em2_probe_online_chat=true')}
