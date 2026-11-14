@@ -1,50 +1,72 @@
-# Native online level transitions
+# Native online task restrictions and level transitions
 
-Extra humans previously retained an outdated task-restriction count after a
-script changed the retail character's permissions. A four-player journey from
-Autotopia to Mean Street and back exposed extra Oswald accepting electric-stream
-input while the retail Oswald was restricted. On returning, both were restricted;
-that rejection was consistent with the native rules, not a missing tool task.
+Extra humans must follow native task restrictions after scripts add or remove
+them. A four-player Autotopia / Mean Street round trip exposed extra Oswald
+accepting electric-stream input while the retail Oswald was restricted. A
+balanced removal test then exposed the reverse failure: the retail Oswald
+became usable again, but the extra Oswald stayed blocked.
 
-The adapter now observes the original per-character restriction add/remove
-writers (82A27E20 / 82A27F80), coalesces affected profiles, and reapplies the
-existing native permission reader before the next input frame. It does not
-register new rules, force-enable tools, change the retail policy, or mutate an
-extra task list inside an active action callback. Notifications clear at world
-teardown. Invalid manager/profile notifications are rejected; a refresh failure
-stops the session instead of continuing with partially updated permissions.
+The native policy reader remains an admission operation. Reusing it during
+play can leave a counter set when the cached count reaches zero. Runtime
+updates now queue the original per-task add/remove operations in order,
+including repeated or nested operations. They affect only the named task and
+use the original native counter operations instead of resetting all tasks.
+Task names/reasons are copied, and recipients are pinned to their actor
+generations. A replacement actor cannot receive an earlier incarnation's
+queued change. Initial admission reads the current policy separately.
 
-Validation used four independent local game processes, the compiled default
-reload support, and original TransitionToLevel calls at agreed ticks 700 and
-1400. Destinations were meanstreet_north.visit_2 and then
-tcy_autotopia_visit1.sectionc_first. Each world required fresh actor admission,
-separate verified input history, matching native body trajectories, movement
-reversal, jump/landing, spin and tool dispatch. The three incarnations had
-661, 698, and 987 consecutive matching completed native updates. All four exited
-normally; normal user saves, settings, and crash data remained unchanged.
+The owner drains updates before the next input frame, outside unfinished
+input/action dispatch. Each operation validates the live task owner and the
+native counter result. The 64-entry queue fails the session on overflow or
+invalid data instead of dropping state or retrying a partly applied batch.
+World teardown clears queued changes. Retail policy and native rule definitions
+are not rewritten.
 
-Twenty-four electric-stream checks compare actual extra/retail task sets,
-original handlers, restriction counters, and callback results. Both unrestricted
-acceptance and authored rejection were exercised. The old capture fails the
-stronger check for its Mean Street permission mismatch. Reapplying the policy
-from its reader alone did not fix the issue; the final fix observes its writers.
-The final build's native regression suite exited zero, including manager/profile
-routing, duplicate coalescing and no-pending/no-read caller-preservation checks.
+## Verification
 
-The isolated harness accepts NativeLevelTargets for a bounded itinerary of up
-to four known retail states; its destination count must match the scheduled
-load count. Existing single-target and checkpoint cases remain supported.
-Example, with the built canonical executable and prepared game content:
+A balanced four-process fixture called the original restriction writer at
+agreed tick 300 and removed that one restriction at tick 500. Original SDK
+input attempted electric-stream start/end while blocked, then tried again
+after release. All four worlds rejected the first attempt and accepted the
+second, with matching extra/retail task sets, handlers and counter flags.
+The capture contained 1,247 consecutive matching native updates. Both extra
+humans continued moving, jumping and landing; unrelated spin/paint callbacks
+remained valid. The earlier implementation fails this same unblocking verifier.
+
+The same executable also passed an original TransitionToLevel round trip at
+ticks 700 and 1400: meanstreet_north.visit_2, then
+tcy_autotopia_visit1.sectionc_first. The initial and two re-entered worlds had
+661, 698 and 1,021 consecutive matching completed updates. Verification requires
+fresh actor admission, separate verified input histories, matching native
+trajectories, movement reversal, jump/landing, spin and task-policy-aware tool
+callbacks. Twenty-four electric-stream checks cover both unrestricted and
+restricted states. All four processes exited normally in both captures; normal
+user saves, settings and crash files remained unchanged.
+
+The native regression suite checks manager/profile routing, exact recipient
+generations, ordered nested notifications, owned string data, queue overflow,
+and no-pending caller/environment preservation. Its final result is recorded
+with the process exit code and executable hash alongside the local captures.
+
+With a built canonical executable and prepared content, the private fixtures
+can be reproduced with:
 
 ```powershell
+.\scripts\test-native-room-menu-roster.ps1 -Players 4 -ScriptedInput -ChatProbe -VoiceProbe -ButtonTaskProbe -PolicyCycle -ObserveSeconds 65
+python .\scripts\verify-native-task-policy-cycle.py <capture-directory>
+
 .\scripts\test-native-room-menu-roster.ps1 -Players 4 -ScriptedInput -VoiceProbe -ChatProbe -ButtonTaskProbe -CheckpointReloadTick 700 -CheckpointReloadCount 2 -NativeLevelTargets @('meanstreet_north.visit_2','tcy_autotopia_visit1.sectionc_first') -ObserveSeconds 110 -StartupTimeoutSeconds 480
 python .\scripts\verify-native-world-reentry.py <capture-directory> --expect-default
 ```
 
-These are scheduled original transitions in isolated profiles. They do not prove
-walking through every campaign portal, later restriction removal/unblocking,
-all task-policy setter variants, full quest/cutscene/death progression, sixteen
-native clients, Internet conditions, or authoritative recovery/replay. The
-read-only task probes are default-off and require the private profile switch.
+PolicyCycle requires the isolated four-player SDK fixture and cannot be combined
+with scheduled reloads or fault injection. It changes only its private world.
+NativeLevelTargets supports up to four known retail states, one per scheduled
+load. Task probes and the cycle fixture are default-off private diagnostics.
+
+These tests establish one balanced native restriction cycle and scheduled
+original transitions between two levels. They do not prove every campaign
+portal, all policy setter variants, full quest/cutscene/death progression,
+sixteen native clients, Internet conditions, or authoritative replay/correction.
 No new downloadable release includes this work; demo.6 remains the published
 binary.

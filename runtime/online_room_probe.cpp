@@ -6,6 +6,9 @@
 #include "online_local_movement.h"
 #include "online_local_jump.h"
 #include "online_actor_roster.h"
+#include "online_room_gameplay.h"
+#include "online_retail_input.h"
+#include "simulation.h"
 #include "native_character_physics.h"
 #include "players.h"
 #include "guest_read_batch.h"
@@ -25,6 +28,12 @@
 #include <bit>
 #include <optional>
 
+PPC_EXTERN_FUNC(__imp__sub_825430D8);
+PPC_EXTERN_FUNC(__imp__sub_822F1C10);
+PPC_EXTERN_FUNC(__imp__sub_82853C60);
+PPC_EXTERN_FUNC(sub_82A27E20);
+PPC_EXTERN_FUNC(sub_82A27F80);
+REXCVAR_DEFINE_BOOL(em2_probe_native_policy_cycle,false,"Debug","Exact private four-player SDK fixture only: balanced native electric-stream restriction add at tick 300, remove at 500, second SDK tool attempt");
 REXCVAR_DECLARE(bool,em2_private_profile);
 REXCVAR_DECLARE(bool,em2_room_native_buttons);
 REXCVAR_DECLARE(bool,em2_probe_online_chat);
@@ -344,9 +353,10 @@ std::unique_ptr<rex::input::InputSystem> MakePrivateRoomInput(Room& room){
             if(REXCVAR_GET(em2_room_native_buttons) && active){
                 if(elapsed>=280 && elapsed<284){state->gamepad.buttons=0x4000;phase="tool button X";}
                 if(elapsed>=330 && elapsed<345){state->gamepad.right_trigger=200;phase="tool trigger RT";}
+                if(REXCVAR_GET(em2_probe_native_policy_cycle) && !(room_.local_peer()&1) && elapsed>=530 && elapsed<545){state->gamepad.right_trigger=200;phase="tool after policy release";}
             }
-            if((!last_ || *last_!=tick) && (elapsed==0 || elapsed==60 || elapsed==72 || elapsed==90 || elapsed==102 || elapsed==130 || elapsed==134 || elapsed==175 || elapsed==195 || elapsed==240 || elapsed==252 || elapsed==280 || elapsed==284 || elapsed==300 || elapsed==320 || elapsed==330 || elapsed==345 || elapsed==360 || (REXCVAR_GET(em2_probe_online_chat) && (elapsed==480 || elapsed==492))))
-                REXLOG_INFO("Private Room SDK input: peer {} tick {} elapsed {} phase '{}' reads {}; synthetic SDK driver, original native interpreters",room_.local_peer(),tick,elapsed,elapsed==360?"complete":phase,reads_);
+            if((!last_ || *last_!=tick) && (elapsed==0 || elapsed==60 || elapsed==72 || elapsed==90 || elapsed==102 || elapsed==130 || elapsed==134 || elapsed==175 || elapsed==195 || elapsed==240 || elapsed==252 || elapsed==280 || elapsed==284 || elapsed==300 || elapsed==320 || elapsed==330 || elapsed==345 || elapsed==360 || (REXCVAR_GET(em2_probe_native_policy_cycle) && (elapsed==530 || elapsed==545 || elapsed==560)) || (REXCVAR_GET(em2_probe_online_chat) && (elapsed==480 || elapsed==492))))
+                REXLOG_INFO("Private Room SDK input: peer {} tick {} elapsed {} phase '{}' reads {}; synthetic SDK driver, original native interpreters",room_.local_peer(),tick,elapsed,elapsed==(REXCVAR_GET(em2_probe_native_policy_cycle)?560u:360u)?"complete":phase,reads_);
             last_=tick;return X_ERROR_SUCCESS;
         }
         rex::X_RESULT SetState(uint32_t,rex::input::X_INPUT_VIBRATION*)override{return X_ERROR_DEVICE_NOT_CONNECTED;}
@@ -354,6 +364,52 @@ std::unique_ptr<rex::input::InputSystem> MakePrivateRoomInput(Room& room){
     };
     auto input=std::make_unique<rex::input::InputSystem>(nullptr);input->AddDriver(std::make_unique<Driver>(room,warmup));
     REXLOG_INFO("Private Room synthetic SDK source installed: peer {}; real hardware and normal session untouched",room.local_peer());return input;
+}
+void TickPrivateNativeTaskPolicy(PPCContext& ctx,uint8_t* base){
+    if(!REXCVAR_GET(em2_probe_native_policy_cycle))return;
+    Environment environment;
+    if(!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_room_probe_scripted_input) ||
+       !REXCVAR_GET(em2_room_native_buttons) || !NativeOnlineMenuQaActive() || ctx.lr!=0x829ED694)return;
+    uint64_t tick=0;if(!em2::CurrentAgreedSimulationTick(tick) || (tick!=300 && tick!=500))return;
+    auto* room=PrivateNativeMenuRoom();auto* game=CurrentNativeRoomGameplay();
+    if(!room || !game || room->state()!=RoomState::Running || room->lobby().players.size()!=4 ||
+       !room->lobby().locked || game->extra_actor_mask()!=12 || !em2::NativeCoopReady(base))return;
+    static thread_local Room* owner=nullptr;static thread_local unsigned stage=0;
+    if(owner!=room){owner=room;stage=0;}
+    auto reject=[&](const char* why){REXLOG_ERROR("Private native task policy cycle rejected: {}",why);game->ObservationFailed();};
+    if(stage!=(tick==300?0u:1u)){reject("unexpected balanced-cycle stage");return;}
+    RetailActorInput retail;
+    if(!RetailActorInputFor(1,ctx,base,retail)){reject("original Oswald input is not owned");return;}
+    struct Borrow {
+        PPCContext& ctx;PPCContext saved;uint8_t* memory=nullptr;uint32_t scratch=0;
+        std::array<uint8_t,32768> bytes{};
+        Borrow(PPCContext& c,uint8_t* base):ctx(c),saved(c){
+            const auto top=c.r1.u32&~15u;
+            if(top>=65536 && Readable(top-32768,bytes.size(),base)){
+                memory=base+top-32768;std::memcpy(bytes.data(),memory,bytes.size());
+                ctx.r1.u64=top-4096;PPC_STORE_U32(ctx.r1.u32,saved.r1.u32);scratch=top-1024;
+            }
+        }
+        ~Borrow(){if(memory)std::memcpy(memory,bytes.data(),bytes.size());ctx=saved;}
+    }borrow(ctx,base);
+    if(!borrow.memory){reject("borrowed native stack unavailable");return;}
+    const auto name=borrow.scratch,reason=name+4,text=name+128;
+    constexpr char task_name[]="ElectricStream",why[]="Private balanced policy cycle";
+    std::memcpy(base+text,task_name,sizeof(task_name));
+    ctx.r3.u64=text;__imp__sub_825430D8(ctx,base);PPC_STORE_U32(name,ctx.r3.u32);
+    std::memcpy(base+text,why,sizeof(why));
+    ctx.r3.u64=text;__imp__sub_825430D8(ctx,base);PPC_STORE_U32(reason,ctx.r3.u32);
+    auto release=[&]{ctx.r3.u64=reason;__imp__sub_822F1C10(ctx,base);ctx.r3.u64=name;__imp__sub_822F1C10(ctx,base);};
+    ctx.r3.u64=retail.controller+156;ctx.r4.u64=name;__imp__sub_82853C60(ctx,base);const auto task=ctx.r3.u32;
+    if(!Readable(task,224,base) || PPC_LOAD_U32(task)!=0x82164EA8){release();reject("original electric-stream task is unavailable");return;}
+    const auto before=PPC_LOAD_U32(task+8),expected=tick==300?0u:2u;
+    if((before&14)!=expected){release();reject("restriction count differs from the one balanced test owns");return;}
+    ctx.r3.u64=retail.manager;ctx.r4.u64=1;ctx.r5.u64=name;ctx.r6.u64=reason;
+    if(tick==300)sub_82A27E20(ctx,base);else sub_82A27F80(ctx,base);
+    const auto after=PPC_LOAD_U32(task+8);release();
+    if((after&14)!=(tick==300?2u:0u)){reject("original native restriction writer did not change exactly one count");return;}
+    ++stage;
+    REXLOG_INFO("Private native task policy cycle: tick {} operation {} profile 1 task ElectricStream before {:08X} after {:08X}; original writer, balanced test only",tick,tick==300?"add":"remove",before,after);
 }
 void ObservePrivateRoomActors(uint64_t tick,std::span<const OwnedRosterActor> actors,uint8_t* base){
     if(!REXCVAR_GET(em2_room_probe_scripted_input) || !REXCVAR_GET(em2_private_profile) || !NativeRoomActive())return;

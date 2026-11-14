@@ -1,7 +1,7 @@
 param(
  [ValidateRange(3,16)][int]$Players=3,
  
- [switch]$ScriptedInput,[switch]$ChatProbe,[switch]$VoiceProbe,[switch]$ButtonTaskProbe,
+ [switch]$ScriptedInput,[switch]$ChatProbe,[switch]$VoiceProbe,[switch]$ButtonTaskProbe,[switch]$PolicyCycle,
  [switch]$NavigationTrace,[switch]$FaceTargetPoison,[switch]$UnfixedFaceTarget,[switch]$NativeReload,
  [ValidateRange(0,100000)][int]$CheckpointReloadTick=0,
  [ValidateRange(1,4)][int]$CheckpointReloadCount=1,
@@ -18,6 +18,7 @@ param(
  [ValidateRange(120,600)][int]$StartupTimeoutSeconds=360
 )
 $ErrorActionPreference='Stop'
+if($PolicyCycle -and (!$ScriptedInput -or !$ButtonTaskProbe -or $Players -ne 4 -or $CheckpointReloadTick -or $ReenterAfterReturn -or $CloseParticipant -or $PartialDeliveryParticipant)){throw 'PolicyCycle requires four isolated scripted players and task probes, without reload or fault injection.'}
 if($RecoveryController -and !$RecoveryPrompt){throw 'Controller recovery QA requires RecoveryPrompt mode; the HUD auto-click will be disabled.'}
 if($RecoveryPrompt -and (!$ReenterAfterReturn -or !$ReturnToTitle)){throw 'Recovery prompt QA requires the native return and re-entry capture.'}
 if($ReturnToTitle -and !$CloseParticipant -and !$ReenterAfterReturn){throw 'Private title-return test requires participant-close injection or controlled disconnect/re-entry.'}
@@ -65,6 +66,7 @@ $records=[Collections.Generic.List[object]]::new();$owned=[Collections.Generic.L
 $record=[ordered]@{root=$root;players=$Players;exe_sha256=$exeHash;native_room_menu=$true;checkpoint_reload_tick=$CheckpointReloadTick;voice_probe=[bool]$VoiceProbe;navigation_trace=[bool]$NavigationTrace;face_target_poison=[bool]$FaceTargetPoison;face_target_unfixed=[bool]$UnfixedFaceTarget;replay_invitation=$ReplayInvitationFile;chat_probe=[bool]$ChatProbe;scripted_sdk_input=[bool]$ScriptedInput;mixed_characters=$true;gameplay_input_sent=$false;screenshots_taken=$false;startup_complete=$false;observation_complete=$false;processes=@()}
 $record.native_reload=[bool]$NativeReload
 $record.button_task_probe=[bool]$ButtonTaskProbe
+$record.policy_cycle=[bool]$PolicyCycle
 $record.checkpoint_reload_count=$CheckpointReloadCount
 $record.checkpoint_reload_interval=$CheckpointReloadInterval
 $record.native_level_target=$NativeLevelTarget
@@ -166,6 +168,7 @@ try {
   if($ChatProbe){$info.ArgumentList.Add('--em2_probe_online_chat=true')}
   if($VoiceProbe){$info.ArgumentList.Add('--em2_probe_online_voice=true')}
   if($ButtonTaskProbe){$info.ArgumentList.Add('--em2_probe_owned_button_tasks=true')}
+  if($PolicyCycle){$info.ArgumentList.Add('--em2_probe_native_policy_cycle=true')}
   if($CheckpointReloadTick){$info.ArgumentList.Add('--em2_native_lobby_qa_restart_tick='+$CheckpointReloadTick);$info.ArgumentList.Add('--em2_native_lobby_qa_checkpoint_reload=true')}
   if($CheckpointReloadTick){$info.ArgumentList.Add('--em2_native_lobby_qa_restart_count='+$CheckpointReloadCount);$info.ArgumentList.Add('--em2_native_lobby_qa_restart_interval='+$CheckpointReloadInterval)}
   if($NativeLevelTarget){$info.ArgumentList.Add('--em2_native_lobby_qa_level_target='+$NativeLevelTarget)}

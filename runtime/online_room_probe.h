@@ -4,6 +4,7 @@
 #include <span>
 #include <cstdint>
 namespace rex::input {class InputSystem;}
+struct PPCContext;
 namespace em2::net {
 class Room;
 struct OwnedRosterActor;
@@ -19,5 +20,7 @@ bool InstallPrivateRoomProbe();
 // ordinary launches keep the real runtime input system. No wire pointers or
 // post-interpreter values are injected into authoritative frames.
 std::unique_ptr<rex::input::InputSystem> MakePrivateRoomInput(Room&);
+// Exact private native script-scheduler boundary; balanced task-policy fixture.
+void TickPrivateNativeTaskPolicy(PPCContext&,uint8_t*);
 void ObservePrivateRoomActors(uint64_t tick,std::span<const OwnedRosterActor>,uint8_t*);
 }

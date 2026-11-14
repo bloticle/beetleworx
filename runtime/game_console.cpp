@@ -6,6 +6,7 @@
 #include "native_engine.h"
 #include "online_runtime.h"
 #include "online_native_menu.h"
+#include "online_room_probe.h"
 #include "online.h"
 #include "simulation.h"
 #include "players.h"
@@ -272,6 +273,7 @@ void Service(PPCContext& ctx,uint8_t* base,uint32_t state){
 }
 
 void em2::TickPrivateNativeRestart(PPCContext& ctx,uint8_t* base){
+ net::TickPrivateNativeTaskPolicy(ctx,base);
  const auto requested=REXCVAR_GET(em2_native_lobby_qa_restart_tick);
  const auto count=REXCVAR_GET(em2_native_lobby_qa_restart_count);
  const auto interval=REXCVAR_GET(em2_native_lobby_qa_restart_interval);

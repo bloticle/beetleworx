@@ -39,9 +39,9 @@ bool OwnedActorInputFor(uint64_t peer,PPCContext&,uint8_t* base,OwnedActorInput&
 bool OwnedActorInputForController(uint32_t controller,PPCContext&,uint8_t* base,OwnedActorInput&);
 // After native admission, apply the existing native human permission policy
 // for this action profile to the owned collection. Never registers permissions
-// or changes the retail policy. Reapply when authored restrictions change.
+// or changes the retail policy. Initial admission only; runtime changes use deltas.
 bool ApplyOwnedActorTaskPermissions(uint64_t peer,PPCContext&,uint8_t* base);
-// Consume original task restriction add/remove notifications outside a frame.
+// Replay ordered, generation-pinned native task restriction deltas outside a frame.
 bool RefreshOwnedActorTaskPermissions(PPCContext&,uint8_t* base);
 // Staging only: the caller must begin each authoritative simulation tick once,
 // then stage immutable peer bases before the native controller update. These
