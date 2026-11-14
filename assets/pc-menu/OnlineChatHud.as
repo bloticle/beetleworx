@@ -30,6 +30,7 @@ function _pcChatTick()
    if(getTimer()-this._pcChatClock < 100) return;
    this._pcChatClock = getTimer();
    if(_level0.PCOnlineChat == undefined) return;
+   if(this._pcRecoveryTick()) return;
    // Original property subscriptions can run before extra humans are admitted.
    // Query the actual local actor through the HUD bridge, then drive the real
    // authored status setter only on changes. This also covers later damage.
@@ -106,4 +107,35 @@ function _pcChatTick()
    panel.lineTo(this._pcChatWidth,0); panel.lineTo(this._pcChatWidth,edit ? 516 : 360);
    panel.lineTo(0,edit ? 516 : 360); panel.lineTo(0,0); panel.endFill();
    panel.help._y = edit ? 468 : 316;
+}
+function _pcRecoveryTick()
+{
+   var state = _level0.PCOnlineChat(2790,-1);
+   if(state == undefined || state <= 0)
+   {
+      if(this._pcRecoveryPanel != undefined) this._pcRecoveryPanel._visible = false;
+      return false;
+   }
+   if(this._pcChatPanel != undefined) this._pcChatPanel._visible = false;
+   if(this._pcRecoveryPanel == undefined)
+   {
+      var panel = this.createEmptyMovieClip("_pcRecoveryPanel",this.getNextHighestDepth());
+      var width = Math.min(560,_global.initVars.screenWidth*0.8);
+      panel._x = _global.offsetX + (_global.initVars.screenWidth-width)*0.5;
+      panel._y = _global.initVars.screenHeight*0.3;
+      panel.beginFill(0,90);panel.moveTo(0,0);panel.lineTo(width,0);panel.lineTo(width,190);panel.lineTo(0,190);panel.endFill();
+      panel.createTextField("message",1,18,14,width-36,110);
+      var format = this.cutsceneskip.t_label.getTextFormat();format.size=18;format.align="center";format.color=16777215;
+      panel.message.embedFonts=true;panel.message.setNewTextFormat(format);
+      panel.message.multiline=true;panel.message.wordWrap=true;panel.message.selectable=false;
+      var button=panel.createEmptyMovieClip("back",2);
+      button._x=24;button._y=132;button.beginFill(2631720,100);button.moveTo(0,0);button.lineTo(width-48,0);button.lineTo(width-48,42);button.lineTo(0,42);button.endFill();
+      button.createTextField("label",1,4,9,width-56,28);button.label.embedFonts=true;button.label.setNewTextFormat(format);button.label.selectable=false;
+      button.onRelease=function(){if(this.enabled)_level0.PCOnlineChat(2790,1);};
+   }
+   var panel=this._pcRecoveryPanel;panel._visible=true;
+   panel.message.text=this._pcChatRead(2791);
+   panel.back.enabled=state==1;panel.back._alpha=state==1?100:55;
+   panel.back.label.text=state==1?"Return to title (Enter)":state==4?"Restart required":"Returning to title...";
+   return true;
 }

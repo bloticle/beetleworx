@@ -8,6 +8,7 @@
 #include "online_chat.h"
 #include "online_voice_runtime.h"
 #include "online_room_gameplay.h"
+#include "online_room_leave.h"
 #include "controls.h"
 #include "engine_workbench.h"
 #include "gameplay_mods.h"
@@ -688,6 +689,12 @@ PPC_FUNC_IMPL(sub_82B0D118) {
             if(std::isfinite(raw_id) && raw_id>=2800 && raw_id<=2810 && std::floor(raw_id)==raw_id &&
                std::isfinite(raw_choice) && raw_choice>=-1 && raw_choice<=1024 && std::floor(raw_choice)==raw_choice){
                 int result=0;if(em2::net::NativeOnlineVoiceOption(int(raw_id),int(raw_choice),result)){
+                    ctx.f1.f64=result;sub_8295FEA8(ctx,base);return;
+                }
+            }
+            if(std::isfinite(raw_id) && (raw_id==2790 || raw_id==2791) &&
+               std::isfinite(raw_choice) && raw_choice>=-1 && raw_choice<=1024 && std::floor(raw_choice)==raw_choice){
+                int result=0;if(em2::net::NativeRoomRecoveryOption(int(raw_id),int(raw_choice),result)){
                     ctx.f1.f64=result;sub_8295FEA8(ctx,base);return;
                 }
             }

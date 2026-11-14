@@ -17,6 +17,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <mutex>
+#include <string>
 
 PPC_EXTERN_FUNC(__imp__sub_829DA2C0);
 REXCVAR_DECLARE(bool,em2_private_profile);
@@ -34,6 +36,16 @@ struct Leave {
 bool disconnect_injected=false;
 std::atomic<bool> halted{false};
 std::atomic<bool> render_retired{false};
+enum class Recovery:int {Inactive,Available,Requested,Returning,RestartRequired};
+std::atomic<Recovery> recovery{Recovery::Inactive};
+std::atomic<bool> recovery_requested{false};
+std::mutex recovery_mutex;
+std::string recovery_message;
+void RecoveryHint(Recovery state,std::string message){
+    {std::lock_guard lock(recovery_mutex);recovery_message=std::move(message);}
+    recovery.store(state,std::memory_order_release);
+}
+bool RequestRecovery(){auto expected=Recovery::Available;if(!recovery.compare_exchange_strong(expected,Recovery::Requested))return false;recovery_requested.store(true,std::memory_order_release);return true;}
 struct Environment {unsigned csr=_mm_getcsr();DWORD error=GetLastError();~Environment(){_mm_setcsr(csr);SetLastError(error);}};
 bool Readable(uint8_t* base,uint32_t p,size_t n){return base && p>=4096 && uint64_t(p)+n<=0x100000000ull && GuestReadBatch::Readable(base+p,n);}
 struct Caller {
@@ -45,7 +57,41 @@ struct Caller {
             text=top-512;ctx.r1.u64=top-4096;}}
     ~Caller(){if(memory)std::memcpy(memory,bytes.data(),bytes.size());ctx=saved;}
 };
-void Fail(const char* why){leave.phase=Phase::Failed;halted.store(true,std::memory_order_release);render_retired.store(true,std::memory_order_release);REXLOG_ERROR("Native Room title return failed: {}; world remains halted",why);}
+void Fail(const char* why){leave.phase=Phase::Failed;halted.store(true,std::memory_order_release);render_retired.store(true,std::memory_order_release);RecoveryHint(Recovery::RestartRequired,std::string("Could not return safely: ")+why+". Restart Beetleworx; your offline save is retained.");REXLOG_ERROR("Native Room title return failed: {}; world remains halted",why);}
+}
+bool NativeRoomRecoveryOption(int id,int choice,int& result){
+    if(id!=2790 && id!=2791)return false;
+    result=0;
+    if(id==2790){result=choice==1?int(RequestRecovery()):int(recovery.load(std::memory_order_acquire));return true;}
+    static thread_local std::string text;
+    if(choice==0){std::lock_guard lock(recovery_mutex);text=recovery_message;}
+    if(choice>=0 && size_t(choice)<text.size())result=uint8_t(text[size_t(choice)]);
+    return true;
+}
+bool NativeRoomRecoveryKey(unsigned key,bool down){
+    if(key!=VK_RETURN)return false;
+    const auto state=recovery.load(std::memory_order_acquire);
+    if(state!=Recovery::Available && state!=Recovery::Requested && state!=Recovery::Returning)return false;
+    if(down && state==Recovery::Available)RequestRecovery();return true;
+}
+bool TestNativeRoomRecoveryRequests(){
+    if(NativeRoomActive() || leave.phase!=Phase::Idle || recovery.load()!=Recovery::Inactive)return false;
+    struct Restore{~Restore(){recovery_requested=false;RecoveryHint(Recovery::Inactive,{});}}restore;
+    int result=99;
+    if(!NativeRoomRecoveryOption(2790,1,result) || result || NativeRoomRecoveryKey(VK_RETURN,true))return false;
+    RecoveryHint(Recovery::Available,"Offline save retained.");
+    if(!NativeRoomRecoveryOption(2790,-1,result) || result!=1 || !NativeRoomRecoveryKey(VK_RETURN,true) || !recovery_requested.load())return false;
+    if(!NativeRoomRecoveryOption(2790,-1,result) || result!=2 || !NativeRoomRecoveryOption(2790,1,result) || result)return false;
+    // Publishing an interim unsafe-boundary hint must not lose an already
+    // accepted request. Only the native owner consumes or rejects that queue.
+    RecoveryHint(Recovery::RestartRequired,"Waiting for native boundary.");
+    if(!recovery_requested.load() || leave.phase!=Phase::Idle || NativeRoomRecoveryKey('A',true))return false;
+    recovery_requested=false;
+    if(!NativeRoomRecoveryOption(2790,1,result) || result || NativeRoomRecoveryKey(VK_RETURN,true))return false;
+    if(NativeRoomRecoveryOption(2789,0,result) || NativeRoomRecoveryOption(2792,0,result))return false;
+    RecoveryHint(Recovery::Inactive,{});if(NativeRoomRecoveryKey(VK_RETURN,false))return false;
+    REXLOG_INFO("Native recovery requests passed: inactive/unsafe rejection, real keyboard/GFx admission, duplicate coalescing, pending-boundary preservation; no world transition dispatched");
+    return true;
 }
 bool NativeRoomTitleLeaveHalted()noexcept{return halted.load(std::memory_order_acquire);}
 bool NativeRoomTitleLeaveRenderRetired()noexcept{return render_retired.load(std::memory_order_acquire);}
@@ -55,13 +101,13 @@ void NotifyNativeRoomTitleLeaveLoaded(std::string_view level){
 }
 void TickNativeRoomTitleLeave(PPCContext& ctx,uint8_t* base,bool completed){
     Environment environment;
-    if(!REXCVAR_GET(em2_probe_room_return_title) || !REXCVAR_GET(em2_private_profile) || NativeRoomLoadsCancelled())return;
-    if(leave.phase==Phase::Idle && !NativeOnlineMenuQaActive())return;
-    if(leave.phase==Phase::Ready && NativeRoomActive() && NativeRoomStatus().state!=NativeSessionState::Failed)leave=Leave{};
+    const bool private_auto=REXCVAR_GET(em2_probe_room_return_title) && REXCVAR_GET(em2_private_profile) && NativeOnlineMenuQaActive();
+    if(NativeRoomLoadsCancelled())return;
+    if(leave.phase==Phase::Ready && NativeRoomActive() && NativeRoomStatus().state!=NativeSessionState::Failed){leave=Leave{};RecoveryHint(Recovery::Inactive,{});}
     if(leave.phase==Phase::Ready || leave.phase==Phase::Failed)return;
     if(leave.phase==Phase::Idle){
         const auto tick=REXCVAR_GET(em2_probe_room_disconnect_tick);
-        if(!disconnect_injected && tick!=0xFFFFFFFFu && completed && NativeOnlineMenuQaActive() &&
+        if(private_auto && !disconnect_injected && tick!=0xFFFFFFFFu && completed && NativeOnlineMenuQaActive() &&
            NativeRoomActive() && NativeRoomStatus().state==NativeSessionState::Attached){
             auto* game=CurrentNativeRoomGameplay();auto* room=PrivateNativeMenuRoom();
             const auto finished=game?game->last_native_completed_tick():std::nullopt;
@@ -71,9 +117,22 @@ void TickNativeRoomTitleLeave(PPCContext& ctx,uint8_t* base,bool completed){
                 return;
             }
         }
-        if(!NativeRoomActive() || NativeRoomStatus().state!=NativeSessionState::Failed || !completed)return;
+        if(!NativeRoomActive() || NativeRoomStatus().state!=NativeSessionState::Failed){
+            recovery_requested.store(false,std::memory_order_release);
+            if(recovery.load()!=Recovery::Inactive)RecoveryHint(Recovery::Inactive,{});return;
+        }
+        if(!completed){RecoveryHint(Recovery::RestartRequired,"Online connection stopped during an unfinished update. Restart Beetleworx if a safe return does not become available.");return;}
         auto* gameplay=CurrentNativeRoomGameplay();if(!gameplay)return;
-        if(const auto reason=gameplay->LeaveBoundaryBlocker(base)){REXLOG_ERROR("Native Room title return rejected: {}",reason);leave.phase=Phase::Failed;return;}
+        if(const auto reason=gameplay->LeaveBoundaryBlocker(base)){
+            recovery_requested.store(false,std::memory_order_release);
+            RecoveryHint(Recovery::RestartRequired,std::string("Cannot safely return: ")+reason+". Restart Beetleworx; your offline save is retained.");
+            if(private_auto){REXLOG_ERROR("Native Room title return rejected: {}",reason);leave.phase=Phase::Failed;}return;
+        }
+        if(!private_auto && !recovery_requested.load(std::memory_order_acquire)){
+            RecoveryHint(Recovery::Available,"Online connection lost. Return to the title menu to restore your offline save and start another lobby.");return;
+        }
+        recovery_requested.store(false,std::memory_order_release);
+        RecoveryHint(Recovery::Returning,"Returning to title and restoring your offline save...");
         // This is the original application's outer virtual update, not a Lua
         // callback or a physics/task event. Queue the normal native transition.
         if(ctx.lr!=0x83075AD4 || !Readable(base,0x833EFA38,4)){Fail("unexpected native application boundary");return;}
@@ -107,7 +166,7 @@ void TickNativeRoomTitleLeave(PPCContext& ctx,uint8_t* base,bool completed){
     if(leave.phase==Phase::Refreshing){
         const auto status=NativeOnlineTitleRestoreStatus();
         if(status==NativeTitleRestoreState::Failed){Fail("original save refresh failed");return;}
-        if(status==NativeTitleRestoreState::Ready){leave.phase=Phase::Ready;render_retired.store(false,std::memory_order_release);REXLOG_INFO("Native Room title return complete: original world unloaded, controls retired, original storage refreshed");}
+        if(status==NativeTitleRestoreState::Ready){leave.phase=Phase::Ready;render_retired.store(false,std::memory_order_release);RecoveryHint(Recovery::Inactive,{});REXLOG_INFO("Native Room title return complete: original world unloaded, controls retired, original storage refreshed");}
     }
 }
 }

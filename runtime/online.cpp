@@ -1231,7 +1231,7 @@ bool TestOnlineSession() {
     for(unsigned field=0;field<8;++field) {
         auto wrong=identity;const char* reason=nullptr;
         switch(field) {
-        case 0:wrong.build.back()^=1;reason="Different game builds";break;
+        case 0:wrong.build.back()^=1;reason="Different Beetleworx versions";break;
         case 1:wrong.content.back()^=1;reason="Different game content";break;
         case 2:wrong.checkpoint.back()^=1;reason="Different saves";break;
         case 3:wrong.session.back()^=1;reason="different session";break;
