@@ -9,6 +9,10 @@
 #include <rex/graphics/d3d12/texture_cache.h>
 #include <rex/graphics/d3d12/shared_memory.h>
 #include <rex/graphics/d3d12/primitive_processor.h>
+#include <rex/graphics/d3d12/pipeline_cache.h>
+#include <rex/graphics/pipeline/render_target/cache.h>
+#include <dxgi1_4.h>
+#include <psapi.h>
 #include <string>
 #include <future>
 #include <thread>
@@ -36,6 +40,11 @@ struct WritableTag{friend auto MemberOf(WritableTag);};template struct Access<Wr
 struct SubmittedTag{friend auto MemberOf(SubmittedTag);};template struct Access<SubmittedTag,&UP::submitted_first_>;
 struct PageSizeTag{friend auto MemberOf(PageSizeTag);};template struct Access<PageSizeTag,&UP::page_size_>;
 struct GpuHeapsTag{friend auto MemberOf(GpuHeapsTag);};template struct Access<GpuHeapsTag,&rex::graphics::d3d12::D3D12SharedMemory::buffer_tiled_heaps_>;
+struct PipelineCacheTag{friend auto MemberOf(PipelineCacheTag);};template struct Access<PipelineCacheTag,&CP::pipeline_cache_>;
+struct PipelinesTag{friend auto MemberOf(PipelinesTag);};template struct Access<PipelinesTag,&rex::graphics::d3d12::PipelineCache::pipelines_>;
+struct ShadersTag{friend auto MemberOf(ShadersTag);};template struct Access<ShadersTag,&rex::graphics::d3d12::PipelineCache::shaders_>;
+struct TargetCacheTag{friend auto MemberOf(TargetCacheTag);};template struct Access<TargetCacheTag,&CP::render_target_cache_>;
+struct TargetsTag{friend auto MemberOf(TargetsTag);};template struct Access<TargetsTag,&rex::graphics::RenderTargetCache::render_targets_>;
 struct UploadStats{uint64_t writable=0,submitted=0,page_size=0;};
 UploadStats UploadState(UP* pool){
     UploadStats result;if(!pool)return result;result.page_size=pool->*MemberOf(PageSizeTag{});
@@ -115,6 +124,7 @@ void em2::ReportWorldGraphicsMemory(std::string_view phase,uint64_t generation) 
         cp->CallInThread([cp,generation,phase=std::string(phase)]{
             const auto csr=_mm_getcsr();const auto error=GetLastError();
             struct Host {unsigned csr;DWORD error;~Host(){_mm_setcsr(csr);SetLastError(error);}} host{csr,error};
+            try {
             auto* cache=(cp->*MemberOf(TexturePointerTag{})).get();if(!cache)return;
             MEMORYSTATUSEX memory{};memory.dwLength=sizeof(memory);if(!GlobalMemoryStatusEx(&memory))return;
             REXLOG_INFO("Native world graphics memory: phase '{}' generation {} textures {} texture bytes {} system available commit {}; GPU-worker snapshot only, no cache changes",phase,generation,
@@ -127,6 +137,24 @@ void em2::ReportWorldGraphicsMemory(std::string_view phase,uint64_t generation) 
             if(shared)for(auto* heap:shared->*MemberOf(GpuHeapsTag{}))if(heap){heap_bytes+=heap->GetDesc().SizeInBytes;++heap_count;}
             REXLOG_INFO("Native world GPU allocation pools: phase '{}' generation {} shared heaps {}/{} bytes; constant upload writable/submitted {}/{} page {}; shared upload {}/{} page {}; index upload {}/{} page {}; completed submission {}",phase,generation,heap_count,heap_bytes,
                 constants.writable,constants.submitted,constants.page_size,uploads.writable,uploads.submitted,uploads.page_size,indices.writable,indices.submitted,indices.page_size,cp->GetCompletedSubmission());
+            // Native shader/pipeline/target maps are owned by this worker after
+            // synchronous storage initialization. Creation workers fill PSOs,
+            // not these maps. Counts are not driver allocation byte estimates.
+            auto* pipelines=(cp->*MemberOf(PipelineCacheTag{})).get();auto* targets=(cp->*MemberOf(TargetCacheTag{})).get();
+            PROCESS_MEMORY_COUNTERS_EX process{};process.cb=sizeof(process);
+            const bool have_process=K32GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&process),sizeof(process))!=FALSE;
+            REXLOG_INFO("Native world host allocation snapshot: phase '{}' generation {} shaders {} pipelines {} render target entries {}; process private bytes {} valid {}",phase,generation,
+                pipelines?(pipelines->*MemberOf(ShadersTag{})).size():0,pipelines?(pipelines->*MemberOf(PipelinesTag{})).size():0,targets?(targets->*MemberOf(TargetsTag{})).size():0,process.PrivateUsage,have_process);
+            Microsoft::WRL::ComPtr<IDXGIFactory4> factory;Microsoft::WRL::ComPtr<IDXGIAdapter3> adapter;
+            auto& provider=cp->GetD3D12Provider();
+            HRESULT status=provider.GetDXGIFactory()->QueryInterface(IID_PPV_ARGS(&factory));
+            if(SUCCEEDED(status))status=factory->EnumAdapterByLuid(provider.GetDevice()->GetAdapterLuid(),IID_PPV_ARGS(&adapter));
+            DXGI_QUERY_VIDEO_MEMORY_INFO local{},nonlocal{};
+            const HRESULT local_status=SUCCEEDED(status)?adapter->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_LOCAL,&local):status;
+            const HRESULT nonlocal_status=SUCCEEDED(status)?adapter->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL,&nonlocal):status;
+            REXLOG_INFO("Native world DXGI memory snapshot: phase '{}' generation {} node 0 local usage/budget {}/{} nonlocal {}/{} bytes; query status {:08X}/{:08X}; process GPU accounting, not system commit",phase,generation,
+                local.CurrentUsage,local.Budget,nonlocal.CurrentUsage,nonlocal.Budget,uint32_t(local_status),uint32_t(nonlocal_status));
+            }catch(...){/* A failed optional snapshot must not stop the worker. */}
         });
     }catch(...){/* A diagnostic must not change native loading or input. */}
 }
