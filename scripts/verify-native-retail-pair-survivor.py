@@ -30,6 +30,14 @@ def verify(root):
         assert 'Native Room loader agreed:' not in text and 'Room native world rebootstrap:' not in text
         assert 'Private retail-pair survivor health unavailable:' not in text
         assert 'Private Room actor trajectory unavailable:' not in text
+        profile = 1 if result.get('extra_oswald') else 0
+        assert re.search(rf'Native Room owned look admitted: peer 3 mode [0-9A-F]+ action [0-9A-F]+ profile {profile}; original action math and original OnLook',text)
+        assert re.search(rf'Native Room owned button callback: tick \d+ peer 3 profile {profile} action ',text)
+        counts = [tuple(int(v,16) if i==3 else int(v) for i,v in enumerate(row)) for row in re.findall(r'Native online death participant count: tick (\d+) participants (\d+) native dead (\d+) caller ([0-9A-F]+); actual admitted humans, original death state',text)]
+        assert len(counts) == 4 and all(row[1] == 3 and 1 <= row[2] <= 2 for row in counts)
+        assert sorted((t,d) for t,n,d,c in counts if c==0x82B2C8A0) == [(700,1),(700,2)]
+        assert len([row for row in counts if row[3]==0x82B2C494 and row[0]>700]) == 2
+        assert not re.search(r'Native Room owned camera input context: peer 3 fixed true;',text), 'Party death still restricted the living survivor camera'
         origins = re.findall(r"Private Room SDK input: peer (\d+) tick (\d+) elapsed 0 phase '",text)
         assert len(origins) == 1
         peer, origin = map(int,origins[0]); end = origin+1200
@@ -70,9 +78,9 @@ def verify(root):
         assert rows[origin+940][6] == 0 and abs(rows[origin+940][1]-floor) < .4
         histories.append({t:(health[t],retail[t]) for t in range(700,end+1)})
         poses.append({t:rows[t] for t in range(700,end+1)})
-        captures.append({'role':process['role'],'retail_recovery_tick':recovered,'survivor_jump_height':height})
+        captures.append({'role':process['role'],'survivor_profile':profile,'retail_recovery_tick':recovered,'survivor_jump_height':height})
     assert all(h == histories[0] for h in histories) and all(p == poses[0] for p in poses)
-    return {'passed':True,'binary_sha256':menu['binary_sha256'],'captures':captures,'scope':__doc__.strip()}
+    return {'passed':True,'binary_sha256':menu['binary_sha256'],'extra_oswald':bool(result.get('extra_oswald')),'captures':captures,'scope':__doc__.strip()}
 
 
 if __name__ == '__main__':

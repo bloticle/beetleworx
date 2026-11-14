@@ -239,6 +239,18 @@ bool NativeRoomGameplay::InitializeActors(PPCContext& ctx,uint8_t* base){
     return result==NativeRosterStep::Ready;
 }
 uint16_t NativeRoomGameplay::extra_actor_mask()const{return impl_->actors->ready()?impl_->actors->mask():0;}
+uint32_t NativeRoomGameplay::NativeDeathParticipantCount(PPCContext& ctx,uint8_t* base)const{
+    Environment environment;Context preserve(ctx);const auto& s=*impl_;uint64_t tick=0;
+    if(!s.Owner() || s.stopped || !s.started || !s.pending || !s.delivered || !s.Canonical() ||
+       s.room->state()!=RoomState::Running || !s.World(base) || !s.actors->ready() ||
+       !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed)return 0;
+    const auto count=s.roster.players.size();
+    if(count<2 || count>kOnlineRoomCapacity || s.actors->actors().size()!=count-2)return 0;
+    for(const auto& entry:s.actors->actors()){
+        OwnedActorInput actor;if(!OwnedActorForPeer(entry.room_peer,ctx,base,actor))return 0;
+    }
+    return uint32_t(count);
+}
 bool NativeRoomGameplay::OwnedActorForPeer(uint64_t peer,PPCContext& ctx,uint8_t* base,OwnedActorInput& out)const{
     Environment environment;Context preserve(ctx);out={};const auto& s=*impl_;
     if(!s.Owner() || s.stopped || !s.started || !s.Canonical() || !s.World(base) || !s.actors->ready())return false;

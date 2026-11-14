@@ -1,4 +1,4 @@
-# Native input-context lifecycle: confirmed online blocker
+# Native input-context lifecycle and party-death policy
 
 The passing extra-player recovery captures cover one damaged human at a time.
 They do not establish recovery when both retail humans die while an extra
@@ -47,10 +47,11 @@ normal control returns. Gameplay snapshots cannot simply be reused while
 native contexts/definitions change, and stale-definition checks must not be
 globally disabled to hide this failure. Completing a native frame that changes
 its input context must be distinguished from admitting another frame against
-old definitions. Surviving additional humans also need correct party-death
-policy; it is not established whether the original two-player death sequence
-will reload the level while they remain alive, because validation currently
-stops before that outcome.
+old definitions. The subsequent [native party-death count fix](online-party-death.md) prevents
+the false whole-party death sequence when an additional human survives. Its
+separate native survivor test passes. Legitimate cutscenes, whole-party death
+and controls-definition changes still require the broader synchronized
+source/receiver lifecycle described here.
 
 `verify-native-retail-pair-survivor.py` requires a retained world, unchanged
 survivor health, actual movement/reversal/jump/landing, matching histories in
@@ -93,3 +94,11 @@ The capture remains rejected as playable survivor/cutscene evidence. This
 isolates the next required work to context-aware source/receiver lifecycle,
 including delayed frames and control-return rearming, rather than completion
 of the already delivered native update. No new binary release was created.
+
+
+The later [party-death participant-count correction](online-party-death.md)
+addresses the cause of the original survivor scenario: two retail deaths were
+incorrectly classified as the death of the whole online party. That test now
+passes without entering CutScene, including normal retail recovery. It does
+not claim that legitimate CutScene input-definition changes can now rearm
+sources and receivers; that broader lifecycle remains unfinished.

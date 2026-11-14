@@ -1,4 +1,6 @@
 #include "online_actor_death.h"
+#include "online_room_gameplay.h"
+#include "simulation.h"
 #include "native_player_spawn.h"
 #include "native_character_physics.h"
 #include <bit>
@@ -18,6 +20,8 @@ PPC_EXTERN_FUNC(__imp__sub_82A010E8);
 PPC_EXTERN_FUNC(__imp__sub_82A38FC8);
 PPC_EXTERN_FUNC(__imp__sub_8276CC90);
 PPC_EXTERN_FUNC(__imp__sub_82769518);
+PPC_EXTERN_FUNC(__imp__sub_82769260);
+PPC_EXTERN_FUNC(__imp__sub_82769F28);
 PPC_EXTERN_FUNC(sub_82A010E8);
 namespace {
 using Actor=em2::net::OwnedActorInput;
@@ -96,6 +100,35 @@ bool em2::net::PeekOwnedActorDeath(uint64_t epoch,PPCContext& ctx,uint8_t* base,
 bool em2::net::ConfirmOwnedActorDeath(uint64_t epoch,const Ticket& ticket){
     Environment preserve;std::lock_guard lock(queue_mutex);if(native_event_depth || !Owner() || !epoch || epoch!=queue.epoch || ticket.consumer_epoch!=epoch)return false;
     for(auto& pending:queue.pending)if(pending.sequence && SameTicket(pending,ticket)){pending={};return true;}return false;
+}
+namespace {
+void ExtendNativeDeathCount(uint32_t caller,uint32_t expected,uint32_t manager,PPCContext& ctx,uint8_t* base){
+    if(caller!=expected)return;
+    uint32_t participants=0;uint64_t tick=0;
+    {
+        Context preserve(ctx);
+        auto* game=em2::net::CurrentNativeRoomGameplay();
+        if(game && Readable(0x833DAB60,4,base) && manager==PPC_LOAD_U32(0x833DAB60))
+            participants=game->NativeDeathParticipantCount(ctx,base);
+        if(participants>2 && em2::CurrentAgreedSimulationTick(tick))
+            REXLOG_INFO("Native online death participant count: tick {} participants {} native dead {} caller {:08X}; actual admitted humans, original death state",tick,participants,Readable(0x833E36CC,4,base)?PPC_LOAD_U32(0x833E36CC):0u,caller);
+    }
+    if(participants>2)ctx.r3.u64=participants;
+}
+}
+// Dead-state entry and revive check both compare the native dead counter
+// against two-slot player counts. Include admitted extra humans in those two
+// exact comparisons, retaining original death/revive behavior. PlayerManager
+// arrays, player identities and health are unchanged.
+PPC_FUNC_IMPL(sub_82769260){
+    const auto caller=uint32_t(ctx.lr),manager=ctx.r3.u32;
+    __imp__sub_82769260(ctx,base);
+    ExtendNativeDeathCount(caller,0x82B2C8A0,manager,ctx,base);
+}
+PPC_FUNC_IMPL(sub_82769F28){
+    const auto caller=uint32_t(ctx.lr),manager=ctx.r3.u32;
+    __imp__sub_82769F28(ctx,base);
+    ExtendNativeDeathCount(caller,0x82B2C494,manager,ctx,base);
 }
 // Original respawn 82A37518 resolves a two-slot PlayerManager index, then
 // uses it unchecked to read the checkpoint matrix and select character tasks.
