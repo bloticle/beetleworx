@@ -95,7 +95,7 @@ def build_character_hud(game_dir, ffdec):
     for marker in ('function _pcChatTick()', 'this._pcChatInit();', '_level0.PCOnlineChat(2761,1)', 'Enter / Y: Send',
                    '_level0.PCOnlineChat(2764,-1)', '_level0.PCOnlineChat(2765,-1)',
                    'this.mickey.lifeChanged = mickeyLife', 'this.oswald.lifeChanged = oswaldLife',
-                   'function _pcRecoveryTick()', '_level0.PCOnlineChat(2790,-1)', 'Return to title (Enter)'):
+                   'function _pcRecoveryTick()', '_level0.PCOnlineChat(2790,-1)', 'Return to title (Enter)', 'PCOnlineRecoveryTick'):
         if marker not in result:
             raise RuntimeError('Native HUD chat did not survive compilation: ' + marker)
     tags = runpy.run_path(str(ROOT / 'scripts/build-online-lobby-menu.py'))['gfx_tags']

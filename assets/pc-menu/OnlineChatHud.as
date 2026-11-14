@@ -22,6 +22,8 @@ function _pcChatField(clip,name,y,height,size)
 function _pcChatInit()
 {
    this._pcChatClock = 0;
+   var hud = this;
+   _level0.PCOnlineRecoveryTick = function() { return hud._pcRecoveryTick(); };
    this._pcChatPump = this.createEmptyMovieClip("_pcChatPump",this.getNextHighestDepth());
    this._pcChatPump.onEnterFrame = function() { this._parent._pcChatTick(); };
 }

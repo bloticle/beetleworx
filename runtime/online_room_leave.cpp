@@ -74,6 +74,40 @@ bool NativeRoomRecoveryOption(int id,int choice,int& result){
     if(choice>=0 && size_t(choice)<text.size())result=uint8_t(text[size_t(choice)]);
     return true;
 }
+void PumpNativeRoomRecoveryHud(PPCContext& ctx,uint8_t* base,unsigned container){
+    if(recovery.load(std::memory_order_acquire)==Recovery::Inactive)return;
+    Environment environment;
+    // The current dispatcher owns the registered PCOnlineChat callback. Only
+    // invoke its movie when that movie belongs to this locked UI container.
+    if(!Readable(base,0x833DCB9C,4) || !Readable(base,container,368))return;
+    const auto dispatcher=PPC_LOAD_U32(0x833DCB9C);
+    if(!Readable(base,dispatcher,8))return;
+    const auto movie=PPC_LOAD_U32(dispatcher+4);
+    if(!Readable(base,movie,160) || !PPC_LOAD_U8(movie+16))return;
+    bool owned=false;
+    for(unsigned offset:{348u,360u}){
+        const auto array=PPC_LOAD_U32(container+offset),count=PPC_LOAD_U32(container+offset+4);
+        if(count>1024 || !Readable(base,array,size_t(count)*4))continue;
+        for(unsigned i=0;i<count;++i)if(PPC_LOAD_U32(array+i*4)==movie){owned=true;break;}
+    }
+    if(!owned)return;
+    const auto handle=PPC_LOAD_U32(movie+156);
+    if(!Readable(base,handle,4))return;
+    const auto vtable=PPC_LOAD_U32(handle);
+    if(!Readable(base,vtable,96))return;
+    const auto method=PPC_LOAD_U32(vtable+92);
+    if(method<0x82000000 || method>=0x83400000 || (method&3))return;
+    static thread_local Clock::time_point next{};
+    const auto now=Clock::now();if(now<next)return;next=now+std::chrono::milliseconds(100);
+    Caller caller(ctx,base);if(!caller.memory)return;
+    constexpr char name[]="PCOnlineRecoveryTick";
+    std::memcpy(base+caller.text,name,sizeof(name));
+    // Original dispatcher 82834EA8 uses this exact Invoke ABI: movie view,
+    // method name, optional result, argument array, argument count. Calling
+    // only this authored method dispatches no onEnterFrame or world update.
+    ctx.r3.u64=handle;ctx.r4.u64=caller.text;ctx.r5.u64=0;ctx.r6.u64=0;ctx.r7.u64=0;
+    PPC_CALL_INDIRECT_FUNC(method);
+}
 bool NativeRoomRecoveryKey(unsigned key,bool down){
     if(key!=VK_RETURN)return false;
     const auto state=recovery.load(std::memory_order_acquire);

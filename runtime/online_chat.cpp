@@ -19,6 +19,7 @@
 #include <rex/input/input_driver.h>
 
 PPC_EXTERN_FUNC(__imp__sub_8295FC58);
+REXCVAR_DECLARE(uint32_t,em2_room_probe_input_warmup_ticks);
 REXCVAR_DEFINE_BOOL(em2_online_text_chat,true,"Online","Native HUD text chat: T or D-pad Up opens; Enter/Y sends; Escape/B closes");
 REXCVAR_DEFINE_BOOL(em2_probe_online_chat,false,"Debug","Exact private native-menu Room only: send one chat message per peer and record authoritative receipts");
 namespace em2::net {
@@ -107,12 +108,18 @@ void PumpOnlineChat(Room* room){
     if(private_probe){
         {std::lock_guard lock(mutex);expected_peers=unsigned(room->lobby().players.size());}
         const auto tick=room->next_tick();
-        if(probe_stage==0 && tick>=430){OnlineChatKey('T',true);OnlineChatCharacter('t');OnlineChatKey('T',false);probe_opened=std::chrono::steady_clock::now();++probe_stage;}
-        else if(probe_stage==1 && tick>=431){for(auto c:"Private chat peer "+std::to_string(room->local_peer()))OnlineChatCharacter(uint8_t(c));++probe_stage;}
+        // Keep the editor after the entire movement/action program, including
+        // its configured neutral warmup. Absolute tick 430 overlapped the
+        // second session's X button and correctly consumed it as chat input.
+        const auto origin=room->identity().first_tick;
+        const uint64_t chat_elapsed=uint64_t(REXCVAR_GET(em2_room_probe_input_warmup_ticks))+400;
+        const bool chat_due=tick>=origin && tick-origin>=chat_elapsed;
+        if(probe_stage==0 && chat_due){OnlineChatKey('T',true);OnlineChatCharacter('t');OnlineChatKey('T',false);probe_opened=std::chrono::steady_clock::now();++probe_stage;}
+        else if(probe_stage==1 && chat_due && tick-origin>chat_elapsed){for(auto c:"Private chat peer "+std::to_string(room->local_peer()))OnlineChatCharacter(uint8_t(c));++probe_stage;}
         else if(probe_stage==2){
             bool seen;{std::lock_guard lock(mutex);seen=probe_editor_seen;}
             if(seen || std::chrono::steady_clock::now()-probe_opened>std::chrono::seconds(2)){OnlineChatKey(VK_RETURN,true);OnlineChatKey(VK_RETURN,false);probe_submitted=std::chrono::steady_clock::now();++probe_stage;}
-        }else if(probe_stage==3 && std::chrono::steady_clock::now()-probe_submitted>std::chrono::milliseconds(400)){OnlineChatKey(VK_ESCAPE,true);OnlineChatKey(VK_ESCAPE,false);++probe_stage;}
+        }else if(probe_stage==3 && std::chrono::steady_clock::now()-probe_submitted>std::chrono::milliseconds(400)){OnlineChatKey(VK_ESCAPE,true);OnlineChatKey(VK_ESCAPE,false);++probe_stage;REXLOG_INFO("Native Room private chat editor closed: peer {} tick {}; input capture {}",room->local_peer(),tick,em2::ControlBindingsOpen());}
     }
     std::deque<std::string> pending;
     {std::lock_guard lock(mutex);if(active)pending.swap(outgoing);}

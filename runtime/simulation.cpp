@@ -2075,6 +2075,7 @@ PPC_FUNC_IMPL(sub_829ED310) {
             const bool locked=PPC_LOAD_U8(container+308)!=0;
             if(locked) { ctx=arguments; ctx.r3.u64=container+312; __imp__RtlEnterCriticalSection(ctx,base); }
             PrepareUiRender(container,base);
+            ctx=arguments;em2::net::PumpNativeRoomRecoveryHud(ctx,base,container);
             if(locked) { ctx=arguments; ctx.r3.u64=container+312; __imp__RtlLeaveCriticalSection(ctx,base); }
         }
         ctx=arguments;
