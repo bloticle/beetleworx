@@ -1,7 +1,9 @@
 """Verify original Bink movie entry, synchronized exit and restored controls.
 
-Three native clients play the retail Havok logo through StartSequence. This
-does not prove other movies, skipping, credits, Internet stalls or a campaign.
+Three native clients play the retail Havok logo through StartSequence.
+--expect-skip additionally checks native Accept, its delay and held-input return.
+This does not prove other movies, every skip configuration, credits, Internet
+stalls or a campaign.
 """
 import argparse
 import json
@@ -12,11 +14,14 @@ import runpy
 import struct
 
 
-def verify(root):
+def verify(root, expect_skip=False):
     result = json.loads((root / 'result.json').read_text(encoding='utf-8-sig'))
     assert result['movie_sequence'] and result['players'] == 3
     assert result['checkpoint_reload_tick'] == 300 and result['checkpoint_reload_count'] == 1
     assert not result['cutscene_cycle'] and not result['authored_conversation']
+    skip_delay = result.get('movie_skip_delay', 0)
+    if expect_skip:
+        assert result['cutscene_skip_input'] and skip_delay in (0, 2)
     helpers = Path(__file__).parent
     menu = runpy.run_path(str(helpers / 'verify-native-room-menu-roster.py'))['verify'](root, allow_scripted=True)
     sample = runpy.run_path(str(helpers / 'verify-native-player-respawn.py'))['SAMPLE']
@@ -34,13 +39,29 @@ def verify(root):
         assert len(re.findall(r'Native Room movie sequence target retained: tick 301 object [0-9A-F]+;', text)) == 1
         assert len(re.findall(r'Native Room movie playback clock admitted: tick 301 Bink [0-9A-F]+;', text)) == 1
         assert 'Native Room movie camera retained: tick 360;' in text
-        assert 'Native Room movie camera retained: tick 420;' in text
+        if not expect_skip:
+            assert 'Native Room movie camera retained: tick 420;' in text
         assert 'Native Room cutscene UI callback delivered:' not in text
         assert 'Native Room loader agreed:' not in text and 'Room native world rebootstrap:' not in text
         resumed = re.findall(r'Native Room cutscene bindings re-admitted: source tick (\d+), first delivery (\d+), input epoch 3;', text)
         assert len(resumed) == 1
         source, delivery = map(int, resumed[0])
-        assert 430 <= source <= 480 and delivery == source + 2
+        assert (source == 372 if expect_skip else 430 <= source <= 480) and delivery == source + 2
+        accepts = [(int(t), int(epoch), int(native), int(delay), bool(int(remaining, 16)), int(done))
+                   for t, epoch, native, delay, remaining, done in re.findall(
+                       r'Native Room movie Accept delivered: tick (\d+) epoch (\d+) native result (\d+) skip delay (-?\d+) remaining ([0-9A-F]+) completed (\d+);', text)]
+        if expect_skip:
+            assert text.count('Native Room movie Accept receiver armed: tick 304 epoch 2 handler 82B1DF70;') == 1
+            expected = [(371, 2, 0, skip_delay, False, 1)]
+            if skip_delay:
+                expected.insert(0, (321, 2, 0, 2, True, 0))
+                timers = [(int(t), op, int(stamp), float(elapsed)) for t, op, stamp, elapsed in re.findall(
+                    r'Native Room movie skip timer: tick (\d+) operation (start|elapsed) stamp (\d+) elapsed ([^;]+);', text)]
+                assert [r[:3] for r in timers] == [(301, 'start', 401000000), (321, 'elapsed', 401000000), (371, 'elapsed', 401000000)]
+                assert abs(timers[1][3] - 2/3) < 1e-5 and abs(timers[2][3] - 7/3) < 1e-5
+            assert accepts == expected, 'Original handler must retain its skip delay and finish only on the later agreed press'
+        else:
+            assert not accepts
         returns.append((source, delivery))
         origins = re.findall(r"Private Room SDK input: peer (\d+) tick (\d+) elapsed 0 phase '", text)
         assert len(origins) == 1
@@ -76,6 +97,8 @@ def verify(root):
         jumps = [int(t) for t in re.findall(r'Native Room owned Jump returned: peer \d+ tick (\d+) edge', text)]
         assert origin+1482 in jumps and origin+1486 in jumps
         assert not any(301 <= t < delivery for t in jumps)
+        if expect_skip:
+            assert not any(delivery <= t < origin+662 for t in jumps), 'Held movie Accept leaked into a gameplay Jump'
         agreed = {int(t): digest for t, digest in obs.findall(text)}
         assert all(t in agreed and t in retail and t in extra for t in range(origin, origin+1601))
         assert all(retail[t][1] == (5, 5, 5, 5) for t in range(origin, origin+1601))
@@ -85,14 +108,15 @@ def verify(root):
     assert len(set(returns)) == 1, 'Movie exit differs between native clients'
     assert all(h == histories[0] for h in histories), 'Actual world or actor trajectories differ'
     assert all(result[k] for k in ('normal_user_files_unchanged', 'normal_config_unchanged', 'normal_crash_unchanged'))
-    return {'passed': True, 'binary_sha256': menu['binary_sha256'], 'matching_updates': len(histories[0]),
+    return {'passed': True, 'skip_verified': expect_skip, 'skip_delay': skip_delay, 'binary_sha256': menu['binary_sha256'], 'matching_updates': len(histories[0]),
             'shared_return': returns[0], 'captures': reports, 'scope': __doc__.strip()}
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('root', type=Path)
-    root = parser.parse_args().root
-    report = verify(root)
+    parser.add_argument('--expect-skip', action='store_true')
+    args = parser.parse_args();root = args.root
+    report = verify(root, args.expect_skip)
     (root / 'native-movie-sequence-validation.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
     print(json.dumps(report, indent=2))

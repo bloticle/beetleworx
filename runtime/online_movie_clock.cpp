@@ -1,5 +1,7 @@
 #include "online_room_gameplay.h"
 #include "online_cutscene_input.h"
+#include "online_cutscene_skip.h"
+#include "simulation.h"
 #include "guest_read_batch.h"
 #include "ppc_context.h"
 #include <rex/logging.h>
@@ -62,6 +64,17 @@ bool em2::net::TestNativeMovieClock(){
     for(const auto caller:{0u,0x833365A0u,0x83335A80u,0x83337920u,0x83339530u,0x8333AC30u})
         if(!check(!PlaybackCaller(caller),"unrelated decode/performance/busy-wait and forged return sites keep native time"))return false;
     REXLOG_INFO("Native movie clock passed {} fraction/wrap/caller checks; real multi-client playback remains a separate test",count);return true;
+}
+
+bool em2::net::NativeMovieSkipTimerOwned(uint32_t timer,uint32_t caller,PPCContext& ctx,uint8_t* base){
+    if(caller!=0x82B1DD88 && caller!=0x82B1E070)return false;
+    if(caller==0x82B1E070)return NativeMovieAcceptTimerOwned(timer,caller,ctx,base);
+    auto* game=CurrentNativeRoomGameplay();uint64_t tick=0;
+    if(!game || !Readable(base,0x833DCCB8,4) || !game->ReadMovieClock(PPC_LOAD_U32(0x833DCCB8),ctx,base,tick))return false;
+    NativeGameOverState state;uint32_t mode=0,profile=0,object=0,handler=0;
+    if(!ReadNativeControlState(ctx,base,state,mode) || mode!=2 ||
+       !ReadNativeControlTarget(ctx,base,state.registry,2,profile,object,handler) || handler!=0x82B1DF70 || timer!=object+32)return false;
+    uint64_t agreed=0;return caller==0x82B1E070 || (em2::CurrentAgreedSimulationTick(agreed) && agreed==tick);
 }
 
 PPC_FUNC_IMPL(sub_8283BB58){Dispatch(ctx,base,__imp__sub_8283BB58);}

@@ -37,9 +37,10 @@ bool MovieOnlySequence(uint8_t* base,uint32_t object,bool allow_completed=false)
 }
 bool InspectNativeCutsceneUi(PPCContext& ctx,uint8_t* base,uint32_t registry,NativeCutsceneUiSnapshot& out){
     UiPreserve preserve(ctx,base);NativeGameOverState state;uint32_t mode=0;
-    if(!preserve.stack || !ReadNativeControlState(ctx,base,state,mode) || (mode!=3 && mode!=6) || state.registry!=registry || !UiReadable(base,0x833DBAD8,4))return false;
+    if(!preserve.stack || !ReadNativeControlState(ctx,base,state,mode) || !NativeCutsceneControlMode(mode) || state.registry!=registry || !UiReadable(base,0x833DBAD8,4))return false;
+    if(mode==2 && !ReadNativeCutsceneContext(ctx,base,registry))return false;
     const auto manager=PPC_LOAD_U32(0x833DBAD8);if(!UiReadable(base,manager,48))return false;
-    const auto uid=PPC_LOAD_U32(manager+16);std::string name;if(!UiName(base,uid,name) || name!="CutScene")return false;
+    const auto uid=PPC_LOAD_U32(manager+16);std::string name;if(!UiName(base,uid,name) || name!=(mode==2?"Menu":"CutScene"))return false;
     ctx.r3.u64=manager;ctx.r4.u64=manager+16;__imp__sub_827C3D78(ctx,base);const auto selected=ctx.r3.u32;
     if(!UiReadable(base,selected,24) || PPC_LOAD_U32(selected)!=uid)return false;
     NativeCutsceneUiSnapshot candidate;candidate.manager=manager;

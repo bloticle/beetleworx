@@ -3,7 +3,8 @@
 The source now supports the original `StartSequence` movie queue after native
 online gameplay admission. It retains the original Bink decoder and native
 movie state, with an agreed clock for playback scheduling. This is separate
-from interactive cinematic skip routing.
+from interactive cinematic skip routing. Movie Accept now has
+[separate skip-delay and callback coverage](online-movie-skip.md).
 
 ## Entry and return
 
@@ -77,7 +78,7 @@ interpreter/guard checks and the ordinary incomplete-frame rejection checks.
 This proves one original movie sequence in three local native clients.
 Playback scheduling currently follows the agreed 30 Hz update clock; smooth
 high-rate movie presentation and audio behavior under network stalls need
-separate checks. Other movies, queued multi-movie sequences, movie skipping,
+separate checks. Other movies, queued multi-movie sequences, other skip configurations,
 direct movie state 1, startup movies, credits/end-game/menu routes, Internet
 stall recovery and a complete online campaign still require validation or
 implementation. Original state-6 authored cinematic completion remains a

@@ -152,6 +152,8 @@ struct NativeRoomGameplay::Impl {
     NativeCutsceneUiGate skip_gate;
     std::optional<uint16_t> departing_cutscene_buttons;
     bool skip_target_available=false;
+    uint32_t skip_target_mode=0;
+    std::unique_ptr<NativeMovieAcceptReceiver> movie_receiver;
     uint32_t movie_sequence_target=0;
     std::optional<uint64_t> skip_target_entry;
     std::unique_ptr<NativeCutsceneSkipReceiver> skip_receiver;
@@ -590,7 +592,7 @@ bool NativeRoomGameplay::RearmInputContext(uint64_t tick,PPCContext& ctx,uint8_t
     if(s.native_buttons)for(const auto& actor:s.actors->actors())
         if(!frames->BindButtons(actor.room_peer,s.button_definitions[actor.actor.action_user],ctx,base))return false;
     finished=true;s.actor_frames=std::move(frames);s.input_epoch=next_epoch;s.cutscene_resume=*s.native_completed;s.cutscene_entry.reset();s.movie_sequence_target=0;s.return_pending=false;s.return_wait_start.reset();
-    s.skip_receiver.reset();
+    s.skip_receiver.reset();s.movie_receiver.reset();s.skip_target_available=false;s.skip_target_mode=0;s.skip_target_entry.reset();
     REXLOG_INFO("Native Room cutscene bindings re-admitted: source tick {}, first delivery {}, input epoch {}; actor/world/controls incarnation retained, fresh producer/receiver leases",tick,first,next_epoch);
     return true;
 }
@@ -643,7 +645,7 @@ RoomGameplayAdmission NativeRoomGameplay::Prepare(PPCContext& ctx,uint8_t* base,
         for(const auto& player:s.roster.players)s.cutscene_schemas[player.peer-1]=s.button_schemas[player.character==LobbyCharacter::Mickey?0:1];
         s.cutscene_entry=*s.native_completed;s.cutscene_resume.reset();++s.input_epoch;
         s.movie_sequence_target=0;
-        s.private_skip_source.reset();s.private_skip_armed=false;s.private_skip_failed=false;s.skip_gate={};s.skip_receiver.reset();s.skip_target_available=false;s.skip_target_entry.reset();s.departing_cutscene_buttons.reset();
+        s.private_skip_source.reset();s.private_skip_armed=false;s.private_skip_failed=false;s.skip_gate={};s.skip_receiver.reset();s.movie_receiver.reset();s.skip_target_available=false;s.skip_target_mode=0;s.skip_target_entry.reset();s.departing_cutscene_buttons.reset();
         REXLOG_INFO("Native Room cutscene input suspended: entry tick {}, input epoch {}; original state {} and native cutscene ownership, actor incarnations unchanged",*s.cutscene_entry,s.input_epoch,mode);
     }
     if(s.cutscene_entry && !NativeCutsceneControlMode(mode)){
@@ -669,9 +671,10 @@ RoomGameplayAdmission NativeRoomGameplay::Prepare(PPCContext& ctx,uint8_t* base,
             REXLOG_INFO("Native Room movie sequence target retained: tick {} object {:08X}; movie-only queue, no Menu callbacks",s.room->next_tick(),object);
         }
         TracePrivateNativeCutsceneUi(s.input_epoch,ctx,base,s.registry);
-        const bool target_available=!s.return_pending && mode==6 && NativeCutsceneSkipTargetAvailable(s.registry,ctx,base);
-        if(target_available!=s.skip_target_available){
-            s.skip_receiver.reset();s.skip_gate={};s.skip_target_available=target_available;
+        const bool target_available=!s.return_pending && ((mode==6 && NativeCutsceneSkipTargetAvailable(s.registry,ctx,base)) ||
+            (mode==2 && NativeMovieAcceptTargetAvailable(s.registry,ctx,base)));
+        if(target_available!=s.skip_target_available || (target_available && s.skip_target_mode!=mode)){
+            s.skip_receiver.reset();s.movie_receiver.reset();s.skip_gate={};s.skip_target_available=target_available;s.skip_target_mode=target_available?mode:0;
             s.skip_target_entry=target_available?s.native_completed:std::nullopt;
         }
         if(s.prepared){output=*s.prepared;return RoomGameplayAdmission::Ready;}
@@ -816,9 +819,14 @@ bool NativeRoomGameplay::Deliver(PPCContext& ctx,uint8_t* base){
         if(!BeginRetailPassiveTick(s.registry,tick,ctx,base))return s.Stop("Could not retain retail quarantine for native GameOver");
         if(!s.game_over_entry && s.cutscene_entry && !s.return_pending && s.skip_target_available && s.skip_target_entry && tick>*s.skip_target_entry+s.identity.input_delay){
             const bool ui=std::any_of(s.consumed->players.begin(),s.consumed->players.end(),[](const auto& c){return c.source==RoomMovementSource::NativeCutsceneUiV6;});
-            if(ui || s.skip_receiver){
-                if(!s.skip_receiver)s.skip_receiver=std::make_unique<NativeCutsceneSkipReceiver>();
-                if(!s.skip_receiver->Consume(*s.consumed,s.registry,s.input_epoch,ctx,base))return s.Stop("Native cutscene UI could not deliver its agreed frame to the original handler");
+            if(ui || s.skip_receiver || s.movie_receiver){
+                if(s.skip_target_mode==2){
+                    if(!s.movie_receiver)s.movie_receiver=std::make_unique<NativeMovieAcceptReceiver>();
+                    if(!s.movie_receiver->Consume(*s.consumed,s.registry,s.input_epoch,ctx,base))return s.Stop("Native movie Accept could not deliver its agreed frame to the original handler");
+                }else{
+                    if(!s.skip_receiver)s.skip_receiver=std::make_unique<NativeCutsceneSkipReceiver>();
+                    if(!s.skip_receiver->Consume(*s.consumed,s.registry,s.input_epoch,ctx,base))return s.Stop("Native cutscene UI could not deliver its agreed frame to the original handler");
+                }
             }
         }
         s.delivered=true;return true; // Character gameplay callbacks remain quarantined.

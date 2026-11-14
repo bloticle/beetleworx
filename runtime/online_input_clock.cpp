@@ -1,5 +1,6 @@
 #include "online_input_clock.h"
 #include "online_cutscene_skip.h"
+#include "online_room_gameplay.h"
 #include "online.h"
 #include "controls.h"
 #include "guest_read_batch.h"
@@ -81,7 +82,7 @@ bool RunLiveClockHelper(PPCContext& ctx,uint8_t* base,PPCFunc* original,uint64_t
     LiveClock clock{&ctx,base,ctx.r1.u32,uint32_t(ctx.lr),origin+tick*step};
     struct Restore {LiveClock* previous;~Restore(){live_clock=previous;}}restore{live_clock};
     live_clock=&clock;original(ctx,base);
-    if(clock.failed){GameplayInputGate().ObservationFailed();return true;}
+    if(clock.failed){if(auto* game=CurrentNativeRoomGameplay())game->ObservationFailed();else GameplayInputGate().ObservationFailed();return true;}
     Environment preserve_math;
     if(original==__imp__sub_826572B8)ctx.f1.f64=double(float(double(tick)/30.));
     else if(original==__imp__sub_831C14E0){
@@ -192,7 +193,7 @@ bool TryNativeInputClockQuery(PPCContext& ctx,uint8_t* base){
     ctx.r3.u64=owned && output_owned?1:0;return true;
 }
 bool RunAgreedNativeInputClockHelper(PPCContext& ctx,uint8_t* base,PPCFunc* original){
-    if(active || live_clock || !GameplayInputGate().active())return false;
+    if(active || live_clock)return false;
     const auto caller=uint32_t(ctx.lr);
     const bool button=original==__imp__sub_826572B8 && (caller==0x830A8C90 || caller==0x827C06F8);
     const bool start=original==__imp__sub_831C14E0 && caller==0x827C62BC;
@@ -200,10 +201,17 @@ bool RunAgreedNativeInputClockHelper(PPCContext& ctx,uint8_t* base,PPCFunc* orig
     const bool cutscene=(original==__imp__sub_831C14E0 || original==__imp__sub_831C1558) &&
         ((original==__imp__sub_831C14E0 && caller==0x82B211B8) || (original==__imp__sub_831C1558 && caller==0x82B22628)) &&
         NativeCutsceneSkipTimerOwned(ctx.r3.u32,caller,ctx,base);
-    if(!button && !start && !elapsed && !cutscene)return false;
+    const bool movie=((original==__imp__sub_831C14E0 && caller==0x82B1DD88) ||
+        (original==__imp__sub_831C1558 && caller==0x82B1E070)) && NativeMovieSkipTimerOwned(ctx.r3.u32,caller,ctx,base);
+    // Room UI receivers own their timer leases independently of the older
+    // two-player Session gate. Ordinary button clocks still require that gate.
+    if(!cutscene && !movie && (!GameplayInputGate().active() || (!button && !start && !elapsed)))return false;
     uint64_t generation=0;Frame frame;
     if(!em2::ReadPublishedSynchronizedControls(generation,frame) || !generation || !Readable(button?ctx.r31.u32:ctx.r3.u32,button?20:8,base))return false;
-    return RunLiveClockHelper(ctx,base,original,frame.tick);
+    const auto timer=ctx.r3.u32;const bool handled=RunLiveClockHelper(ctx,base,original,frame.tick);
+    if(movie && handled)REXLOG_INFO("Native Room movie skip timer: tick {} operation {} stamp {} elapsed {}; original timer helper on agreed clock",frame.tick,
+        original==__imp__sub_831C14E0?"start":"elapsed",PPC_LOAD_U64(timer),original==__imp__sub_831C1558?ctx.f1.f64:0.);
+    return handled;
 }
 namespace {
 struct ClockCase {

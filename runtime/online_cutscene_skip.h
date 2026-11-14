@@ -16,8 +16,10 @@ public:
     NativeCutsceneSkipSource(const NativeCutsceneSkipSource&)=delete;
     NativeCutsceneSkipSource& operator=(const NativeCutsceneSkipSource&)=delete;
     bool Arm(uint32_t registry,unsigned native_user,uint64_t epoch,uint64_t first_tick,PPCContext&,uint8_t*);
+    bool ArmMovieAccept(uint32_t registry,unsigned native_user,uint64_t epoch,uint64_t first_tick,PPCContext&,uint8_t*);
     bool Produce(const Pad&,unsigned native_user,uint64_t epoch,uint64_t tick,PPCContext&,uint8_t*,NativeCutsceneSkipSample&);
 private:
+    bool ArmMode(uint32_t,unsigned,uint64_t,uint64_t,bool movie,PPCContext&,uint8_t*);
     struct Impl;std::unique_ptr<Impl> impl_;
 };
 struct RoomFrame;
@@ -33,5 +35,17 @@ private:
 };
 bool NativeCutsceneSkipTargetAvailable(uint32_t registry,PPCContext&,uint8_t*);
 bool NativeCutsceneSkipTimerOwned(uint32_t timer,uint32_t caller,PPCContext&,uint8_t*);
+class NativeMovieAcceptReceiver {
+public:
+    NativeMovieAcceptReceiver();~NativeMovieAcceptReceiver();
+    NativeMovieAcceptReceiver(const NativeMovieAcceptReceiver&)=delete;
+    NativeMovieAcceptReceiver& operator=(const NativeMovieAcceptReceiver&)=delete;
+    bool Consume(const RoomFrame&,uint32_t registry,uint64_t input_epoch,PPCContext&,uint8_t*);
+private:
+    struct Impl;std::unique_ptr<Impl> impl_;
+};
+bool NativeMovieAcceptTargetAvailable(uint32_t registry,PPCContext&,uint8_t*);
+bool NativeMovieSkipTimerOwned(uint32_t timer,uint32_t caller,PPCContext&,uint8_t*);
+bool NativeMovieAcceptTimerOwned(uint32_t timer,uint32_t caller,PPCContext&,uint8_t*);
 bool TestNativeCutsceneSkipMath();
 }

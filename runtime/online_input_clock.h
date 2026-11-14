@@ -47,8 +47,9 @@ bool RunNativeInputClock(NativeInputClockState&,uint64_t source_epoch,uint64_t s
 // True: an exact owned native input callsite was handled (including fail-closed
 // private-scope errors). Never install this as a global elapsed-time override.
 bool TryNativeInputClockQuery(PPCContext&,uint8_t*);
-// Scope the original retail button/timer helpers to the published controller
-// tick. Other game, movie, streaming and OS clocks keep their native behavior.
+// Scope retail button helpers and owned UI skip timers to the published
+// controller tick. Media playback scheduling has its own movie-clock owner;
+// unrelated game, streaming and OS clocks retain their native behavior.
 bool RunAgreedNativeInputClockHelper(PPCContext&,uint8_t*,void(*original)(PPCContext&,uint8_t*));
 bool TestNativeInputClock();
 }

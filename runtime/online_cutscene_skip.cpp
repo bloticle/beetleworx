@@ -20,6 +20,7 @@ REXCVAR_DECLARE(bool,em2_private_profile);
 PPC_EXTERN_FUNC(__imp__sub_82770EE8);
 PPC_EXTERN_FUNC(__imp__sub_82770F58);
 PPC_EXTERN_FUNC(__imp__sub_82B210B0);
+PPC_EXTERN_FUNC(__imp__sub_82B1DF70);
 PPC_EXTERN_FUNC(__imp__sub_830A8200);
 PPC_EXTERN_FUNC(__imp__sub_830ACA80);
 PPC_EXTERN_FUNC(__imp__sub_827C3278);
@@ -41,21 +42,28 @@ constexpr std::array<const char*,3> Names{"DisplaySkipMovieButton","MovieSkipSta
 constexpr std::array<uint32_t,3> Kinds{2,1,3};
 void FixtureControlMode(PPCContext& ctx,uint8_t*){ctx.r3.u64=3;}
 void FixtureSceneMode(PPCContext& ctx,uint8_t*){ctx.r3.u64=6;}
+void FixtureMovieMode(PPCContext& ctx,uint8_t*){ctx.r3.u64=2;}
 void FixtureSceneObject(PPCContext& ctx,uint8_t*){ctx.r3.u64=0x5000;}
 thread_local uint8_t* fixture_base=nullptr;
 thread_local uint64_t fixture_tick=0;
 thread_local unsigned fixture_callbacks=0;
+thread_local bool fixture_movie_timer_lease=true;
 bool AgreedTick(uint64_t& tick,uint8_t* base){if(fixture_base && fixture_base==base){tick=fixture_tick;return true;}return em2::CurrentAgreedSimulationTick(tick);}
 void FixtureSceneCallback(PPCContext& ctx,uint8_t* base){++fixture_callbacks;__imp__sub_82B210B0(ctx,base);}
+void FixtureMovieCallback(PPCContext& ctx,uint8_t* base){++fixture_callbacks;
+    fixture_movie_timer_lease=fixture_movie_timer_lease && NativeMovieAcceptTimerOwned(ctx.r3.u32+32,0x82B1E070,ctx,base) &&
+        !NativeMovieAcceptTimerOwned(ctx.r3.u32+88,0x82B1E070,ctx,base) && !NativeMovieAcceptTimerOwned(ctx.r3.u32+32,0x82B1DD88,ctx,base);
+    __imp__sub_82B1DF70(ctx,base);}
 struct Binding {
     uint32_t registry=0,manager=0,input=0,device=0,buttons=0,threshold=0;unsigned user=0;
+    bool movie=false;
     std::array<uint32_t,3> actions{};std::array<Record,3> shapes{};
     bool operator==(const Binding&)const=default;
 };
-bool Discover(uint32_t registry,unsigned user,PPCContext& ctx,uint8_t* base,Binding& out){
+bool Discover(uint32_t registry,unsigned user,PPCContext& ctx,uint8_t* base,Binding& out,bool movie=false){
     if(user>3)return false;
     NativeCutsceneUiSnapshot ui;if(!InspectNativeCutsceneUi(ctx,base,registry,ui) || !Readable(base,ui.manager,176) || !Readable(base,0x833B65F8,4))return false;
-    Binding b;b.registry=registry;b.manager=ui.manager;b.user=user;b.threshold=PPC_LOAD_U32(0x833B65F8);
+    Binding b;b.registry=registry;b.manager=ui.manager;b.user=user;b.movie=movie;b.threshold=PPC_LOAD_U32(0x833B65F8);
     b.input=PPC_LOAD_U32(b.manager+72);if(!b.threshold || b.threshold>255 || !Readable(base,b.input,88))return false;
     b.device=PPC_LOAD_U32(b.input+72+user*4);
     if(!Readable(base,b.device,96) || PPC_LOAD_U32(b.device)!=0x821DE6E8 || PPC_LOAD_U32(b.device+48)!=16 ||
@@ -63,16 +71,16 @@ bool Discover(uint32_t registry,unsigned user,PPCContext& ctx,uint8_t* base,Bind
        PPC_LOAD_U32(0x821DE6E8+68)!=0x830A8090 || PPC_LOAD_U32(0x821DE6E8+112)!=0x830A7968)return false;
     b.buttons=PPC_LOAD_U32(b.device+52);if(!Readable(base,b.buttons,320))return false;
     unsigned contexts=0;
-    for(const auto& c:ui.contexts)if(c.name=="CutScene"){
+    for(const auto& c:ui.contexts)if(c.name==(movie?"Menu":"CutScene")){
         ++contexts;
-        for(const auto& a:c.actions)for(unsigned i=0;i<Names.size();++i)if(a.name==Names[i]){
+        for(const auto& a:c.actions)for(unsigned i=0;i<(movie?1u:Names.size());++i)if(a.name==(movie?"Accept":Names[i])){
             if(b.actions[i] || a.kind!=Kinds[i] || a.condition || a.curve || a.bindings.size()!=1 ||
                a.bindings[0][0]!=7 || a.bindings[0][1]!=0x01400009 || a.bindings[0][2] || a.bindings[0][3] ||
                PPC_LOAD_U8(a.action+104) || a.bindings[0][5])return false;
             b.actions[i]=a.action;std::memcpy(b.shapes[i].data(),base+a.action,436);Normalize(b.shapes[i]);
         }
     }
-    if(contexts!=1 || std::any_of(b.actions.begin(),b.actions.end(),[](auto a){return !a;}))return false;
+    if(contexts!=1 || std::any_of(b.actions.begin(),b.actions.begin()+(movie?1:3),[](auto a){return !a;}))return false;
     out=std::move(b);return true;
 }
 struct Candidate {
@@ -95,7 +103,7 @@ bool Evaluate(PPCContext& ctx,uint8_t* base,NativeInputClockScratch& scratch,voi
     if(!scratch.OwnButtonHistory(buttons,16))return false;
     ctx.r3.u64=device;__imp__sub_830A8200(ctx,base);
     if(c.changed){ctx.r3.u64=device;ctx.r4.u64=c.down?0x1000:0;__imp__sub_830ACA80(ctx,base);}
-    for(unsigned i=0;i<3;++i){
+    for(unsigned i=0;i<(b.movie?1u:3u);++i){
         std::memcpy(base+action,c.actions[i].data(),436);
         if(Kinds[i]==2 && !scratch.OwnActionRecord(action))return false;
         ctx.r3.u64=manager;ctx.r4.u64=action;__imp__sub_827C3278(ctx,base);const auto enabled=ctx.r3.u32;if(enabled>1)return false;
@@ -106,7 +114,7 @@ bool Evaluate(PPCContext& ctx,uint8_t* base,NativeInputClockScratch& scratch,voi
         c.result.dispatch[i]=ctx.r3.u32!=0;std::memcpy(c.actions[i].data(),base+action,436);
     }
     std::memcpy(c.device.data(),base+device,96);std::memcpy(c.buttons.data(),base+buttons,320);
-    if(e.validate){Binding current;if(!Discover(b.registry,b.user,ctx,base,current) || current!=b)return false;}
+    if(e.validate){Binding current;if(!Discover(b.registry,b.user,ctx,base,current,b.movie) || current!=b)return false;}
     return true;
 }
 }
@@ -117,14 +125,20 @@ struct NativeCutsceneSkipSource::Impl {
 NativeCutsceneSkipSource::NativeCutsceneSkipSource():impl_(std::make_unique<Impl>()){}
 NativeCutsceneSkipSource::~NativeCutsceneSkipSource()=default;
 bool NativeCutsceneSkipSource::Arm(uint32_t registry,unsigned user,uint64_t epoch,uint64_t first,PPCContext& ctx,uint8_t* base){
+    return ArmMode(registry,user,epoch,first,false,ctx,base);
+}
+bool NativeCutsceneSkipSource::ArmMovieAccept(uint32_t registry,unsigned user,uint64_t epoch,uint64_t first,PPCContext& ctx,uint8_t* base){
+    return ArmMode(registry,user,epoch,first,true,ctx,base);
+}
+bool NativeCutsceneSkipSource::ArmMode(uint32_t registry,unsigned user,uint64_t epoch,uint64_t first,bool movie,PPCContext& ctx,uint8_t* base){
     Environment env;auto& s=*impl_;Binding binding;
-    if(s.armed || !epoch || (epoch&1) || !Discover(registry,user,ctx,base,binding) || !InitializeNativeInputClock(s.clock,epoch,first,ctx,base))return false;
+    if(s.armed || !epoch || (epoch&1) || !Discover(registry,user,ctx,base,binding,movie) || !InitializeNativeInputClock(s.clock,epoch,first,ctx,base))return false;
     s.committed=Fresh(binding,base);s.binding=std::move(binding);s.epoch=epoch;s.next=first;s.thread=GetCurrentThreadId();s.base=base;s.armed=true;return true;
 }
 bool NativeCutsceneSkipSource::Produce(const Pad& pad,unsigned user,uint64_t epoch,uint64_t tick,PPCContext& ctx,uint8_t* base,NativeCutsceneSkipSample& out){
     Environment env;out={};auto& s=*impl_;Binding current;
     if(!s.armed || s.thread!=GetCurrentThreadId() || base!=s.base || user!=s.binding.user || epoch!=s.epoch ||
-       !Discover(s.binding.registry,user,ctx,base,current) || current!=s.binding)return false;
+       !Discover(s.binding.registry,user,ctx,base,current,s.binding.movie) || current!=s.binding)return false;
     const bool down=bool(pad.buttons&0x1000);
     if(s.cached && s.last==tick){if(down!=s.down)return false;out=s.committed.result;return true;}
     if(s.exhausted || tick!=s.next)return false;
@@ -232,6 +246,86 @@ bool NativeCutsceneSkipReceiver::Consume(const RoomFrame& frame,uint32_t registr
     s.next=tick+1;s.faulted=false;return true;
 }
 
+namespace {
+struct MovieTarget {
+    uint32_t registry=0,profile=0,object=0,table=0,event=0,action=0,entry=0;
+    bool operator==(const MovieTarget&)const=default;
+};
+struct MovieTimerCall {
+    PPCContext* context=nullptr;uint8_t* base=nullptr;DWORD thread=0;
+    uint64_t controls=0,tick=0;MovieTarget target;
+};
+thread_local const MovieTimerCall* movie_timer_call=nullptr;
+bool ReadMovieTarget(uint32_t registry,PPCContext& ctx,uint8_t* base,MovieTarget& out){
+    BorrowContext preserve(ctx,base);if(!preserve.stack)return false;
+    NativeGameOverState state;uint32_t mode=0,handler=0;NativeCutsceneUiSnapshot ui;MovieTarget target;target.registry=registry;
+    if(!ReadNativeControlState(ctx,base,state,mode) || mode!=2 || state.registry!=registry ||
+       !ReadNativeCutsceneContext(ctx,base,registry) ||
+       !ReadNativeControlTarget(ctx,base,registry,2,target.profile,target.object,handler) || handler!=0x82B1DF70 ||
+       !Readable(base,target.object,40) || !InspectNativeCutsceneUi(ctx,base,registry,ui))return false;
+    target.table=PPC_LOAD_U32(target.object);target.entry=PPC_LOAD_U32(target.object+12);
+    if(target.table!=0x8215B2B0 || !Readable(base,target.entry,16) || PPC_LOAD_U32(target.entry)!=0)return false;
+    unsigned contexts=0;
+    for(const auto& context:ui.contexts)if(context.name=="Menu"){
+        ++contexts;target.event=context.event;unsigned listeners=0;
+        for(const auto& listener:context.listeners)if(listener[0]==target.profile){if(listener[2]!=0x82770F58)return false;++listeners;}
+        if(listeners!=1)return false;
+        for(const auto& action:context.actions)if(action.name=="Accept"){
+            if(target.action || action.kind!=2 || action.condition || action.curve)return false;target.action=action.action;
+        }
+    }
+    if(contexts!=1 || !target.action)return false;out=target;return true;
+}
+}
+struct NativeMovieAcceptReceiver::Impl {
+    DWORD thread=0;uint8_t* base=nullptr;MovieTarget target;NativeCutsceneSkipSource source;
+    uint64_t epoch=0,next=0,controls=0;bool armed=false,faulted=false;
+};
+NativeMovieAcceptReceiver::NativeMovieAcceptReceiver():impl_(std::make_unique<Impl>()){}
+NativeMovieAcceptReceiver::~NativeMovieAcceptReceiver()=default;
+bool NativeMovieAcceptTimerOwned(uint32_t timer,uint32_t caller,PPCContext& ctx,uint8_t* base){
+    const auto* permit=movie_timer_call;uint64_t tick=0;
+    if(!permit || caller!=0x82B1E070 || permit->context!=&ctx || permit->base!=base || permit->thread!=GetCurrentThreadId() ||
+       permit->controls!=em2::SynchronizedControlsGeneration() || timer!=permit->target.object+32 ||
+       !AgreedTick(tick,base) || tick!=permit->tick)return false;
+    MovieTarget current;return ReadMovieTarget(permit->target.registry,ctx,base,current) && current==permit->target;
+}
+bool NativeMovieAcceptTargetAvailable(uint32_t registry,PPCContext& ctx,uint8_t* base){MovieTarget target;Binding binding;
+    return ReadMovieTarget(registry,ctx,base,target) && Discover(registry,0,ctx,base,binding,true) && binding.actions[0]==target.action;}
+bool NativeMovieAcceptReceiver::Consume(const RoomFrame& frame,uint32_t registry,uint64_t epoch,PPCContext& ctx,uint8_t* base){
+    Environment env;auto& s=*impl_;uint64_t tick=0,generation=0;Frame published,neutral;neutral.tick=frame.tick;
+    if(s.faulted || !AgreedTick(tick,base) || tick!=frame.tick || tick==UINT64_MAX ||
+       !NativeCutsceneReturnPrefix(frame,frame.players_mask,epoch) ||
+       !em2::ReadPublishedSynchronizedControls(generation,published) || !generation || published!=neutral)return false;
+    MovieTarget target;if(!ReadMovieTarget(registry,ctx,base,target))return false;
+    if(!s.armed){
+        if(!s.source.ArmMovieAccept(registry,0,epoch,tick,ctx,base))return false;
+        s.target=target;s.thread=GetCurrentThreadId();s.base=base;s.epoch=epoch;s.next=tick;s.controls=generation;s.armed=true;
+        REXLOG_INFO("Native Room movie Accept receiver armed: tick {} epoch {} handler 82B1DF70; original skip-delay and unskippable guards retained",tick,epoch);
+    }
+    if(s.thread!=GetCurrentThreadId() || s.base!=base || s.epoch!=epoch || s.next!=tick || s.controls!=generation || s.target!=target)return false;
+    bool all_ui=true;Pad intent;
+    for(unsigned i=0;i<kOnlineRoomCapacity;++i)if(frame.players_mask&(1u<<i)){
+        const auto& command=frame.players[i];all_ui=all_ui && command.source==RoomMovementSource::NativeCutsceneUiV6;intent.buttons|=command.pad.buttons;
+    }
+    if(!all_ui)intent={};NativeCutsceneSkipSample sample;
+    if(!s.source.Produce(intent,0,epoch,tick,ctx,base,sample))return false;
+    if(sample.dispatch[1] || sample.dispatch[2])return false;
+    s.faulted=true;
+    if(sample.dispatch[0]){
+        MovieTarget current;if(!ReadMovieTarget(registry,ctx,base,current) || current!=target)return false;
+        const auto delay=int32_t(PPC_LOAD_U32(target.entry+12));
+        BorrowContext preserve(ctx,base);if(!preserve.stack)return false;
+        MovieTimerCall permit{&ctx,base,GetCurrentThreadId(),generation,tick,target};const auto* previous=movie_timer_call;
+        struct RestorePermit {const MovieTimerCall* previous;~RestorePermit(){movie_timer_call=previous;}}restore_permit{previous};
+        movie_timer_call=&permit;
+        ctx.r3.u64=target.profile;ctx.r4.u64=target.event;ctx.r5.u64=target.action;ctx.f1.f64=0;ctx.f2.f64=0;
+        __imp__sub_82770F58(ctx,base);
+        REXLOG_INFO("Native Room movie Accept delivered: tick {} epoch {} native result {} skip delay {} remaining {:08X} completed {}; original Menu callback, no character input",tick,epoch,ctx.r3.u32,delay,PPC_LOAD_U32(target.object+12),PPC_LOAD_U8(target.object+4));
+    }
+    s.next=tick+1;s.faulted=false;return true;
+}
+
 bool TestNativeCutsceneSkipMath(){
     Environment environment;
     auto* base=static_cast<uint8_t*>(VirtualAlloc(nullptr,0x100000000ull,MEM_RESERVE,PAGE_NOACCESS));
@@ -333,6 +427,35 @@ bool TestNativeCutsceneSkipMath(){
     PPC_STORE_U32(table+20,uint32_t(PPC_CODE_BASE));if(!map(uint32_t(PPC_CODE_BASE),FixtureControlMode))return false;
     if(!check(!NativeCutsceneSkipTargetAvailable(registry,ctx,base) && !receiver.Consume(ui,registry,2,ctx,base) && fixture_callbacks==3,
         "restriction mode3 cannot masquerade as the authored cinematic handler"))return false;
+    // State 2 has a separate Menu/Accept receiver. Run its original handler
+    // against a real -1 skip-delay guard without opening or closing a movie.
+    if(!map(uint32_t(PPC_CODE_BASE),FixtureMovieMode) || !map(0x82B1DF70,FixtureMovieCallback))return false;
+    PPC_STORE_U32(0x5000,0x8215B2B0);PPC_STORE_U32(0x5000+12,0x5400);PPC_STORE_U8(0x5000+4,0);
+    PPC_STORE_U32(0x5400,0);PPC_STORE_U32(0x5400+12,0xFFFFFFFF);
+    std::memset(base+name,0,96);std::memcpy(base+name,"Menu",5);std::memcpy(base+name+192,"Accept",7);
+    PPC_STORE_U32(event+20,1);PPC_STORE_U32(b.actions[0],name+192);
+    Record live_movie_action;std::memcpy(live_movie_action.data(),base+b.actions[0],436);
+    if(!check(NativeMovieAcceptTargetAvailable(registry,ctx,base) && !NativeCutsceneSkipTargetAvailable(registry,ctx,base),
+        "movie Menu target is distinct from cinematic CutScene target"))return false;
+    NativeMovieAcceptReceiver movie_receiver;fixture_callbacks=0;fixture_movie_timer_lease=true;
+    for(uint64_t tick=226;tick<231;++tick){
+        fixture_tick=tick;ui.tick=tick;
+        for(unsigned i=0;i<3;++i)ui.players[i]=NativeCutsceneUiCommand(2,false);
+        ui.players[2]=NativeCutsceneUiCommand(2,tick!=229);
+        if(tick==226)ui.players[0]=NativeCutsceneCommand(2);
+        Frame canonical;canonical.tick=tick;if(!em2::PublishSynchronizedControls(canonical))return false;
+        if(!check(movie_receiver.Consume(ui,registry,2,ctx,base),"movie Accept uses original private press math and original profile callback"))return false;
+        if(tick==226 && !check(fixture_callbacks==0,"all movie peers must certify UI before a held Accept can dispatch"))return false;
+        const auto calls=fixture_callbacks;
+        if(!check(!movie_receiver.Consume(ui,registry,2,ctx,base) && fixture_callbacks==calls,"movie callback cannot repeat on duplicate delivery"))return false;
+    }
+    if(!check(fixture_callbacks==2 && PPC_LOAD_U32(0x5000+12)==0x5400 && PPC_LOAD_U8(0x5000+4)==0 &&
+        PPC_LOAD_U32(0x5400+12)==0xFFFFFFFF && !std::memcmp(live_movie_action.data(),base+b.actions[0],436),
+        "original unskippable movie guard and live Menu action remain unchanged after actual native Accept callbacks"))return false;
+    if(!check(fixture_movie_timer_lease && !NativeMovieAcceptTimerOwned(0x5020,0x82B1E070,ctx,base),
+        "movie timer permission exists only inside its exact original callback, for its own elapsed timer and caller"))return false;
+    PPC_STORE_U32(0x5400,4);
+    if(!check(!NativeMovieAcceptTargetAvailable(registry,ctx,base),"credits cannot obtain movie Accept authority"))return false;
     REXLOG_INFO("Native cutscene skip math passed {} original-interpreter, source-lifecycle and guarded callback checks across four wildcard slots; injected state/clock, no real story skip claim",checks);return true;
 }
 }
