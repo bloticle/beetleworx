@@ -10,8 +10,9 @@ PLAY WITH FRIENDS
 Everyone needs the same Beetleworx release version and compatible game files.
 Start Epic Mickey 2 and open Online Multiplayer at the title menu.
 
-Host: select Host game and choose your campaign. If you have no save yet,
+Host: select Host my save online to use your current single-player save. If you have no save yet,
 start an offline game first and reach a save point, then return to the title.
+The first game-file check can take several minutes; keep the menu open.
 When the internet room is connected, select Copy room code and send it to your
 friends. The code has eight characters. There are no router settings to change.
 

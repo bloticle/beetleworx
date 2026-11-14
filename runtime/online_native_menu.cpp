@@ -188,7 +188,7 @@ struct Controller {
     std::future<HostCampaignCatalog> campaign_scan;
     bool host=false,start=false,start_requested=false,handoff_available=false,try_router=false,lan_discovery=false;
     bool qa_appearance_reported=false;
-    std::string error,feedback,advertised,reported_error;
+    std::string error,feedback,advertised,reported_error,message_readback;
     ~Controller(){campaign_cancel.request_stop();}
     bool Busy()const{
         if(internet && !internet->status().failed)return true;
@@ -197,7 +197,7 @@ struct Controller {
         return state!=BootState::Idle && state!=BootState::Cancelled && state!=BootState::Failed;
     }
     void Find(){
-        if(InternetMode()){feedback="Host an internet game, or copy your friend's room code and select Join copied invitation.";return;}
+        if(InternetMode()){feedback="Host an internet game, or copy your friend's room code and select Join copied room code.";return;}
         if(NativeOnlineMenuQaActive() || QaReentryPageRequested()){feedback="Private loopback test: LAN discovery is disabled.";return;}
         if(boot && (boot->status().state==BootState::Failed || boot->status().state==BootState::Cancelled))boot.reset();
         error.clear();browser.Start(LocalLANDiscoveryTargets());selected=0;feedback="Searching your LAN for a host...";
@@ -299,7 +299,7 @@ struct Controller {
             const auto relay=internet->status();
             if(!relay.ready){feedback="Connecting the internet lobby. Please wait.";return;}
             if(!CopyInvitation(relay.code)){feedback="Could not copy the room code. Try again.";return;}
-            feedback="Internet room code copied. Send it to your friends; they select Join copied invitation.";return;
+            feedback="Internet room code copied. Send it to your friends; they select Join copied room code.";return;
         }
         const auto mapped=MappedInvite();
         const auto& code=mapped?*mapped:status.invitation;
@@ -335,7 +335,12 @@ struct Controller {
         case 1:
             if(!host)return "Checking your game files before connecting...";
             if(!feedback.empty())return feedback+" Checking game files...";
-            return "Checking game files and preparing the host save. Your friend can join now.";
+            if(boot){switch(boot->status().preparation){
+                case PreparationStep::PackingSave:return "Preparing a separate online copy of your current save...";
+                case PreparationStep::InstallingHostSave:return "Finishing online save setup. Your normal save stays separate.";
+                default:break;
+            }}
+            return "Checking your game files. The first check can take several minutes. Your room code appears when the lobby is ready.";
         case 2:
             if(!feedback.empty())return feedback+(rooms?" Waiting for players.":" Waiting for player two.");
             if(router){
@@ -368,6 +373,7 @@ struct Controller {
         case 8:return "Cancelling file operations...";
         case 9:return OnlineFailureAdvice(boot?boot->status().error:std::string{},false);
         default:if(!feedback.empty())return feedback;
+            if(InternetMode())return "Host your current save online, or copy a friend's eight-character room code and select Join copied room code. Saved online games continues previous online progress.";
             return rooms?"Host your save, paste a friend's invitation, or find a game on your LAN.":"Two-player online co-op. Host your save, paste a friend's invitation, or find a game on your LAN.";
         }
     }
@@ -379,10 +385,10 @@ struct Controller {
         campaign_scan=std::async(std::launch::async,[normal,token]{return FindRetainedHostCampaigns(normal,token);});
     }
     std::string CampaignMessage()const{
-        if(campaign_scan.valid())return "Checking retained online campaigns...";
+        if(campaign_scan.valid())return "Checking previous online saves...";
         if(!campaigns.error.empty())return campaigns.error;
-        if(campaigns.campaigns.empty())return "No retained host campaigns yet. Host your offline campaign first. Online progress is saved separately and never replaces your offline campaign.";
-        return campaigns.campaigns[selected_campaign].label+"\nResume creates a new online session from this campaign. Your offline save and the retained source are kept separate."+
+        if(campaigns.campaigns.empty())return "No previous online saves. Select Host my save online to start from your current single-player save. Online progress is saved separately.";
+        return campaigns.campaigns[selected_campaign].label+"\nContinue creates a new room from this online save. Your single-player save and the previous online save stay separate."+
             (campaigns.truncated?" More archives exist than this list can display.":"");
     }
     void Begin(bool hosting,std::string invitation={},std::optional<std::filesystem::path> retained={}){
@@ -422,7 +428,7 @@ struct Controller {
             }else if(InternetMode()){
                 invitation.erase(std::remove_if(invitation.begin(),invitation.end(),[](unsigned char c){return c==' ' || c=='\r' || c=='\n' || c=='\t';}),invitation.end());
                 for(auto& c:invitation)if(c>='a' && c<='z')c=char(c-'a'+'A');
-                if(invitation.size()!=8){error="Copy the host's eight-character internet room code and select Join copied invitation.";return;}
+                if(invitation.size()!=8){error="Copy the host's eight-character internet room code and select Join copied room code.";return;}
                 internet_join_paths=paths;internet=std::make_shared<InternetRelay>();
                 internet->Join(REXCVAR_GET(em2_online_relay_url),ReleaseVersion(),std::move(invitation));
             }else if(!boot->Join(paths,std::move(invitation)))error="Paste the host's current invitation, or use Find LAN games.";
@@ -483,7 +489,7 @@ bool NativeOnlineMenuOption(int id,int choice,int& result){
             else menu.Find();
         }break;
         case 1:REXLOG_INFO("Native GFx online requested Host");menu.Begin(true);break;
-        case 2:if(NativeOnlineMenuQaActive())break;else if(auto invite=ClipboardInvitation())menu.Begin(false,*invite);else menu.error="Copy your friend's invitation first, then select Join copied invitation.";break;
+        case 2:if(NativeOnlineMenuQaActive())break;else if(auto invite=ClipboardInvitation())menu.Begin(false,*invite);else menu.error="Copy your friend's invitation first, then select Join copied room code.";break;
         case 3:if(!menu.Busy())menu.Find();break;
         case 4:if(menu.selected<menu.browser.games().size())menu.Begin(false,menu.browser.games()[menu.selected].invitation);else menu.feedback="No LAN game selected. Ask your friend to select Host, then find games again.";break;
         case 5:if(!NativeOnlineMenuQaActive())menu.CopyHostInvite();break;
@@ -534,7 +540,7 @@ bool NativeOnlineMenuOption(int id,int choice,int& result){
     else if(id==2707)result=NativeOnlineMenuQaActive()?Qa().role:0;
     else if(id==2708)result=int(menu.campaigns.campaigns.size());
     else if(id==2709)result=int(menu.selected_campaign);
-    else if(id==2710)result=ByteAt(menu.Message(),choice);
+    else if(id==2710){if(choice==0)menu.message_readback=menu.Message();result=ByteAt(menu.message_readback,choice);}
     else if(id==2711)result=menu.internet?ByteAt(menu.internet->status().code,choice):menu.boot?ByteAt(menu.boot->status().invitation,choice):0;
     else if(id==2712)result=menu.selected<menu.browser.games().size()?ByteAt(menu.browser.games()[menu.selected].address,choice):0;
     else if(id==2713)result=ByteAt(menu.CampaignMessage(),choice);

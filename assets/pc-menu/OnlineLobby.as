@@ -73,11 +73,11 @@
          var archives = _level0.SetOption(2708,-1);
          var archive = _level0.SetOption(2709,-1);
          var scanning = _level0.SetOption(2714,-1) == 1;
-         this._em2OnlineButton(0,"Host offline campaign",true);
-         this._em2OnlineButton(1,archives > 0 ? "Resume online campaign " + (archive+1) + "/" + archives : "No online campaigns yet",!scanning && archives > 0);
+         this._em2OnlineButton(0,"Host my save online",true);
+         this._em2OnlineButton(1,archives > 0 ? "Continue an online save " + (archive+1) + "/" + archives : "No previous online saves",!scanning && archives > 0);
          this._em2OnlineButton(2,internet ? "Invite only" : (_level0.SetOption(2716,-1) == 1 ? "Visibility: Discoverable on LAN" : "Visibility: Invite only"),!internet);
-         this._em2OnlineButton(3,"Next campaign",!scanning && archives > 1);
-         this._em2OnlineButton(4,scanning ? "Checking campaigns..." : "Refresh campaigns",!scanning);
+         this._em2OnlineButton(3,"Next online save",!scanning && archives > 1);
+         this._em2OnlineButton(4,scanning ? "Checking online saves..." : "Refresh online saves",!scanning);
          this._em2OnlineButton(5,"Back",true);
          this._em2OnlineHelp.textColor = 16777215;
          this._em2OnlineHelp.text = this._em2OnlineRead(2713);
@@ -87,7 +87,7 @@
       var count = _level0.SetOption(2703,-1);
       var selected = _level0.SetOption(2704,-1);
       var isHost = _level0.SetOption(2702,-1) == 1;
-      var canCopy = (state == 1 || state == 2) && isHost;
+      var canCopy = isHost && (state == 1 || state == 2 || state == 6) && _level0.SetOption(2711,0) > 0;
       var canStart = state == 6 && isHost && _level0.SetOption(2706,-1) == 1;
       if(state == 6)
       {
@@ -133,7 +133,7 @@
             this._em2OnlineButton(1,"Player options",true);
             this._em2OnlineButton(2,isHost ? "Host" : (ready ? "Ready (select to cancel)" : "Not ready (select when ready)"),editable && !isHost);
             this._em2OnlineButton(3,"Players: " + _level0.SetOption(2741,2) + "/" + _level0.SetOption(2736,-1),true);
-            this._em2OnlineButton(4,"Copy invite",isHost);
+            this._em2OnlineButton(4,internet ? "Copy room code" : "Copy invite",canCopy);
             this._em2OnlineButton(5,"Leave lobby",true);
             this._em2OnlineHelp.textColor = 16777215;
             this._em2OnlineHelp.text = this._em2OnlineRead(2710);
@@ -159,22 +159,30 @@
       this._em2OnlinePlayerPage = false;
       this._em2OnlineRosterPage = false;
       var connectedLabel = isHost ? "Session connected" : "Waiting for host";
-      this._em2OnlineButton(0,state == 6 ? (canStart ? "Start online game" : connectedLabel) : (state == 7 ? "Preparing game..." : "Host game"),idle || canStart);
+      var hostLabel = internet ? "Host my save online" : "Host game";
+      if(state == 1) hostLabel = "Checking game files...";
+      else if(state == 2) hostLabel = "Lobby open";
+      else if(state == 3) hostLabel = "Connecting...";
+      else if(state == 4) hostLabel = "Receiving shared save...";
+      else if(state == 5) hostLabel = "Preparing shared save...";
+      else if(state == 7) hostLabel = "Starting online game...";
+      else if(state == 8) hostLabel = "Closing session...";
+      this._em2OnlineButton(0,state == 6 ? (canStart ? "Start online game" : connectedLabel) : hostLabel,idle || canStart);
       this._em2OnlineButton(1,internet ? "Join copied room code" : "Join copied invite",idle);
-      this._em2OnlineButton(2,"Find LAN games",idle);
+      this._em2OnlineButton(2,internet ? "Saved online games" : "Find LAN games",idle);
       this._em2OnlineButton(3,count > 0 ? "Join LAN game " + (selected+1) + "/" + count : "No LAN games found",idle && count > 0);
       var inviteLabel = _level0.SetOption(2715,1) == 1 ? "Copy Internet invite" : "Copy LAN invite";
       if(idle) inviteLabel = _level0.SetOption(2715,0) == 1 ? "Auto Internet port: On" : "Auto Internet port: Off";
       this._em2OnlineButton(4,inviteLabel,idle || canCopy);
       if(internet)
       {
-         this.b_2.disable(); this.b_2._visible = false;
          this.b_3.disable(); this.b_3._visible = false;
          this._em2OnlineButton(4,"Copy room code",canCopy);
          if(idle) this.b_4._visible = false;
       }
       this._em2OnlineButton(5,idle ? "Back" : "Cancel session",state != 7);
       var message = this._em2OnlineRead(2710);
+      if(state == 1 && internet) message = "Checking game files and preparing your save. The first check can take several minutes. Wait here until your eight-character room code appears.";
       if(idle && count > 0) message += "\nLAN host: " + this._em2OnlineRead(2712) + ". Left / Right selects a host.";
       this._em2OnlineHelp.textColor = state == 9 ? 16755370 : 16777215;
       this._em2OnlineHelp.text = message;
@@ -186,6 +194,7 @@
       if(this._em2OnlineEditingName) { this._em2OnlineEndName(true); return; }
       if(this._em2OnlineEditEndedAt != undefined && getTimer() - this._em2OnlineEditEndedAt < 150) return;
       var item = this._list.activeItem; var state = this._em2OnlineState;
+      var internet = _level0.SetOption(2743,1) == 1;
       if(state == 7) return;
       if(state == 6)
       {
@@ -237,10 +246,15 @@
       if(item == this.b_main)
       {
          if(state == 6) _level0.SetOption(2700,7);
+         else if(internet) _level0.SetOption(2700,1);
          else { this._em2OnlineHostPage = true; _level0.SetOption(2700,11); }
       }
       else if(item == this.b_1) _level0.SetOption(2700,2);
-      else if(item == this.b_2) _level0.SetOption(2700,3);
+      else if(item == this.b_2)
+      {
+         if(internet) { this._em2OnlineHostPage = true; _level0.SetOption(2700,11); }
+         else _level0.SetOption(2700,3);
+      }
       else if(item == this.b_3) _level0.SetOption(2700,4);
       else if(item == this.b_4) _level0.SetOption(2700,state == 0 || state == 9 ? 15 : 5);
       else if(item == this.b_5)
