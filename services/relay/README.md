@@ -5,6 +5,11 @@ A live component check verified host/guest WebSockets, unchanged payloads in
 both directions and rejection of new joins after a room starts. Native gameplay
 over the relay and real Discord invitations still need end-to-end testing.
 
+The current live deployment still carries gameplay/text only. The source also
+contains a separate media endpoint, verified in the local Cloudflare runtime.
+That media endpoint is not deployed; native voice-client integration remains
+unfinished. Demo.4 still cannot relay voice.
+
 The service accepts outbound HTTPS/WebSocket connections from the host and up
 to fifteen guests. Players do not open inbound ports or configure routers.
 Cloudflare terminates TLS; game data is visible to the service, not end-to-end
@@ -57,3 +62,29 @@ this service is deployed.
 
 Not release-ready until an actual deployment and an
 internet connection between different networks have been completed.
+
+## Separate media endpoint (source only)
+
+A guest's gameplay WebSocket upgrade returns `X-Beetleworx-Media-Token` and
+`X-Beetleworx-Media-Channel`. The token is a private 256-bit bearer credential
+for that admitted gameplay connection. Do not log it, put it in URLs, or
+publish it in presence. It is distinct from the short invitation code.
+
+`GET /v1/rooms/CODE/voice` upgrades another outbound WebSocket. It requires the
+same release header plus `Authorization: Bearer ...`: the host uses its host
+key, while guests use their media tokens. Existing players can reconnect media
+after the native game locks new joins. Replacing or closing media does not
+close gameplay. Leaving gameplay closes its media socket and revokes its token.
+
+Media frames are `[2, channel, encrypted datagram...]`, with 1–512 opaque payload
+bytes. Guests send channel 0; the service supplies their actual admitted game
+channel to the host. Host packets name that channel; the receiving guest sees
+channel 0. A future native adapter must map host-side game channels to actual
+native peer IDs before returning `VoiceDatagram.sender`. Ciphertext headers do
+not establish that mapping. Existing native encryption/replay checks remain.
+
+The media socket has independent framing and rate bounds and cannot send game
+control messages. Room generations reject callbacks from expired incarnations.
+Close callbacks reply to the close handshake before retirement. Source checks
+in `scripts/test-relay-media.ps1` use real local WebSockets, not microphones,
+native game worlds, or internet media.
