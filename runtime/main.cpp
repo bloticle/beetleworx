@@ -619,15 +619,8 @@ public:
             if(interactive_setup)em2::ShowContentSetupError(setup_error);
             return false;
         }
-        std::ifstream source_marker(pc_assets / "source-game-directory.txt");
-        std::string staged_source;
-        std::getline(source_marker,staged_source);
-        if(!staged_source.empty() && staged_source.back()=='\r') staged_source.pop_back();
-        std::error_code source_error;
-        if(staged_source.empty() || !std::filesystem::equivalent(game_dir,std::filesystem::path(std::u8string(staged_source.begin(),staged_source.end())),source_error)) {
-            REXLOG_ERROR("PC content view does not match this game directory; rebuild with scripts/build.ps1 -GameDirectory <path>");
-            return false;
-        }
+        // PrepareGameContent owns source-marker parsing, recovery and matching.
+        // Do not recheck its validated result using a narrower file-ID-only path.
         const bool exact_game_xex=rex::util::sha256_file(pc_assets/"default.xex")==kTranslatedGameXex;
         em2::net::ConfigureOnlineClothingArchive(pc_assets/"packfiles"/"_Dynamic.pak");
         if(!shader_storage_test)em2::WriteGameConfigOverlay(game_dir / "ConfigFiles.ini", pc_assets / "ConfigFiles.ini");

@@ -46,6 +46,33 @@ fs::path Marker(const fs::path& content,const char* filename="source-game-direct
     return source.size()>32768?fs::path{}:fs::path(std::u8string(source.begin(),source.end()));
     }catch(const std::exception&){return {};}
 }
+std::wstring FinalDirectoryName(const fs::path& path){
+    const auto handle=CreateFileW(path.c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+        nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS,nullptr);
+    if(handle==INVALID_HANDLE_VALUE)return {};
+    struct Close{HANDLE handle;~Close(){CloseHandle(handle);}}close{handle};
+    const auto size=GetFinalPathNameByHandleW(handle,nullptr,0,FILE_NAME_NORMALIZED|VOLUME_NAME_DOS);
+    if(!size || size>32768)return {};
+    std::wstring result(size,L'\0');
+    const auto length=GetFinalPathNameByHandleW(handle,result.data(),size,FILE_NAME_NORMALIZED|VOLUME_NAME_DOS);
+    if(!length || length>=size)return {};
+    result.resize(length);return result;
+}
+template<class Equivalent> bool SameDirectory(const fs::path& left,const fs::path& right,Equivalent equivalent){
+    if(left.empty() || right.empty())return false;
+    std::error_code a_error,b_error;
+    const auto a=fs::canonical(left,a_error),b=fs::canonical(right,b_error);
+    if(a_error || b_error)return false;
+    // A path is already sufficient proof of itself. FAT/exFAT and some
+    // network providers cannot answer the file-ID query used by equivalent().
+    if(a==b)return true;
+    const auto final_a=FinalDirectoryName(a),final_b=FinalDirectoryName(b);
+    if(!final_a.empty() && final_a==final_b)return true;
+    std::error_code error;return equivalent(a,b,error) && !error;
+}
+bool SameDirectory(const fs::path& left,const fs::path& right){
+    return SameDirectory(left,right,[](const fs::path& a,const fs::path& b,std::error_code& error){return fs::equivalent(a,b,error);});
+}
 bool StoreMarker(const fs::path& content,const char* filename,const fs::path& source) {
     const auto encoded=fs::canonical(source).u8string();
     static std::atomic<uint64_t> nonce{0};
@@ -189,8 +216,7 @@ bool Install(const fs::path& source,const fs::path& content,std::string& error,I
     constexpr const char* intent_name="content-setup-source.txt";
     const auto pending=Marker(content,intent_name);
     if(fs::exists(content/intent_name)) {
-        std::error_code equivalent_error;
-        if(pending.empty() || !fs::equivalent(source,pending,equivalent_error)) {
+        if(!SameDirectory(source,pending)) {
             if(!RecoverContentView(content,error))return false;
             if(!StoreMarker(content,intent_name,source)){error="Could not save the new game location. Check folder permissions.";return false;}
         }
@@ -278,8 +304,7 @@ bool PrepareGameContent(const fs::path& executable_directory,fs::path& game,cons
             if(!extract_image())return false;
             if(!OriginalFolder(game)){error="That folder does not contain default.xex, ConfigFiles.ini and packfiles. Extract your Xbox 360 game files first, then choose that folder.";return false;}
         }
-        std::error_code equivalent_error;
-        bool same=!saved.empty() && fs::equivalent(game,saved,equivalent_error);
+        bool same=SameDirectory(game,saved);
         if(!interactive) {
             // Existing private renderer fixtures intentionally carry only their
             // required assets. Keep their previous staged-path contract, rather
@@ -291,7 +316,7 @@ bool PrepareGameContent(const fs::path& executable_directory,fs::path& game,cons
             error="Keep the recomp content folder and original game folder separate. The content packfiles folder must not link to your original packfiles folder.";return false;
         }
         const bool different_pending=fs::exists(content/"content-setup-source.txt") &&
-            (pending.empty() || !fs::equivalent(game,pending,equivalent_error));
+            !SameDirectory(game,pending);
         if(different_pending || (!saved.empty() && !same)){
             if(!RecoverContentView(content,error))return false;
             saved.clear();pending.clear();same=false;
@@ -402,7 +427,7 @@ bool TestContentLibraryPersistence(const fs::path& root) {
 bool TestContentSetup(const fs::path& root) {
     try {
         if(fs::exists(root))return false;
-        const auto source=root/"original",content=root/"recomp"/"pc-assets";
+        const auto source=root/fs::path(u8"original-\u00E9-\u6E38\u620F"),content=root/"recomp"/"pc-assets";
         fs::create_directories(source/"packfiles");fs::create_directories(source/"Audio");fs::create_directories(content/"packfiles");
         auto write=[](const fs::path& path,const char* text){std::ofstream(path,std::ios::binary)<<text;};
         write(source/"default.xex","original-xex");write(source/"ConfigFiles.ini","original-config");write(source/"Audio"/"sample","original-audio");write(source/"packfiles"/"level.pak","original-level");
@@ -410,6 +435,18 @@ bool TestContentSetup(const fs::path& root) {
         std::string error;auto game=source;
         if(PrepareGameContent(root/"recomp",game,content,true,false,error) || error.empty())return false;
         if(!Install(game,content,error))return false;
+        unsigned identity_queries=0;
+        auto unavailable_ids=[&](const fs::path&,const fs::path&,std::error_code& ec){++identity_queries;ec=std::make_error_code(std::errc::operation_not_supported);return false;};
+        if(!SameDirectory(source,source/".",unavailable_ids) || identity_queries)return false;
+        auto alternate_name=source.filename().wstring();alternate_name[0]=L'O';
+        if(!SameDirectory(source,source.parent_path()/alternate_name,unavailable_ids))return false;
+        fs::create_directories(root/"different-directory");
+        if(SameDirectory(source,root/"different-directory",unavailable_ids))return false;
+        // The setup marker reader accepts UTF-8/BOM and CRLF consistently;
+        // startup must not apply another narrower parser after this succeeds.
+        {const auto utf8=fs::canonical(source).u8string();std::ofstream marker(content/"source-game-directory.txt",std::ios::binary);
+            marker<<"\xEF\xBB\xBF"<<std::string(reinterpret_cast<const char*>(utf8.data()),utf8.size())<<"\r\n";}
+        if(!PrepareGameContent(root/"recomp",game,content,true,false,error))return false;
         auto read=[](const fs::path& path){std::ifstream in(path,std::ios::binary);return std::string(std::istreambuf_iterator<char>(in),{});};
         if(read(source/"ConfigFiles.ini")!="original-config" || fs::exists(content/"ConfigFiles.ini") ||
            read(source/"packfiles"/"UIOptions.pak")!="original-menu" || read(content/"packfiles"/"UIOptions.pak")!="modified-menu" ||
@@ -435,7 +472,7 @@ bool TestContentSetup(const fs::path& root) {
         fs::create_directories(source/"Audio"/"nested");write(source/"Audio"/"nested"/"second","second-audio");
         if(!Install(source,copied,error,nullptr,true) || read(copied/"Audio"/"nested"/"second")!="second-audio")return false;
         if(read(copied/"packfiles"/"UIOptions.pak")!="modified-menu")return false;
-        REXLOG_INFO("Content setup passed: saved paths, source change with preserved backup, original/patch preservation, FAT-style directory/file copying and resuming copied directories (no dialogs launched)");return true;
+        REXLOG_INFO("Content setup passed: Unicode/BOM/CRLF paths, unavailable file IDs and case aliases, wrong-source rejection, preserved backups, original/patch preservation, FAT-style copying and directory resume (no dialogs launched)");return true;
     }catch(const std::exception& error){REXLOG_ERROR("Content setup fixture: {}",error.what());return false;}
 }
 }
