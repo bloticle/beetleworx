@@ -29,6 +29,7 @@ public:
     void Cancel();
     BootStatus status()const;
     RoomState room_state()const;
+    uint64_t local_peer()const;
     LobbySnapshot lobby()const;
     std::vector<RoomCheckpointPeer> checkpoint_progress()const;
     LobbyResult last_lobby_result()const;

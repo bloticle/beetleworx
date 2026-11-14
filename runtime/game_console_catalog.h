@@ -208,6 +208,18 @@ inline constexpr std::string_view kNativeLevelStates[]={
 "yensidslab.maproom",
 "yensidslab.observatory",
 };
+// Retail states without a zone-load action require an existing level.
+inline constexpr std::string_view kNativeZoneOnlyLevelStates[]={
+"lmr_maddoctorattic.fromnewride",
+"meanstreet_north.dec_toostown",
+"meanstreet_north.from_bogeasy",
+"meanstreet_north.from_ostown",
+"meanstreet_north.from_venland",
+"meanstreet_north.to_bogeasy_v2",
+"rbc_falls.cavernstogulch_angel",
+"rbc_falls.cavernstogulch_devil",
+"rbc_falls.gulchtocaverns_devil",
+};
 inline constexpr std::string_view kNativeScriptExports[]={
 "AIBB_GetAllowToBeInNoStoppingZone",
 "AIBB_GetAllowToBeOffMesh",

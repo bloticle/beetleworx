@@ -8,6 +8,8 @@
 
 namespace em2::net {
 struct InstallationIdentity {
+    // Packaged build compatibility hashes the declared release version, not the
+    // executable. Unversioned development trees use an executable fingerprint.
     std::array<uint8_t,32> build{},content{},checkpoint{};
     uint64_t files=0,bytes=0;
     // Physical verification reads (including build/config key scans); logical

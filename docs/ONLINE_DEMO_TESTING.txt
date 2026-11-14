@@ -1,0 +1,38 @@
+EXPERIMENTAL ONLINE DEMO
+
+The lobby supports a host plus fifteen guests. Large groups and full campaign
+playthroughs remain unverified. The first two players currently use Mickey and
+Oswald respectively; additional player character choices need broader testing.
+Pants colors are unique in the lobby, but appearance and nametag rendering still
+need multiplayer validation across areas and character combinations.
+
+Online uses synchronized native inputs and world checks. Prediction, rollback,
+world repair and reconnect are unfinished. A mismatch or lost peer can stop the
+session. Arbitrary level changes, death/respawn and recovery are not proven
+throughout the campaign. Keep a backup and report where a session stops.
+
+Rooms currently require an invitation. Public matchmaking, joining games that
+have already started, and voice through the internet relay remain unfinished.
+Discord provides invitations and game launching; it is not the game's network
+transport. Its in-game friends/invite picker is not implemented.
+
+Text chat and gameplay use the room connection. The UI may still expose voice
+controls, but do not rely on voice working through the relay in this build.
+Use an ordinary Discord voice channel while testing with friends.
+
+The original Epic Mickey mode is an offline courtyard exploration preview.
+Full campaign progression, quests, scripts, transitions, audio, materials,
+NPC animation, collision and spawning still need compatibility work.
+
+Higher FPS can still show animation/camera/physics issues. Start at 30 FPS.
+Experimental rendering upgrades and movement abilities need broader hardware
+and area coverage. Imported Rebrushed movement clips are for Mickey; Oswald
+uses existing animations. Mouse aiming and solo character switching/respawns
+also need additional testing.
+
+For a report, include your release version, area, what each player was doing,
+number of players and reproduction steps. Support & Updates prepares a bounded
+local report for review before you share it. Avoid posting room codes or private
+save files publicly. No report is submitted automatically.
+
+EMR movement animations: @llenarox on Discord.

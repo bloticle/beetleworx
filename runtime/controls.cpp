@@ -1,5 +1,7 @@
 #include "ppc_context.h"
 #include "controls.h"
+#include "online_chat.h"
+#include "online_voice_runtime.h"
 #include "mouse_look.h"
 #include "camera_timing.h"
 #include "simulation.h"
@@ -113,6 +115,8 @@ int start_capture=-1;
 Clock::time_point start_capture_time{};
 bool capture_armed=false,menu_open=false;
 bool external_capture=false;
+std::array<uint16_t,2> chat_blocked_buttons{};
+bool workbench_capture=false,chat_capture=false;
 bool swap_control_down=false;
 std::array<bool,2> chord_shoulders_blocked{};
 Clock::time_point capture_started{},suppressed_until{};
@@ -545,7 +549,7 @@ public:
 }
 
 namespace em2 {
-void SetControlUIContext(bool active){std::lock_guard lock(controls_mutex);if(ui_context==active)return;ui_context=active;++view_poll_epoch;
+void SetControlUIContext(bool active){std::lock_guard lock(controls_mutex);if(ui_context==active)return;ui_context=active;if(active)net::ReleaseOnlineVoiceInput();++view_poll_epoch;
     companion_buttons={};
     for(auto& buttons:mod_buttons)buttons.store(0,std::memory_order_relaxed);
     for(auto& pending:pending_keys)pending.fill(false);for(auto& valid:latched_valid)valid.fill(false);
@@ -676,14 +680,20 @@ bool SampleLocalControls(rex::input::InputSystem& input,unsigned user,uint64_t t
         struct Scope {bool prior=sampling_local_controls;Scope(){sampling_local_controls=true;}~Scope(){sampling_local_controls=prior;}} scope;
         status=input.GetState(user,&physical);
     }
+    const bool chat_packet=status==X_ERROR_SUCCESS && net::OnlineChatPad(uint16_t(physical.gamepad.buttons));
+    const auto voice_buttons=status==X_ERROR_SUCCESS?net::OnlineVoicePad(uint16_t(physical.gamepad.buttons)):uint16_t(0);
     std::lock_guard lock(controls_mutex);
     if(generation!=controls_generation || !ready()) return false;
     auto& sample=synchronized_controls.samples[user];
     if(sample.valid && sample.tick==tick) {out=sample.pad;return true;}
     if(status!=X_ERROR_SUCCESS) return false;
     raw_pads[user]=physical.gamepad;
-    const auto suppressed=SuppressInput(user,physical.gamepad);if(suppressed)mod_buttons[user].store(0,std::memory_order_relaxed);
-    const auto pad=suppressed?X_INPUT_GAMEPAD{}:Remap(user,physical.gamepad,tick);
+    chat_blocked_buttons[user]&=uint16_t(physical.gamepad.buttons);
+    if(chat_packet)chat_blocked_buttons[user]|=uint16_t(physical.gamepad.buttons);
+    chat_blocked_buttons[user]|=voice_buttons;
+    auto gamepad=physical.gamepad;gamepad.buttons=uint16_t(gamepad.buttons)&~chat_blocked_buttons[user];
+    const auto suppressed=SuppressInput(user,gamepad);if(suppressed)mod_buttons[user].store(0,std::memory_order_relaxed);
+    const auto pad=suppressed?X_INPUT_GAMEPAD{}:Remap(user,gamepad,tick);
     sample.pad={uint16_t(pad.buttons),pad.left_trigger,pad.right_trigger,int16_t(pad.thumb_lx),int16_t(pad.thumb_ly),int16_t(pad.thumb_rx),int16_t(pad.thumb_ry)};
     sample.valid=true;sample.tick=tick;
     if(tick==UINT64_MAX) sample.exhausted=true;else sample.next=tick+1;
@@ -795,17 +805,23 @@ void ClearControlKeys() {
     for(auto& valid:latched_valid) valid.fill(false);
     ResetWheelInputs();
 }
-void SetExternalControlCapture(bool captured){
-    std::lock_guard lock(controls_mutex);if(external_capture==captured)return;
+void SetCaptureSource(bool captured,bool chat){
+    std::lock_guard lock(controls_mutex);(chat?chat_capture:workbench_capture)=captured;
+    if(captured)net::ReleaseOnlineVoiceInput();
+    const bool combined=chat_capture || workbench_capture;if(external_capture==combined)return;
     companion_buttons={};
-    external_capture=captured;++view_poll_epoch;
+    external_capture=combined;++view_poll_epoch;
     for(auto& buttons:mod_buttons)buttons.store(0,std::memory_order_relaxed);
-    if(!captured)for(unsigned code=0;code<keys.size();++code)if(keys[code])blocked_keys[code]=true;
+    if(!combined)for(unsigned code=0;code<keys.size();++code)if(keys[code])blocked_keys[code]=true;
     for(auto& pending:pending_keys)pending.fill(false);
     for(auto& valid:latched_valid)valid.fill(false);
-    ResetWheelInputs();wait_for_pad_release.fill(true);
-    if(!captured)capture=-1;
+    // Chat latches only its consumed digital buttons in physical sampling.
+    // Requiring both sticks to return to neutral would strand moving players.
+    ResetWheelInputs();if(!chat)wait_for_pad_release.fill(true);
+    if(!combined)capture=-1;
 }
+void SetExternalControlCapture(bool captured){SetCaptureSource(captured,false);}
+void SetChatControlCapture(bool captured){SetCaptureSource(captured,true);}
 bool ControlOption(int id,int command,int& result) {
     std::lock_guard lock(controls_mutex);
     if(id==2200) {result=capture+1;return true;}

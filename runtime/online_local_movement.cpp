@@ -1,4 +1,5 @@
 #include "online_local_movement.h"
+#include "online_movement_target.h"
 #include "online.h"
 #include "online_movement_frame.h"
 #include "online_local_source.h"
@@ -53,11 +54,11 @@ bool Member(uint32_t list,uint32_t count,uint32_t target,uint32_t limit,uint8_t*
     unsigned hits=0;for(unsigned i=0;i<count;++i)hits+=PPC_LOAD_U32(list+i*4)==target;
     return hits==1;
 }
-bool ReferenceShape(Binding& b,uint8_t* base){
+bool ReferenceShape(Binding& b,PPCContext& ctx,uint8_t* base){
     b.reference=0;b.reference_shape={};
     const auto component=b.controller+24,basic=b.controller+16;
     if((PPC_LOAD_U8(component+44)&0x80) || PPC_LOAD_U8(component+233) ||
-       PPC_LOAD_U32(component+284) || PPC_LOAD_U8(component+289) ||
+       PPC_LOAD_U8(component+289) || !em2::net::ValidateNativeMovementTarget(b.registry,PPC_LOAD_U32(component+284),ctx,base) ||
        PPC_LOAD_U32(basic)!=0x8211DE70 || !Readable(0x833DAE58,1,base))return false;
     const auto types=PPC_LOAD_U32(b.entity+88),list=PPC_LOAD_U32(b.entity+36);
     const auto kind=PPC_LOAD_U8(0x833DAE58);
@@ -130,6 +131,10 @@ bool Inspect(Binding& b,PPCContext& ctx,uint8_t* base){
     // Bound these independent lists separately; retain exact-one membership.
     if(!Member(b.event_shape[0],b.event_shape[1],b.listener,128,base) ||
        !Member(PPC_LOAD_U32(b.event+16),PPC_LOAD_U32(b.event+20),b.action,256,base))return false;
+    // Other native listeners enter/leave when authored cameras switch. Only
+    // this actor's exact-one membership is a source capability; observer list
+    // storage/count is not an immutable action or producer incarnation.
+    b.event_shape[0]=0;b.event_shape[1]=0;
     diagnostics.stage=60;
     const auto first_user=PPC_LOAD_U32(b.action+88);
     if(first_user>1 || PPC_LOAD_U32(b.action+120)!=first_user)return false;
@@ -177,7 +182,7 @@ bool Inspect(Binding& b,PPCContext& ctx,uint8_t* base){
     }
     // A math-only binding can exist before the ordinary camera is ready. A
     // complete Room producer additionally requires this pinned native identity.
-    ReferenceShape(b,base);
+    ReferenceShape(b,ctx,base);
     diagnostics.stage=100;return true;
 }
 struct Query {Binding binding;std::array<float,2> axes{};unsigned hits=0;};

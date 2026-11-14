@@ -1,5 +1,9 @@
 #include "online_actor_input.h"
+#include "online_actor_jump.h"
+#include "online_actor_roster.h"
+#include "online_actor_frames.h"
 #include "online_actor_reference.h"
+#include "online_owned_probe.h"
 #include "online_local_movement.h"
 #include "online_local_jump.h"
 #include "online_movement_frame.h"
@@ -35,7 +39,9 @@ REXCVAR_DECLARE(bool,em2_private_profile);
 REXCVAR_DECLARE(std::string,em2_user_data_directory);
 REXCVAR_DEFINE_INT32(em2_probe_extra_native_players,0,"Debug","Private one-shot: construct, admit and destroy 1..14 additional native characters without assigning controls or replacing retail slots");
 REXCVAR_DEFINE_BOOL(em2_probe_owned_native_player_reject,false,"Debug","Private owned-player probe: force pre-admission rejection to verify native rollback");
-REXCVAR_DEFINE_BOOL(em2_probe_owned_native_player,false,"Debug","Private single-Mickey probe: quarantine broadcast input and attach a native owned movement reference; no movement injection");
+REXCVAR_DEFINE_BOOL(em2_probe_owned_native_player,false,"Debug","Private single-human probe: quarantine broadcast input and attach a native owned movement reference; no movement injection");
+REXCVAR_DEFINE_INT32(em2_probe_owned_native_player_character,0,"Debug","Private owned-player probe character: 0 Mickey, 1 human Oswald; never a retail player slot");
+REXCVAR_DECLARE(bool,em2_probe_owned_native_player_input);
 REXCVAR_DEFINE_BOOL(em2_probe_online_local_movement,false,"Debug","Private read-only Movement binding/math probe; never dispatches controls or advances actors");
 REXCVAR_DEFINE_INT32(em2_probe_extra_native_players_hold_seconds,0,"Debug","Private extra-character demo lifetime, 0..900 seconds; zero runs the immediate cleanup test");
 
@@ -345,9 +351,11 @@ void ProbeExtraNativePlayers(PPCContext& ctx,uint8_t* base,const std::array<em2:
     if(requested<1 || requested>14 || !REXCVAR_GET(em2_private_profile) ||
        REXCVAR_GET(em2_user_data_directory).empty() || em2::net::SynchronizedSessionActive())return;
     const bool owned=REXCVAR_GET(em2_probe_owned_native_player);
-    if(owned && requested!=1)return;
-    struct Probe {uint64_t peer=0;em2::net::ActorMovementReference reference;
-        unsigned ready=0,age=0;bool attempted=false,failed=false,queued=false,finished=false;
+    const unsigned owned_character=unsigned(std::clamp(REXCVAR_GET(em2_probe_owned_native_player_character),0,1));
+    if(owned && REXCVAR_GET(em2_probe_owned_native_player_input) && requested!=1)return;
+    const auto character_for=[&](unsigned i){return owned && requested==1?owned_character:i&1u;};
+    struct Probe {uint64_t peer=0;em2::net::OwnedActorRoster roster;
+        unsigned ready=0,age=0;bool attempted=false,failed=false,queued=false,finished=false,fresh_cleanup=false;
         uint32_t registry=0,manager=0;std::array<uint32_t,2> original{},original_entities{};std::vector<uint32_t> handles,entities;
         std::chrono::steady_clock::time_point created{},observed{};};
     static Probe probe;
@@ -370,13 +378,17 @@ void ProbeExtraNativePlayers(PPCContext& ctx,uint8_t* base,const std::array<em2:
         if(owned && registry==probe.registry){
             // A retail respawn is not permission to unquarantine a still-live
             // extra actor. Stop the hold and clean it through the same registry.
-            if(probe.peer)em2::net::SetOwnedActorInputEnabled(probe.peer,false);
+            if(probe.peer)probe.roster.BeginRetirement(ctx,base);
             probe.failed=true;probe.manager=manager;probe.original=originals();
             probe.original_entities={snapshot[0].entity,snapshot[1].entity};
             REXLOG_ERROR("Owned native player probe: retail identities changed; disabled extra input and beginning verified cleanup");
         }else{
-            if(probe.peer)em2::net::UnregisterOwnedActorInput(probe.peer);
-            probe.reference={};probe.peer=0;
+            if(probe.peer){
+                if(REXCVAR_GET(em2_probe_owned_native_player_input))em2::net::StopOwnedActorProbe(probe.peer);
+                if(!probe.roster.AbandonDestroyedWorld(ctx,base))probe.failed=true;
+                if(REXCVAR_GET(em2_probe_owned_native_player_input))em2::net::RetireOwnedActorProbe(probe.peer,ctx,base);
+            }
+            probe.peer=0;
             probe.finished=true;REXLOG_ERROR("Extra native player probe: world changed before cleanup verification; no stale calls issued");return;
         }
     }
@@ -417,6 +429,21 @@ void ProbeExtraNativePlayers(PPCContext& ctx,uint8_t* base,const std::array<em2:
         REXLOG_INFO("Owned native player rollback: default owner count {} -> {}, handle {:08X} remaining {:08X}; no admission, no component deactivation, retail handles unchanged {}",count,PPC_LOAD_U32(owner+24),handle,remaining,originals()==probe.original);
         return !remaining && PPC_LOAD_U32(owner+24)==count-1 && originals()==probe.original;
     };
+    auto rollback_fresh_group=[&]{
+        bool complete=true;
+        if(!probe.roster.actors().empty())complete=probe.roster.BeginRetirement(ctx,base);
+        for(size_t n=probe.handles.size();n-->0;){
+            const auto entity=resolve(probe.handles[n]);
+            if(!entity)continue;
+            if(entity!=probe.entities[n]){complete=false;continue;}
+            complete=discard_fresh(probe.handles[n],entity) && complete;
+        }
+        if(!probe.roster.actors().empty())complete=probe.roster.CompleteRetirement(ctx,base) && complete;
+        probe.finished=complete;
+        if(complete)REXLOG_INFO("Owned native player group rollback: requested {} constructed {} registered {} complete true; no actor admitted",requested,probe.handles.size(),probe.roster.actors().size());
+        else if(++probe.age==1 || probe.age%120==0)REXLOG_ERROR("Owned native player group rollback pending: requested {} constructed {} registered {}; ownership remains quarantined",requested,probe.handles.size(),probe.roster.actors().size());
+    };
+    if(probe.fresh_cleanup){rollback_fresh_group();return;}
     // Exact GetHealth export path (827CF240): entity int-property getter
     // vtable+204 with descriptor833DBB14. Read only; never restore/set health.
     auto health=[&](uint32_t entity){
@@ -432,6 +459,11 @@ void ProbeExtraNativePlayers(PPCContext& ctx,uint8_t* base,const std::array<em2:
     auto observe_players=[&](const char* phase,int instance){
         for(unsigned player=0;player<2;++player){
             const auto& actor=snapshot[player];const auto hp=health(actor.entity);const auto point=scope.stack+704;
+            if(REXCVAR_GET(em2_probe_owned_native_player_input) && instance==-1 && std::strcmp(phase,"running")){
+                uint32_t task_flags=UINT32_MAX;
+                const bool task_read=em2::net::ReadNativeJumpTaskFlags(actor.entity,base,task_flags);
+                REXLOG_INFO("Owned actor retail task lifecycle: phase {} player {} entity {:08X} Jump flags {:08X} readable {}",phase,player,actor.entity,task_flags,task_read);
+            }
             ctx.r3.u64=actor.entity;ctx.r4.u64=point;__imp__sub_8275C160(ctx,base);
             REXLOG_INFO("Extra native player original health: phase {} instance {} player {} entity {:08X} present {} health {} position {},{},{} state {} enabled {}",phase,instance,player,actor.entity,bool(hp),hp.value_or(INT32_MIN),
                 std::bit_cast<float>(PPC_LOAD_U32(point)),std::bit_cast<float>(PPC_LOAD_U32(point+4)),std::bit_cast<float>(PPC_LOAD_U32(point+8)),
@@ -456,15 +488,18 @@ void ProbeExtraNativePlayers(PPCContext& ctx,uint8_t* base,const std::array<em2:
             // blocked/unsupported sites with native hull sweeps, and reserve
             // spacing so the candidates do not overlap one another.
             std::string why;
+            const unsigned spawn_rings=std::max(4u,(unsigned(requested)+2u)/2u);
             for(int i=0;i<requested;++i) {
                 bool found=false;unsigned rejected=0;
-                for(unsigned ring=1;ring<=4 && !found;++ring)for(unsigned point=0;point<24 && !found;++point) {
+                for(unsigned ring=1;ring<=spawn_rings && !found;++ring)for(unsigned point=0;point<24 && !found;++point) {
                     const float angle=(float(point)+float(ring&1)*.5f)*6.28318530718f/24.f;
                     std::array<float,3> preferred{std::bit_cast<float>(origin[0])+float(ring)*2.f*std::cos(angle),
                         std::bit_cast<float>(origin[1]),std::bit_cast<float>(origin[2])+float(ring)*2.f*std::sin(angle)};
                     if(std::any_of(spawns.begin(),spawns.end(),[&](const auto& p){const auto x=p[0]-preferred[0],z=p[2]-preferred[2];return x*x+z*z<1.5f*1.5f;}))continue;
                     std::array<float,3> grounded;
-                    if(!em2::FindNativePlayerSpawn(ctx,base,snapshot[unsigned(i)&1].entity,preferred,grounded,why)){++rejected;continue;}
+                    // The character hull may come from retail AI Oswald, but
+                    // an added HUMAN needs the live human collision profile.
+                    if(!em2::FindNativePlayerSpawn(ctx,base,snapshot[character_for(unsigned(i))].entity,preferred,grounded,why,snapshot[0].entity)){++rejected;continue;}
                     spawns.push_back(grounded);found=true;
                     REXLOG_INFO("Extra native player safe spawn: instance {} position {},{},{} rejected {} native hull/floor sweeps",i,grounded[0],grounded[1],grounded[2],rejected);
                 }
@@ -473,7 +508,7 @@ void ProbeExtraNativePlayers(PPCContext& ctx,uint8_t* base,const std::array<em2:
         }
         REXLOG_INFO("Extra native player probe: begin {} instances, registry {:08X}, manager {:08X}, retail handles {:08X}/{:08X}",requested,registry,manager,probe.original[0],probe.original[1]);
         for(int i=0;i<requested;++i){
-            const unsigned character=unsigned(i)&1;
+            const unsigned character=character_for(unsigned(i));
             if(demo){
                 for(unsigned axis=0;axis<3;++axis)PPC_STORE_U32(position+axis*4,std::bit_cast<uint32_t>(spawns[size_t(i)][axis]));
                 PPC_STORE_U32(position+12,origin[3]);
@@ -509,26 +544,23 @@ void ProbeExtraNativePlayers(PPCContext& ctx,uint8_t* base,const std::array<em2:
             observe_players("constructed",i);
             if(!valid){
                 probe.failed=true;
-                if(owned){
-                    const auto discarded=unique && discard_fresh(handle,entity);
-                    probe.finished=true;
-                    REXLOG_ERROR("Owned native player probe: invalid fresh actor, native rollback complete {}; no actor admitted",discarded);
-                    return;
-                }
                 break;
             }
             if(owned){
-                em2::net::OwnedActorInput input;
-                const bool forced=REXCVAR_GET(em2_probe_owned_native_player_reject);
-                if(forced || !em2::net::RegisterOwnedActorInput(1000,handle,ctx,base,input)){
-                    const auto discarded=discard_fresh(handle,entity);
-                    probe.failed=probe.finished=true;
-                    REXLOG_INFO("Owned native player probe: registration rejected forced {} rollback complete {}; no actor admitted",forced,discarded);
-                    return;
+                const bool forced=REXCVAR_GET(em2_probe_owned_native_player_reject) && i==requested-1;
+                if(forced || !probe.roster.Add(uint8_t(i+3),1000+unsigned(i),handle,character,ctx,base)){
+                    probe.failed=true;
+                    REXLOG_INFO("Owned native player probe: registration rejected at {} forced {} reason '{}'",i,forced,probe.roster.error());
+                    break;
                 }
-                probe.peer=input.peer;
-                REXLOG_INFO("Owned native player probe: registered peer {} handle {:08X} controller {:08X}, listener {:08X}; ordinary broadcasts quarantined",input.peer,input.handle,input.controller,input.listener);
+                const auto input=probe.roster.actors().back().actor;if(!probe.peer)probe.peer=input.peer;
+                REXLOG_INFO("Owned native player probe: registered peer {} handle {:08X} controller {:08X}, listener {:08X}, native action user {}; room peer {} GUID [{:08X} {:08X} {:08X} {:08X}]; ordinary broadcasts quarantined",input.peer,input.handle,input.controller,input.listener,input.action_user,i+3,
+                    PPC_LOAD_U32(input.entity+4),PPC_LOAD_U32(input.entity+8),PPC_LOAD_U32(input.entity+12),PPC_LOAD_U32(input.entity+16));
             }
+        }
+        if(owned && probe.failed){
+            probe.fresh_cleanup=true;rollback_fresh_group();
+            return;
         }
         for(const auto entity:probe.entities){
             // Match retail time-mode propagation, then native admission. Admission
@@ -540,20 +572,36 @@ void ProbeExtraNativePlayers(PPCContext& ctx,uint8_t* base,const std::array<em2:
             if(originals()!=probe.original)probe.failed=true;
         }
         if(owned && probe.peer && !probe.failed){
+            for(size_t n=0;n<spawns.size();++n){
+                std::array<float,3> actual_ground;std::string actual_error;
+                const bool actual_support=em2::FindNativePlayerSpawn(ctx,base,probe.entities[n],spawns[n],actual_ground,actual_error,0,true);
+                REXLOG_INFO("Owned spawn actual hull comparison: accepted {} planned {}/{}/{} actual {}/{}/{} reason '{}'",actual_support,
+                    spawns[n][0],spawns[n][1],spawns[n][2],actual_support?actual_ground[0]:0.f,actual_support?actual_ground[1]:0.f,actual_support?actual_ground[2]:0.f,actual_error);
+                if(!actual_support || std::abs(actual_ground[1]-spawns[n][1])>.1f)probe.failed=true;
+            }
             const auto camera_controller=PPC_LOAD_U32(manager+28);
             const auto camera_handle=Readable(camera_controller,24,base)?PPC_LOAD_U32(camera_controller+20):0;
-            const auto result=em2::net::AttachOwnedActorMovementReference(probe.peer,camera_handle,ctx,base,probe.reference);
-            em2::net::OwnedActorInput input;const auto current=em2::net::OwnedActorInputFor(probe.peer,ctx,base,input);
-            const auto reference=current && Readable(input.controller,100,base)?PPC_LOAD_U32(input.controller+96):0;
-            const bool usable=current && Readable(reference,96,base) && PPC_LOAD_U32(reference)==0x8208D908 && PPC_LOAD_U32(reference+44)==2 && (result==em2::net::ActorReferenceResult::Attached || result==em2::net::ActorReferenceResult::ExistingReference);
-            REXLOG_INFO("Owned native player probe: movement reference result {} camera handle {:08X} retained entity {:08X} usable {}; original camera/player arrays unchanged {}; no movement input sent",int(result),camera_handle,reference,usable,originals()==probe.original);
-            if(!usable)probe.failed=true;
+            uint16_t expected=0;for(unsigned n=0;n<unsigned(requested);++n)expected|=uint16_t(1u<<(n+2));
+            if(!probe.failed && !probe.roster.Activate(expected,camera_handle,ctx,base))probe.failed=true;
+            bool bound=false;
+            if(!probe.failed){
+                em2::net::OwnedMovementFrames frames;std::array<uint64_t,16> epochs{};
+                const auto full=uint16_t(expected|3);for(unsigned n=0;n<16;++n)if(full&(1u<<n))epochs[n]=1;
+                bound=frames.Configure(full,3,epochs,1,registry) && probe.roster.BindFrames(frames,ctx,base);
+                em2::net::RoomFrame neutral;neutral.tick=1;neutral.players_mask=full;
+                for(unsigned n=0;n<16;++n)if(full&(1u<<n)){neutral.players[n].actor_epoch=1;neutral.players[n].source=em2::net::RoomMovementSource::NativeActionV1;}
+                bound=bound && frames.Preflight(neutral,ctx,base)==em2::net::OwnedFrameResult::Ready;
+                if(!bound)probe.failed=true;
+            }
+            REXLOG_INFO("Owned native player roster admission: requested {} registered {} mask {:04X} active {} frame bindings {} reason '{}'; no network frame delivered",requested,probe.roster.actors().size(),probe.roster.mask(),probe.roster.active(),bound,probe.roster.error());
+            if(!probe.failed && REXCVAR_GET(em2_probe_owned_native_player_input) && !em2::net::ArmOwnedActorProbe(probe.peer,snapshot[0].entity,ctx,base))probe.failed=true;
         }
         observe_players("admitted",-1);
         probe.created=probe.observed=std::chrono::steady_clock::now();
         if(demo)REXLOG_INFO("Extra native player demo: {} additional actors admitted near the player; lifetime {} seconds; independent controls/network not assigned",probe.entities.size(),std::clamp(REXCVAR_GET(em2_probe_extra_native_players_hold_seconds),0,900));
     }
     if(!probe.queued){
+        if(probe.peer && REXCVAR_GET(em2_probe_owned_native_player_input) && em2::net::OwnedActorProbeFailed(probe.peer))probe.failed=true;
         const auto now=std::chrono::steady_clock::now();
         const auto hold=std::chrono::seconds(std::clamp(REXCVAR_GET(em2_probe_extra_native_players_hold_seconds),0,900));
         if(!probe.failed && now-probe.created<hold){
@@ -593,12 +641,10 @@ void ProbeExtraNativePlayers(PPCContext& ctx,uint8_t* base,const std::array<em2:
         // Original destruction queues and retains the world-owned entity until
         // the engine removes it. No manual free/refcount/manager pointer edits.
         if(probe.peer){
-            em2::net::SetOwnedActorInputEnabled(probe.peer,false);
-            if(probe.reference.active){
-                const auto result=em2::net::ReleaseOwnedActorMovementReference(probe.reference,ctx,base);
-                REXLOG_INFO("Owned native player probe: release before native destruction result {}",int(result));
-                if(result!=em2::net::ActorReferenceResult::Released && result!=em2::net::ActorReferenceResult::AlreadyReplaced)probe.failed=true;
-            }
+            if(REXCVAR_GET(em2_probe_owned_native_player_input) && !em2::net::StopOwnedActorProbe(probe.peer))probe.failed=true;
+            const bool released=probe.roster.BeginRetirement(ctx,base);
+            REXLOG_INFO("Owned native player roster: references released before native destruction {}",released);
+            if(!released){probe.failed=true;return;}
         }
         for(size_t i=0;i<probe.entities.size();++i){
             const auto entity=resolve(probe.handles[i]);
@@ -615,7 +661,9 @@ void ProbeExtraNativePlayers(PPCContext& ctx,uint8_t* base,const std::array<em2:
     ++probe.age;
     unsigned remaining=0;for(const auto handle:probe.handles)remaining+=resolve(handle)!=0;
     if(remaining && probe.age<120)return;
-    if(!remaining && probe.peer){em2::net::UnregisterOwnedActorInput(probe.peer);probe.peer=0;}
+    if(!remaining && probe.peer){if(!probe.roster.CompleteRetirement(ctx,base))probe.failed=true;
+        if(REXCVAR_GET(em2_probe_owned_native_player_input) && !em2::net::RetireOwnedActorProbe(probe.peer,ctx,base))probe.failed=true;
+        probe.peer=0;}
     probe.finished=true;
     const bool success=!probe.failed && probe.entities.size()==size_t(requested) && !remaining && originals()==probe.original;
     REXLOG_INFO("Extra native player probe: completed success {} requested {} created {} remaining {} retail handles unchanged {}; construction/admission/lifetime only, no input/replication proof",success,requested,probe.entities.size(),remaining,originals()==probe.original);

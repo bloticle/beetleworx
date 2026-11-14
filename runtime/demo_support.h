@@ -17,6 +17,9 @@ struct DemoSupportSnapshot {
 void InitializeDemoSupport(const std::filesystem::path& executable_directory,
                            const std::filesystem::path& user_directory);
 DemoSupportSnapshot SnapshotDemoSupport();
+// Declared release compatibility version, independent of executable bytes.
+// Empty for an unversioned development tree; malformed manifests throw.
+std::string OnlineReleaseVersion(const std::filesystem::path& executable_directory);
 // 7300 preview,7301 export,7302 issue browser,7303 check,7304 download,
 // 7305 install at normal exit,7306 auto-update toggle,7307 report folder,
 // 7308 cancel install. 7310 status,7311 preview,7312 update summary queries.

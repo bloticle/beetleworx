@@ -1,4 +1,5 @@
 #include "online_runtime.h"
+#include "allocation_trace.h"
 #include "online_room_bootstrap.h"
 #include "online_room_runtime.h"
 #include "online_room_probe.h"
@@ -7,6 +8,7 @@
 #include "online_world_random.h"
 #include "online_native_menu.h"
 #include "online_native_handoff.h"
+#include "online_room_leave.h"
 #include "online_lobby.h"
 #include "native_random.h"
 #include "controls.h"
@@ -39,6 +41,8 @@ struct Owner {
     std::atomic<DWORD> thread{0};
     std::optional<std::chrono::steady_clock::time_point> loading_poll;
     unsigned device=0;bool preparing=false,attached=false,continue_claimed=false,profile_claimed=false,menu_preparation=false;
+    uint64_t loaded_generation=0;
+    bool local_menu_pause=false;
     NativeInitializationContext initialization;
     std::mutex status_mutex;NativeSessionStatus status;
     void StopPrelaunch(){if(prelaunch.joinable()){prelaunch.request_stop();prelaunch.join();}}
@@ -137,6 +141,8 @@ bool AdoptNativeOnlineSession(std::unique_ptr<Session>& ready,unsigned device) {
     if(!ready || ready->state()!=State::Ready || device>=2 || owner.session || GameplayInputGate().active() || RoomBootstrapActive() || NativeRoomActive())return false;
     if(!owner.initialization.Arm(ready->identity()))return false;
     owner.session=std::move(ready);owner.device=device;owner.preparing=owner.attached=owner.menu_preparation=false;
+    owner.loaded_generation=0;
+    owner.local_menu_pause=false;
     owner.thread.store(0,std::memory_order_release);
     owner.loading_poll.reset();
     owner.continue_claimed=owner.profile_claimed=false;
@@ -225,6 +231,7 @@ void FinishNativeOnlineContinue(bool accepted) {
     }
 }
 NativeSessionTiming NativeOnlineTiming() {
+    if(NativeRoomTitleLeaveHalted())return {true,true};
     if(NativeRoomActive())return NativeRoomTiming();
     auto& owner=RuntimeOwner();std::lock_guard lock(owner.status_mutex);
     return {owner.status.state!=NativeSessionState::None || RoomBootstrapActive(),owner.status.state==NativeSessionState::Failed || RoomBootstrapHalted()};
@@ -233,10 +240,32 @@ bool LegacyNativeSessionActive() noexcept {
     return retained_session_active.load(std::memory_order_acquire) || GameplayInputGate().active();
 }
 bool SynchronizedSessionActive() noexcept {return LegacyNativeSessionActive() || NativeRoomActive() || RoomBootstrapActive();}
+std::optional<unsigned> NativeOnlineDisplaySlot(){
+    if(NativeRoomActive())return NativeRoomDisplaySlot();
+    if(!LegacyNativeSessionActive())return {};
+    const auto& owner=RuntimeOwner();
+    if(owner.thread.load(std::memory_order_acquire)!=GetCurrentThreadId() || !owner.session)return {};
+    const auto slot=owner.session->local_player();
+    return slot<2?std::optional<unsigned>(slot):std::nullopt;
+}
+bool NativeOnlineLocalMenuPauseRequested(){
+    const auto& owner=RuntimeOwner();
+    return owner.session && owner.attached && owner.thread.load()==GetCurrentThreadId() && owner.local_menu_pause;
+}
+void NotifyNativeOnlineLevelLoaded(std::string_view destination){
+    NotifyNativeRoomTitleLeaveLoaded(destination);
+    if(NativeRoomActive()){NotifyNativeRoomLevelLoaded(destination);return;}
+    auto& owner=RuntimeOwner();
+    if(!owner.session || owner.attached || owner.thread.load()!=GetCurrentThreadId() ||
+       NativeOnlineStatus().state!=NativeSessionState::WaitingForWorld || destination.empty() || destination.starts_with("mainmenu."))return;
+    owner.loaded_generation=em2::CurrentNativeLoadGeneration();
+    REXLOG_INFO("Native online startup loaded boundary: '{}' generation {}; timeline admission pending",destination,owner.loaded_generation);
+}
 bool UpdateNativeOnlineSession(uint8_t* base,bool advance_world) {
     if(NativeRoomActive())return UpdateNativeRoomSession(base,advance_world);
     auto& owner=RuntimeOwner();if(!owner.session)return false;
     if(!ClaimOwnerThread(owner))return true;
+    if(base && owner.attached && !em2::InAgreedSimulationTick())owner.local_menu_pause=PPC_LOAD_U8(0x833FCA86)!=0;
     struct Restore {unsigned csr=_mm_getcsr();~Restore(){_mm_setcsr(csr);}} restore;
     if(NativeOnlineStatus().state==NativeSessionState::Failed)return true;
     owner.session->Poll();
@@ -260,7 +289,8 @@ bool UpdateNativeOnlineSession(uint8_t* base,bool advance_world) {
     }
     if(!advance_world || owner.menu_preparation)return true;
     const bool ready=NativeCoopReady(base);
-    if(!ready && !NativeOnlineJoinAllowed(base)){owner.Publish(NativeSessionState::WaitingForWorld);return true;}
+    const bool loaded=owner.loaded_generation && owner.loaded_generation==em2::CurrentNativeLoadGeneration();
+    if(!ready && !loaded && !NativeOnlineJoinAllowed(base)){owner.Publish(NativeSessionState::WaitingForWorld);return true;}
     // Start the shared timeline while both native characters still exist in
     // the loaded single-player world. Waiting for asynchronous P2 activation
     // here lets AI/RNG advance independently before network tick zero.
@@ -282,7 +312,7 @@ void ReleaseNativeOnlineSession() {
     if(owner.attached)GameplayInputGate().Detach();
     else em2::EndNativeOnlineRandom();
     SetOnlineJoinControls(false);owner.session->Disconnect();owner.session.reset();
-    owner.preparing=owner.attached=owner.continue_claimed=owner.profile_claimed=owner.menu_preparation=false;owner.Publish(NativeSessionState::None);
+    owner.preparing=owner.attached=owner.continue_claimed=owner.profile_claimed=owner.menu_preparation=false;owner.loaded_generation=0;owner.Publish(NativeSessionState::None);
     retained_session_active.store(false,std::memory_order_release);
     owner.thread.store(0,std::memory_order_release);
     owner.loading_poll.reset();
@@ -422,7 +452,8 @@ bool TestNativeOnlineSession() {
                 owner.Publish(NativeSessionState::WaitingForWorld);SetOnlineJoinControls(true,false);VirtualFree(base,0,MEM_RELEASE);}
         } restore{base};
         if(!VirtualAlloc(base,0x10000,MEM_COMMIT,PAGE_READWRITE) ||
-           !VirtualAlloc(base+0x833D0000,0x10000,MEM_COMMIT,PAGE_READWRITE))return false;
+           !VirtualAlloc(base+0x833D0000,0x10000,MEM_COMMIT,PAGE_READWRITE) ||
+           !VirtualAlloc(base+0x833F0000,0x10000,MEM_COMMIT,PAGE_READWRITE))return false;
         auto put=[&](uint32_t address,uint32_t value){value=_byteswap_ulong(value);std::memcpy(base+address,&value,4);};
         constexpr uint32_t manager=0x1000,profile=0x2000,camera=0x3000;
         put(0x833DAB60,manager);put(0x833DC87C,profile);
@@ -435,6 +466,13 @@ bool TestNativeOnlineSession() {
         auto& owner=RuntimeOwner();owner.attached=true;
         if(!check(UpdateNativeOnlineSession(base,true) && NativeOnlineStatus().state==NativeSessionState::Attached,
             "initialized human players stay attached"))return false;
+        base[0x833FCA86]=1;
+        if(!check(UpdateNativeOnlineSession(base,false) && NativeOnlineLocalMenuPauseRequested() &&
+                  base[0x833FCA86]==1 && NativeOnlineStatus().state==NativeSessionState::Attached,
+            "local menu pause is sampled without changing the native flag or companion ownership"))return false;
+        base[0x833FCA86]=0;
+        if(!check(UpdateNativeOnlineSession(base,false) && !NativeOnlineLocalMenuPauseRequested(),
+            "local resume releases the sampled pause request"))return false;
         for(uint32_t mode:{1u,2u}) {
             put(profile+24,1);put(manager+352,mode);
             if(!check(UpdateNativeOnlineSession(base,false) && NativeOnlineStatus().state==NativeSessionState::Attached,

@@ -22,13 +22,14 @@ REXCVAR_DECLARE(bool,em1_probe_level_entry);
 REXCVAR_DECLARE(bool,em2_private_profile);
 REXCVAR_DEFINE_STRING(em2_qa_debug_level,"","Debug","Private one-shot request through the debug level browser after offline Continue; no gameplay input");
 namespace em2 { namespace {
-struct Choice {std::string name,destination,search;bool em1=false;};
+struct Choice {std::string name,destination,search;bool em1=false,zone_only=false;};
 std::string Lower(std::string_view text){std::string result(text);for(auto& c:result)if(c>='A' && c<='Z')c+='a'-'A';return result;}
 bool Identifier(std::string_view text){return !text.empty() && text.size()<=120 && text.find("..") == text.npos && text.find_first_not_of("abcdefghijklmnopqrstuvwxyz_0123456789.")==text.npos;}
 std::vector<Choice> Catalog(std::span<const std::string> originals){
   std::vector<Choice> result;std::set<std::string> seen;
   for(const auto name:kNativeLevelStates)if(seen.insert(std::string(name)).second)
-    result.push_back({std::string(name),std::string(name),Lower(name),false});
+    result.push_back({std::string(name),std::string(name),Lower(name),false,
+      std::find(std::begin(kNativeZoneOnlyLevelStates),std::end(kNativeZoneOnlyLevelStates),name)!=std::end(kNativeZoneOnlyLevelStates)});
   for(const auto& name:originals){const auto key=Lower(name);
     if(!Identifier(key) || !key.ends_with(".level") || !seen.insert("em1:"+key).second)continue;
     result.push_back({name,"em1:"+key,key,true});
@@ -80,7 +81,7 @@ void TickDebugLevelLoads(PPCContext& ctx,unsigned char* base){
     if(!Identifier(state))throw std::runtime_error("Invalid native level state");
     // CleanLoadLevel is also available in the title VM at the main menu.
     // Preparation/admission above runs on its initialized engine thread.
-    const auto response=QueueGameLua("CleanLoadLevel(\""+state+"\")",false);
+    const auto response=destination.starts_with("em1:")?QueueGameLua("CleanLoadLevel(\""+state+"\")",false):QueueRetailLevelLoad(state,false);
     Status("Requested "+destination+". "+response);EngineConsoleMessage("Debug level load: "+destination+"; "+response);
   }catch(const std::exception& e){Status(std::string("Level loading failed: ")+e.what());EngineConsoleMessage(e.what());}
 }
@@ -95,21 +96,24 @@ void DrawDebugLevelBrowser(){
   ImGui::SameLine();ImGui::SetNextItemWidth(-1);ImGui::InputTextWithHint("##level-search","Search levels",search,sizeof(search));
   const auto query=Lower(search);std::vector<size_t> shown;
   for(size_t i=0;i<choices.size();++i){const auto& c=choices[i];if((game==1 && !c.em1)||(game==2 && c.em1)||c.search.find(query)==c.search.npos)continue;shown.push_back(i);}
-  ImGui::TextDisabled("%zu levels%s",shown.size(),original?"":" - mount an EM1 disc in setup to include its levels");
+  ImGui::TextDisabled("%zu entries%s",shown.size(),original?"":" - mount an EM1 disc in setup to include its levels");
   bool load=false;
   if(ImGui::BeginListBox("##all-levels",ImVec2(-1,std::max(100.f,ImGui::GetContentRegionAvail().y-115.f)))){
     ImGuiListClipper clipper;clipper.Begin(int(shown.size()));
     while(clipper.Step())for(int row=clipper.DisplayStart;row<clipper.DisplayEnd;++row){const auto& c=choices[shown[size_t(row)]];
-      const auto label=std::string(c.em1?"EM1  ":"EM2  ")+c.name;
+      const auto label=std::string(c.em1?"EM1  ":"EM2  ")+c.name+(c.zone_only?"  [zone state]":"");
       if(ImGui::Selectable(label.c_str(),selected==c.destination,ImGuiSelectableFlags_AllowDoubleClick)){selected=c.destination;if(ImGui::IsMouseDoubleClicked(0))load=true;}
     }ImGui::EndListBox();
   }
   bool busy;std::string status;{std::lock_guard lock(request_mutex);busy=preparing||pending.has_value();status=last_status;}
+  const auto selected_choice=std::find_if(choices.begin(),choices.end(),[&](const auto& c){return c.destination==selected;});
+  const bool zone_only=selected_choice!=choices.end() && selected_choice->zone_only;
   ImGui::BeginDisabled(selected.empty() || busy || net::SynchronizedSessionActive());
-  load|=ImGui::Button("Play selected level");ImGui::EndDisabled();
+  load|=ImGui::Button(zone_only?"Apply zone state":"Play selected level");ImGui::EndDisabled();
   if(load && !selected.empty()){const auto result=QueueDebugLevelLoad(selected);EngineConsoleMessage(result);}
   ImGui::SameLine();if(ImGui::Button("Restart current level"))ExecuteEngineConsole("level.restart");
   if(selected.starts_with("em1:"))ImGui::TextDisabled("EM1 compatibility is in development. Assets are prepared when selected.");
+  if(zone_only)ImGui::TextWrapped("This state changes existing zones. Load a full state of the same level first; applying it will keep the current level loaded.");
   if(!status.empty())ImGui::TextWrapped("%s",status.c_str());
 }
 bool TestDebugLevelCatalog(){

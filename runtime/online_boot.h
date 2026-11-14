@@ -31,7 +31,8 @@ public:
     OnlineBoot();~OnlineBoot();
     OnlineBoot(const OnlineBoot&)=delete;OnlineBoot& operator=(const OnlineBoot&)=delete;
     bool Host(BootPaths,const std::filesystem::path& frozen_checkpoint,
-              std::string listen_address,std::string advertised_address,uint16_t port=0,uint8_t input_delay=2);
+              std::string listen_address,std::string advertised_address,uint16_t port=0,uint8_t input_delay=2,
+              std::optional<std::array<uint8_t,16>> session_nonce={});
     bool Join(BootPaths,std::string invitation);
     void Poll();
     void Cancel();

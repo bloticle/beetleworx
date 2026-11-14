@@ -22,6 +22,7 @@ struct NativeTriggerExclusion {
 struct NativeTriggerContext {
     uint32_t event=0;bool retail_listener=false;
     std::array<uint32_t,6> header{};
+    // Listener metadata represents this actor only; camera observers have independent lifetimes.
     std::vector<uint32_t> listeners,action_order;
     bool operator==(const NativeTriggerContext&)const=default;
 };

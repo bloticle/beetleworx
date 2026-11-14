@@ -19,7 +19,13 @@ void RequestCharacterSwap();
 void UpdateCharacterSwap(PPCContext& ctx,uint8_t* base);
 void UpdateNativeJoinedPlayerControls(PPCContext& ctx,uint8_t* base);
 void MaybeQueueNativeStartLevel();
+// Bounded read-only owner-thread diagnostics after an original physics step.
+void TracePlayerSpawnPhysicsStep(uint8_t* base);
 bool NativeCoopReady(uint8_t* base);
+// Existing sessions may follow an original mode owned by the same camera.
+bool NativeCoopRuntimeReady(uint8_t* base);
+// Read-only diagnostic; nullptr means the original co-op readiness checks pass.
+const char* NativeCoopReadinessFailure(uint8_t* base);
 bool OswaldIsSelected();
 bool NativeOnlineJoinAllowed(uint8_t* base);
 const char* CharacterSwapNotice();

@@ -1,6 +1,7 @@
 #include "ppc_context.h"
 #include "guest_read_batch.h"
 #include "mickey_ears.h"
+#include "online_clothing_draw.h"
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <array>
@@ -156,6 +157,7 @@ bool ApplyPair(PPCContext& ctx,uint8_t* base,const Pair& pair,PPCFunc* setter){
     return ok;
 }
 void RenderMesh(PPCContext& ctx,uint8_t* base,PPCFunc* setter,PPCFunc* draw){
+    em2::net::TraceOnlineClothingDraw(ctx,ctx.r4.u32,base);
     if(multiple_owners.load(std::memory_order_acquire) && (REXCVAR_GET(em2_instance_mickey_ears) || (REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_trace_mickey_ears)))){
         TraceContext preserve_inputs;
         const auto pair=FindPair(ctx.r4.u32,base);
@@ -174,7 +176,7 @@ void RenderMesh(PPCContext& ctx,uint8_t* base,PPCFunc* setter,PPCFunc* draw){
             }
         }
     }
-    draw(ctx,base);
+    em2::net::RenderOnlineClothing(ctx,base,draw);
 }
 }
 

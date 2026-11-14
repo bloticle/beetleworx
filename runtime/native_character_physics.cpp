@@ -80,6 +80,22 @@ bool em2::ReadNativeCharacterPhysics(uint8_t* base,std::vector<Character>& out){
     out=std::move(values);return true;
 }
 
+bool em2::ReadNativeActorPhysics(uint8_t* base,uint32_t entity,Character& out){
+    HostState host;GuestReadBatch reads;
+    if(!Readable(base,entity,96) || Word(base,entity)!=0x8208D908 ||
+       !Readable(base,0x833DAF54,1) || !Readable(base,0x833DBC3C,1))return false;
+    const auto motion_kind=PPC_LOAD_U8(0x833DAF54),position_kind=PPC_LOAD_U8(0x833DBC3C);
+    Binding b;b.entity=entity;b.motion=Typed(base,entity,motion_kind,388);
+    if(!b.motion)return false;
+    b.physics=Word(base,b.motion+80);if(!Readable(base,b.physics,180))return false;
+    b.controller=Word(base,b.physics+176);if(!Readable(base,b.controller,20))return false;
+    b.body=Word(base,b.controller+16);b.position=Typed(base,entity,position_kind,184);
+    Character first,second;
+    if(!Sample(base,b,first) || !Sample(base,b,second) || first!=second ||
+       Typed(base,entity,motion_kind,388)!=b.motion || Typed(base,entity,position_kind,184)!=b.position ||
+       PPC_LOAD_U8(0x833DAF54)!=motion_kind || PPC_LOAD_U8(0x833DBC3C)!=position_kind)return false;
+    out=first;return true;
+}
 bool em2::TestNativeCharacterPhysics(){
     HostState host;
     auto* base=static_cast<uint8_t*>(VirtualAlloc(nullptr,0x100000000ull,MEM_RESERVE,PAGE_NOACCESS));
@@ -110,6 +126,13 @@ bool em2::TestNativeCharacterPhysics(){
         "native registry includes the third NPC beyond the retail player pair") ||
        !check(!std::memcmp(base,before.data(),before.size()) && _mm_getcsr()==fp && GetLastError()==0x1234,"snapshot leaves guest data and host FP/error state unchanged"))return false;
     net::GameplayObservation observed;observed.includes_character_physics=true;observed.characters=first;
+    Character single,unrelated=first[0];
+    if(!check(ReadNativeActorPhysics(base,0x5000,single) && single==first[1] &&
+        !ReadNativeActorPhysics(base,0x7000,unrelated) && unrelated==first[0],"targeted character observation matches world proof and rejects unrelated visual entities without changing output"))return false;
+    PPC_STORE_U32(0x11000+48,0x4000-8);
+    const bool foreign_rejected=!ReadNativeActorPhysics(base,0x5000,single);
+    PPC_STORE_U32(0x11000+48,0x5000-8);
+    if(!check(foreign_rejected && single==first[1],"targeted character observation rejects foreign motion ownership without partial output"))return false;
     for(unsigned slot=0;slot<2;++slot){observed.player_ids[slot]=first[slot].id;
         for(unsigned axis=0;axis<3;++axis)observed.players[slot].position[axis]=std::bit_cast<float>(first[slot].position[axis]);}
     const auto digest=net::HashGameplayObservation(99,observed);

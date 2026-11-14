@@ -19,6 +19,11 @@ PPC_EXTERN_FUNC(__imp__sub_82793B50);
 PPC_EXTERN_FUNC(__imp__sub_82793B88);
 PPC_EXTERN_FUNC(__imp__sub_82793BA8);
 namespace {
+thread_local unsigned resource_observation_depth=0;
+struct ResourceObservationScope {
+    ResourceObservationScope(){++resource_observation_depth;}
+    ~ResourceObservationScope(){--resource_observation_depth;}
+};
 bool Readable(uint8_t* base,uint32_t address,size_t size){
     if(!base || address<4096 || !size || uint64_t(address)+size>0x100000000ull)return false;
     return em2::GuestReadBatch::Readable(PPC_RAW_ADDR(address),size);
@@ -48,6 +53,7 @@ uint32_t ResolveChecked(PPCContext& ctx,uint8_t* base,uint32_t registry,uint32_t
 template<class Health>
 bool SampleResources(PPCContext& ctx,uint8_t* base,const std::array<uint32_t,2>& entities,
                      std::array<uint32_t,4>& life,std::array<float,6>& ammo,Health health) {
+    ResourceObservationScope observation_scope;
     em2::GuestReadBatch inspection;
     const auto saved=ctx;const auto csr=_mm_getcsr();
     struct Restore {PPCContext& ctx;PPCContext saved;unsigned csr;~Restore(){ctx=saved;_mm_setcsr(csr);}} restore{ctx,saved,csr};
@@ -125,6 +131,7 @@ bool em2::ReadNativeWorldIdentity(uint8_t* base,net::GameplayObservation::World&
        !Name(base,PPC_LOAD_U32(interior?interior:world+192),sampled.interior,true))return false;
     out=sampled;return true;
 }
+bool em2::NativeResourceObservationActive(){return resource_observation_depth!=0;}
 bool em2::ReadNativeGameplayObservation(PPCContext& ctx,uint8_t* base,net::GameplayObservation& out){return Capture(ctx,base,out,__imp__sub_82A2EBD0);}
 bool em2::ReadNativeResources(PPCContext& ctx,uint8_t* base,const std::array<uint32_t,2>& entities,
                               std::array<uint32_t,4>& life,std::array<float,6>& ammo) {
@@ -152,10 +159,11 @@ bool em2::TestNativeResources() {
     const auto expected=ctx;const auto csr=_mm_getcsr();unsigned calls=0;bool args=true;bool invalid_health=false;
     auto health=[&](PPCContext& native,uint8_t* memory) {
         const auto player=native.r3.u32;
-        args &= memory==base && player<2 && native.r4.u32==0;++calls;
+        args &= memory==base && player<2 && native.r4.u32==0 && NativeResourceObservationActive();++calls;
         native.f1.f64=invalid_health?NAN:double(4+player*3);native.r31.u64=0xDEADBEEF;native.lr=0;
         _mm_setcsr(_mm_getcsr()^0x8000);
     };
+    if(!check(!NativeResourceObservationActive(),"resource observation scope starts inactive"))return false;
     std::array<uint32_t,4> life{};std::array<float,6> ammo{};
     if(!check(SampleResources(ctx,base,entities,life,ammo,health) && args && calls==2 && life==std::array<uint32_t,4>{4,5,7,8} &&
         ammo==expected_ammo && !std::memcmp(&ctx,&expected,sizeof(ctx)) && _mm_getcsr()==csr,"resource capture uses correct channels and restores complete guest context/FP state"))return false;
@@ -185,6 +193,7 @@ bool em2::TestNativeResources() {
     invalid_health=true;
     if(!check(!SampleResources(ctx,base,entities,life,ammo,health) && life==good_life && ammo==good_ammo &&
         !std::memcmp(&ctx,&expected,sizeof(ctx)) && _mm_getcsr()==csr,"invalid health does not publish partial values or corrupt guest state"))return false;
+    if(!check(!NativeResourceObservationActive(),"resource observation scope unwinds after success and failed reads"))return false;
     invalid_health=false;PPC_STORE_U8(0x6003,255);
     if(!check(!SampleResources(ctx,base,entities,life,ammo,health),"missing health component is not reported as zero life"))return false;
     PPC_STORE_U8(0x6003,2);PPC_STORE_U32(resources+60,std::bit_cast<uint32_t>(std::numeric_limits<float>::infinity()));

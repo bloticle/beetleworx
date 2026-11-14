@@ -10,13 +10,19 @@
 #include "players.h"
 #include "controls.h"
 #include "allocation_trace.h"
+#include "guest_read_batch.h"
+#include "native_entity_probe.h"
 #include "native_engine.h"
 #include "mickey_ears.h"
+#include "online_clothing_draw.h"
+#include "online_chat.h"
 #include "demo_setup.h"
 #include "game_console.h"
 #include "online_continue.h"
 #include "simulation.h"
 #include "online_runtime.h"
+#include "online_room_gameplay.h"
+#include "online_viewport.h"
 #include "online_world_random.h"
 #include <rex/cvar.h>
 #include <rex/logging.h>
@@ -28,11 +34,20 @@
 #include <string>
 #include <thread>
 #include <stdexcept>
+#include <exception>
 #include <windows.h>
 
 PPC_EXTERN_FUNC(__imp__sub_8276D6C8);
 PPC_EXTERN_FUNC(__imp__sub_8276CCF0);
 PPC_EXTERN_FUNC(__imp__sub_8276A828);
+PPC_EXTERN_FUNC(__imp__sub_82769588);
+PPC_EXTERN_FUNC(__imp__sub_82935D30);
+PPC_EXTERN_FUNC(__imp__sub_82935688);
+PPC_EXTERN_FUNC(__imp__sub_829369C0);
+PPC_EXTERN_FUNC(__imp__sub_8275F828);
+PPC_EXTERN_FUNC(__imp__sub_8275FAD0);
+PPC_EXTERN_FUNC(__imp__sub_8275C4B0);
+PPC_EXTERN_FUNC(__imp__sub_8273BB90);
 PPC_EXTERN_FUNC(__imp__sub_82A105F8);
 PPC_EXTERN_FUNC(__imp__sub_8276A288);
 PPC_EXTERN_FUNC(__imp__sub_8276A350);
@@ -84,6 +99,10 @@ struct Record {
     uint32_t entity=0,controller=0,mode=0;
 };
 thread_local bool canonical_join_dispatch=false;
+thread_local uint64_t spawn_trace_load=0;
+thread_local unsigned spawn_trace_steps=0;
+thread_local std::array<uint32_t,2> spawn_trace_entities{};
+thread_local uint32_t spawn_trace_lua=0;
 struct NativeJoinLease {uint64_t generation=0,tick=0;DWORD thread=0;};
 thread_local NativeJoinLease native_join_lease;
 bool ExplicitJoinOwnsCurrentTick();
@@ -242,10 +261,128 @@ Record ReadRecord(uint32_t manager,uint32_t slot,uint8_t* base) {
     const auto record=manager+slot*320;
     return {PPC_LOAD_U32(record+20),PPC_LOAD_U32(record+28),PPC_LOAD_U32(record+32)};
 }
+void TraceSpawnRecord(uint32_t manager,uint32_t slot,uint32_t caller,const char* phase,uint8_t* base,uint32_t position=0) {
+    if(!REXCVAR_GET(em2_trace_players) || !manager || slot>=2 || uint64_t(manager)+slot*320+176>0x100000000ull)return;
+    struct Host {DWORD error=GetLastError();unsigned csr=_mm_getcsr();~Host(){SetLastError(error);_mm_setcsr(csr);}} host;
+    const auto record=manager+slot*320;
+    if(!em2::GuestReadBatch::Readable(PPC_RAW_ADDR(record),176))return;
+    static thread_local uint64_t generation=UINT64_MAX;
+    static thread_local unsigned events=0;
+    const auto current=em2::CurrentNativeLoadGeneration();
+    if(generation!=current){generation=current;events=0;}
+    if(events++>=256)return;
+    const auto regular=PPC_LOAD_U8(record+38),override_spawn=PPC_LOAD_U8(record+39);
+    std::array<uint32_t,3> spawn{},override_position{},input{};
+    for(unsigned i=0;i<3;++i){
+        if(regular)spawn[i]=PPC_LOAD_U32(record+96+i*4);
+        if(override_spawn)override_position[i]=PPC_LOAD_U32(record+160+i*4);
+    }
+    const bool input_valid=position>=4096 && uint64_t(position)+12<=0x100000000ull && em2::GuestReadBatch::Readable(PPC_RAW_ADDR(position),12);
+    if(input_valid)for(unsigned i=0;i<3;++i)input[i]=PPC_LOAD_U32(position+i*4);
+    REXLOG_INFO("Native spawn trace: load {} event {} P{} {} caller {:08X} entity {:08X} mode {} regular {} [{:08X}/{:08X}/{:08X}] override {} [{:08X}/{:08X}/{:08X}] input {} [{:08X}/{:08X}/{:08X}]",
+        current,events,slot,phase,caller,PPC_LOAD_U32(record+20),PPC_LOAD_U32(record+32),regular,spawn[0],spawn[1],spawn[2],override_spawn,override_position[0],override_position[1],override_position[2],input_valid,input[0],input[1],input[2]);
+}
+void TraceSpawnBodies(const char* phase,uint8_t* base) {
+    if(!REXCVAR_GET(em2_trace_players))return;
+    struct Host {DWORD error=GetLastError();unsigned csr=_mm_getcsr();~Host(){SetLastError(error);_mm_setcsr(csr);}} host;
+    em2::GuestReadBatch reads;
+    auto readable=[&](uint32_t at,size_t size){return at>=4096 && uint64_t(at)+size<=0x100000000ull && em2::GuestReadBatch::Readable(PPC_RAW_ADDR(at),size);};
+    if(!readable(0x833DAB60,4) || !readable(0x833DAF54,1))return;
+    const auto manager=PPC_LOAD_U32(0x833DAB60);if(!readable(manager,640))return;
+    em2::NativeEntitySnapshot snapshot;const char* error=nullptr;uint32_t address=0;
+    if(!em2::ReadNativeEntitySnapshot(base,snapshot,error,address,true))return;
+    const auto kind=PPC_LOAD_U8(0x833DAF54);if(kind>=snapshot.component_count)return;
+    for(unsigned slot=0;slot<2;++slot){
+        const auto handle=PPC_LOAD_U32(manager+slot*320+20);
+        const auto actor=std::find_if(snapshot.records.begin(),snapshot.records.end(),[&](const auto& e){return e.handle==handle;});
+        if(actor==snapshot.records.end() || !readable(actor->debug_address,96))continue;
+        spawn_trace_entities[slot]=actor->debug_address;
+        const auto entity=actor->debug_address,types=PPC_LOAD_U32(entity+88),components=PPC_LOAD_U32(entity+36);
+        if(!readable(types,kind+1))continue;const auto index=PPC_LOAD_U8(types+kind);
+        if(index==255 || !readable(components,unsigned(index)*4+4))continue;
+        const auto face=PPC_LOAD_U32(components+unsigned(index)*4);
+        if(face<8 || !readable(face-8,388))continue;const auto motion=face-8;
+        if(PPC_LOAD_U32(motion+48)!=entity-8)continue;
+        const auto physics=PPC_LOAD_U32(motion+80);if(!readable(physics,180))continue;
+        const auto controller=PPC_LOAD_U32(physics+176);if(!readable(controller,20))continue;
+        const auto body=PPC_LOAD_U32(controller+16);if(!readable(body,448) || PPC_LOAD_U32(body)!=0x82030384 || PPC_LOAD_U32(body+224)!=0x8202E5CC)continue;
+        REXLOG_INFO("Native spawn body: load {} {} P{} handle {:08X} entity {:08X} active {} scene {} [{:08X}/{:08X}/{:08X}] body [{:08X}/{:08X}/{:08X}] velocity [{:08X}/{:08X}/{:08X}]",
+            em2::CurrentNativeLoadGeneration(),phase,slot,handle,entity,PPC_LOAD_U8(physics+145),actor->has_position,actor->position_bits[0],actor->position_bits[1],actor->position_bits[2],
+            PPC_LOAD_U32(body+288),PPC_LOAD_U32(body+292),PPC_LOAD_U32(body+296),PPC_LOAD_U32(body+432),PPC_LOAD_U32(body+436),PPC_LOAD_U32(body+440));
+    }
+}
+void TraceSpawnMutation(PPCContext& ctx,uint8_t* base,const char* operation,unsigned offset) {
+    if(!REXCVAR_GET(em2_trace_players) || !spawn_trace_steps || spawn_trace_load!=em2::CurrentNativeLoadGeneration() ||
+       std::find(spawn_trace_entities.begin(),spawn_trace_entities.end(),ctx.r3.u32)==spawn_trace_entities.end())return;
+    struct Host {DWORD error=GetLastError();unsigned csr=_mm_getcsr();~Host(){SetLastError(error);_mm_setcsr(csr);}} host;
+    static thread_local uint64_t generation=0;static thread_local unsigned events=0;
+    if(generation!=spawn_trace_load){generation=spawn_trace_load;events=0;}if(events++>=64)return;
+    auto readable=[&](uint32_t at,size_t size){return at>=4096 && uint64_t(at)+size<=0x100000000ull && em2::GuestReadBatch::Readable(PPC_RAW_ADDR(at),size);};
+    if(uint64_t(ctx.r4.u32)+offset+12>0x100000000ull)return;
+    const auto input=ctx.r4.u32+offset;if(!readable(input,12))return;
+    REXLOG_INFO("Native spawn mutation: load {} {} entity {:08X} caller {:08X} position [{:08X}/{:08X}/{:08X}]",generation,operation,ctx.r3.u32,uint32_t(ctx.lr),PPC_LOAD_U32(input),PPC_LOAD_U32(input+4),PPC_LOAD_U32(input+8));
+    auto stack=ctx.r1.u32;
+    for(unsigned depth=0;depth<8 && readable(stack,4);++depth){
+        const auto next=PPC_LOAD_U32(stack);if(next<=stack || next-stack>65536 || !readable(next-8,4))break;
+        REXLOG_INFO("Native spawn mutation stack: depth {} return {:08X}",depth,PPC_LOAD_U32(next-8));stack=next;
+    }
+    // Same audited retail CallInfo/closure/debug-record layout used by the
+    // script RNG owner diagnostics. Inspect only the currently executing
+    // MoveToEntity callback; no Lua call, VM mutation or retained VM pointer.
+    auto word=[&](uint32_t at){return readable(at,4)?PPC_LOAD_U32(at):0u;};
+    const auto state=spawn_trace_lua;
+    const auto first=state?word(state+12):0,current=state?word(state+20):0;
+    if(!first || current<first || (current-first)%16 || current-first>16*1024*1024)return;
+    for(auto frame=current;frame>first && (current-frame)/16<8;frame-=16){
+        const auto top=word(frame);if(top<4096 || (word(top-4)&15)!=9)continue;
+        const auto closure=word(top-8),proto=word(closure+8),location=word(proto+40),source=word(location+24);
+        if(!closure || !proto || !location || !source)continue;
+        const auto length=std::min<uint32_t>(word(source+4)&0x3FFFFFFFu,191);
+        if(!length || uint64_t(source)+12+length>0x100000000ull || !readable(source+12,length))continue;
+        std::array<char,192> name{};std::memcpy(name.data(),PPC_RAW_ADDR(source+12),length);
+        for(unsigned i=0;i<length;++i)if(static_cast<unsigned char>(name[i])<32)name[i]='?';
+        REXLOG_INFO("Native spawn Lua owner: source '{}' defined line {} frame {}",name.data(),word(location),(current-frame)/16);
+    }
+}
 bool NormalPlayerCamera(uint32_t camera,const Record& p0,uint8_t* base) {
     return camera && p0.entity && p0.mode==0 &&
         PPC_LOAD_U32(camera)==0x82112778 && PPC_LOAD_U32(camera+564) &&
         PPC_LOAD_U32(camera+392) && PPC_LOAD_U32(camera+24)==PPC_LOAD_U32(camera+392);
+}
+bool OwnedPlayerCamera(uint32_t camera,const Record& p0,uint8_t* base) {
+    // Normal-only admission is separate from ongoing native camera ownership.
+    // 82A109C8 constructs the fixed modes. Authored hints also create a native
+    // Hint mode (82123F50), and 831D40xx creates temporary blend graphs outside
+    // those slots. Every node retains the same +20 controller owner.
+    if(NormalPlayerCamera(camera,p0,base))return true;
+    struct Host {DWORD error=GetLastError();unsigned csr=_mm_getcsr();~Host(){SetLastError(error);_mm_setcsr(csr);}} host;
+    em2::GuestReadBatch reads;
+    auto readable=[&](uint32_t at,size_t size){return base && at>=4096 && uint64_t(at)+size<=0x100000000ull && em2::GuestReadBatch::Readable(PPC_RAW_ADDR(at),size);};
+    if(!camera || !p0.entity || p0.mode!=0 || !readable(camera,568) || PPC_LOAD_U32(camera)!=0x82112778 ||
+       !PPC_LOAD_U32(camera+564) || !PPC_LOAD_U32(camera+392))return false;
+    constexpr std::array<uint32_t,12> tables{0x82126C98,0x8220EAA0,0x82127460,0x82123C90,0x821125F8,0x8220EF98,
+        0x82126EF0,0x82127080,0x820EB340,0x8220F0B0,0x82123F50,0x8220EEC8};
+    std::array<uint32_t,16> path{};unsigned visited=0;
+    auto validate=[&](auto&& self,uint32_t mode,unsigned depth)->bool {
+        if(depth>=path.size() || ++visited>64 || !readable(mode,24) || PPC_LOAD_U32(mode+20)!=camera)return false;
+        for(unsigned i=0;i<depth;++i)if(path[i]==mode)return false;
+        path[depth]=mode;
+        const auto table=PPC_LOAD_U32(mode);
+        if(std::find(tables.begin(),tables.end(),table)==tables.end() || !readable(table,44))return false;
+        const auto deactivate=PPC_LOAD_U32(table+40);
+        if(deactivate<uint32_t(PPC_CODE_BASE) || uint64_t(deactivate)>=uint64_t(PPC_CODE_BASE)+PPC_CODE_SIZE)return false;
+        if(table==0x8220EEC8){
+            if(!readable(mode,32))return false;
+            const auto from=PPC_LOAD_U32(mode+24),to=PPC_LOAD_U32(mode+28);
+            // Original blend deactivation 831D4148 treats each link as optional.
+            // Shared children are legal; ancestor cycles and empty graphs are not.
+            return (from || to) && (!from || self(self,from,depth+1)) && (!to || self(self,to,depth+1));
+        }
+        if(table==0x82123F50)return true;
+        for(unsigned offset=392;offset<=432;offset+=4)if(PPC_LOAD_U32(camera+offset)==mode)return true;
+        return false;
+    };
+    return validate(validate,PPC_LOAD_U32(camera+24),0);
 }
 bool JoinedHumanPlayer(bool joined,uint32_t players,const Record& before,const Record& after) {
     return joined && players>1 && (before.mode==1 || before.mode==2) && after.mode==0 && after.entity;
@@ -341,13 +478,6 @@ PPC_FUNC_IMPL(sub_829E2318) {
 }
 
 PPC_FUNC_IMPL(sub_829E3178) {
-    std::string script_error;
-    if(!em2::em1::EndRegisteredLevelScripts(ctx,base,script_error)){
-        REXLOG_ERROR("[em1] native level transition retained original script ownership: {}",script_error);ctx.r3.u64=0;return;
-    }
-    em2::InvalidateMickeyEarInstances();
-    direct_boot_controls_pending=0;
-    em2::InvalidateNativeConsoleWorld();
     const auto* requested=ctx.r4.u32?reinterpret_cast<const char*>(PPC_RAW_ADDR(ctx.r4.u32)):"";
     const std::string requested_level(requested,strnlen_s(requested,96));
     if(REXCVAR_GET(em2_trace_players))
@@ -355,6 +485,24 @@ PPC_FUNC_IMPL(sub_829E3178) {
     const auto load=[&] {
         const auto* actual=ctx.r4.u32?reinterpret_cast<const char*>(PPC_RAW_ADDR(ctx.r4.u32)):"";
         const std::string destination(actual,strnlen_s(actual,96));
+        auto* room_gameplay=em2::net::CurrentNativeRoomGameplay();
+        if(room_gameplay && !room_gameplay->NativeLoadPoint(destination,em2::net::LoadPhase::Begin,false,ctx,base)){ctx.r3.u64=0;return;}
+        struct RoomEnd {
+            em2::net::NativeRoomGameplay* gameplay;std::string_view destination;PPCContext& ctx;uint8_t* base;
+            int exceptions=std::uncaught_exceptions();
+            ~RoomEnd()noexcept{if(!gameplay)return;
+                try{if(std::uncaught_exceptions()>exceptions){gameplay->ObservationFailed();return;}
+                    if(!gameplay->NativeLoadPoint(destination,em2::net::LoadPhase::End,ctx.r3.u32!=0,ctx,base))ctx.r3.u64=0;
+                }catch(...){ctx.r3.u64=0;try{gameplay->ObservationFailed();}catch(...){/* Preserve the original stopped transaction. */}}
+            }
+        }room_end{room_gameplay,destination,ctx,base};
+        std::string script_error;
+        if(!em2::em1::EndRegisteredLevelScripts(ctx,base,script_error)){
+            REXLOG_ERROR("[em1] native level transition retained original script ownership: {}",script_error);ctx.r3.u64=0;return;
+        }
+        em2::InvalidateMickeyEarInstances();
+        if(!em2::net::ReleaseOnlineClothingDrawResources(ctx,base))REXLOG_ERROR("Native Room clothing cache retained after incomplete reference release");
+        direct_boot_controls_pending=0;em2::InvalidateNativeConsoleWorld();
         em2::RecordNativeLoadLevel(destination);
         em2::em1::ObserveRegisteredLevelEntryRequest(destination);
         std::string collision_error;
@@ -375,6 +523,10 @@ PPC_FUNC_IMPL(sub_829E3178) {
         }
         {em2::em1::RegisteredLevelActorScope source_actors(em2::em1::RegisteredLevelBlueprints(destination));
          __imp__sub_829E3178(ctx,base);}
+        if(ctx.r3.u32 && REXCVAR_GET(em2_trace_players)){
+            TraceSpawnBodies("loader-return",base);
+            spawn_trace_load=em2::CurrentNativeLoadGeneration();spawn_trace_steps=4;
+        }
         if(ctx.r3.u32 && !em2::em1::AttachRegisteredLevelCollision(ctx,base,destination,collision_error)){
             REXLOG_ERROR("[em1] registered level collision admission failed: {}",collision_error);ctx.r3.u64=0;
         }
@@ -384,7 +536,10 @@ PPC_FUNC_IMPL(sub_829E3178) {
         if(!gate.NativeLoadPoint(destination,em2::net::LoadPhase::End,ctx.r3.u32!=0))ctx.r3.u64=0;
         if(!ctx.r3.u32 && !em2::em1::EndRegisteredLevelScripts(ctx,base,collision_error))
             REXLOG_ERROR("[em1] failed native load retained original script ownership: {}",collision_error);
-        if(ctx.r3.u32){em2::em1::AfterArchitectureLevelChange(ctx,base,destination);em2::em1::NotifyArchitecturePreviewLevelLoaded(destination);}
+        if(ctx.r3.u32){
+            em2::em1::AfterArchitectureLevelChange(ctx,base,destination);em2::em1::NotifyArchitecturePreviewLevelLoaded(destination);
+            em2::net::NotifyNativeOnlineLevelLoaded(destination);
+        }
         if(REXCVAR_GET(em2_trace_auto_continue)){
             const auto csr=_mm_getcsr();
             REXLOG_INFO("Automatic startup native level '{}' load result {}",destination,ctx.r3.u32!=0);
@@ -454,6 +609,16 @@ void em2::MaybeQueueNativeStartLevel() {
     attempted=true;
     const auto result=ExecuteGameplayConsoleTool({"level.load",level});
     REXLOG_INFO("Private native start-level command: '{}' result='{}'; normal checkpoint restored first, native CleanLoadLevel, no gameplay input",level,result.value_or("Command was not recognized"));
+}
+
+void em2::TracePlayerSpawnPhysicsStep(uint8_t* base) {
+    if(!REXCVAR_GET(em2_trace_players) || !spawn_trace_steps || !spawn_trace_load || spawn_trace_load!=CurrentNativeLoadGeneration())return;
+    struct Host {DWORD error=GetLastError();unsigned csr=_mm_getcsr();~Host(){SetLastError(error);_mm_setcsr(csr);}} host;
+    const auto delta=PPC_LOAD_U32(0x833FCA54);
+    if(!delta || delta>=0x7F800000u)return;
+    const auto step=5-spawn_trace_steps--;
+    const std::array<const char*,4> phases{"physics-step-1","physics-step-2","physics-step-3","physics-step-4"};
+    TraceSpawnBodies(phases[step-1],base);
 }
 
 PPC_FUNC_IMPL(sub_82783CE8) {
@@ -575,11 +740,55 @@ PPC_FUNC_IMPL(sub_82850FF0) {
     __imp__sub_82850FF0(ctx,base);
 }
 
+const char* em2::NativeCoopReadinessFailure(uint8_t* base) {
+    struct Host {DWORD error=GetLastError();unsigned csr=_mm_getcsr();~Host(){SetLastError(error);_mm_setcsr(csr);}} host;
+    GuestReadBatch reads;
+    auto readable=[&](uint32_t at,size_t size){return base && at>=4096 && uint64_t(at)+size<=0x100000000ull && GuestReadBatch::Readable(PPC_RAW_ADDR(at),size);};
+    if(!readable(0x833DAB60,4) || !readable(0x833DC87C,4))return "native player/profile globals are unavailable";
+    const auto manager=PPC_LOAD_U32(0x833DAB60),profile=PPC_LOAD_U32(0x833DC87C);
+    if(!readable(manager,640))return "native player manager is unavailable";
+    if(!readable(profile,28))return "native profile is unavailable";
+    if(PPC_LOAD_U32(profile+24)!=2)return "native player count changed from two retail humans";
+    if(joined_player_controls.manager)return "native joined-player control handoff is pending";
+    if(!PPC_LOAD_U8(manager+357))return "native player manager is temporarily inactive";
+    const auto p0=ReadRecord(manager,0,base),p1=ReadRecord(manager,1,base);
+    if(!p1.entity)return "native player two entity is unavailable";
+    if(!p1.controller)return "native player two camera controller is unavailable";
+    if(p1.mode!=0)return "native player two changed from human control";
+    if(!p0.entity)return "native player one entity is unavailable";
+    if(p0.mode!=0)return "native player one changed from human control";
+    const auto camera=p0.controller;
+    if(!readable(camera,568))return "native player one camera controller is unavailable";
+    if(PPC_LOAD_U32(camera)!=0x82112778)return "native player one camera controller type changed";
+    if(!PPC_LOAD_U32(camera+564))return "native player one gameplay camera target is unavailable";
+    if(!PPC_LOAD_U32(camera+392))return "native player one camera entity is unavailable";
+    if(PPC_LOAD_U32(camera+24)!=PPC_LOAD_U32(camera+392)){
+        if(REXCVAR_GET(em2_private_profile)){
+            const auto mode=PPC_LOAD_U32(camera+24);
+            REXLOG_INFO("Native co-op camera failure: controller {:08X} active {:08X} Normal {:08X} tracker {:08X}",camera,mode,PPC_LOAD_U32(camera+392),PPC_LOAD_U32(camera+564));
+            if(readable(mode,32))REXLOG_INFO("Native co-op active mode fields: table {:08X} words4..28 {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X}",
+                PPC_LOAD_U32(mode),PPC_LOAD_U32(mode+4),PPC_LOAD_U32(mode+8),PPC_LOAD_U32(mode+12),PPC_LOAD_U32(mode+16),PPC_LOAD_U32(mode+20),PPC_LOAD_U32(mode+24),PPC_LOAD_U32(mode+28));
+            for(unsigned offset=392;offset<=456;offset+=4){
+                const auto candidate=PPC_LOAD_U32(camera+offset);
+                if(candidate)REXLOG_INFO("Native co-op owned mode slot {}: {:08X} readable {} table {:08X} owner20 {:08X}",offset,candidate,readable(candidate,24),readable(candidate,24)?PPC_LOAD_U32(candidate):0,readable(candidate,24)?PPC_LOAD_U32(candidate+20):0);
+            }
+        }
+        return "native player one camera entered a scripted target transition";
+    }
+    return nullptr;
+}
+
 bool em2::NativeCoopReady(uint8_t* base) {
     const auto manager=PPC_LOAD_U32(0x833DAB60),profile=PPC_LOAD_U32(0x833DC87C);
     if(!manager || !profile || PPC_LOAD_U32(profile+24)!=2 || joined_player_controls.manager || !PPC_LOAD_U8(manager+357)) return false;
     const auto p0=ReadRecord(manager,0,base),p1=ReadRecord(manager,1,base);
     return p1.entity && p1.controller && p1.mode==0 && NormalPlayerCamera(p0.controller,p0,base);
+}
+bool em2::NativeCoopRuntimeReady(uint8_t* base) {
+    const auto manager=PPC_LOAD_U32(0x833DAB60),profile=PPC_LOAD_U32(0x833DC87C);
+    if(!manager || !profile || PPC_LOAD_U32(profile+24)!=2 || joined_player_controls.manager || !PPC_LOAD_U8(manager+357))return false;
+    const auto p0=ReadRecord(manager,0,base),p1=ReadRecord(manager,1,base);
+    return p1.entity && p1.controller && p1.mode==0 && OwnedPlayerCamera(p0.controller,p0,base);
 }
 bool em2::NativeOnlineJoinAllowed(uint8_t* base) {
     const auto manager=PPC_LOAD_U32(0x833DAB60),profile=PPC_LOAD_U32(0x833DC87C);
@@ -601,9 +810,19 @@ const char* em2::CharacterSwapNotice() {
 }
 
 void em2::ReadSelectedCharacterProperty(PPCContext& ctx,uint8_t* base) {
+    net::EnsureNativeChatBridge(ctx,base);
     const auto output=ctx.r3.u32;
     PPC_STORE_U32(output,3); // The game's numeric ScriptVariant / GFx value.
-    PPC_STORE_U64(output+8,oswald_selected.load()?0x3FF0000000000000ull:0ull);
+    const auto online_mode=net::NativeOnlineHudMode();
+    const double mode=online_mode?double(online_mode):(oswald_selected.load()?1.0:0.0);
+    uint64_t bits;std::memcpy(&bits,&mode,sizeof(bits));
+    PPC_STORE_U64(output+8,bits);
+    static thread_local unsigned last_online_mode=0;
+    if(online_mode && online_mode!=last_online_mode){
+        const auto error=GetLastError();const auto csr=_mm_getcsr();
+        REXLOG_INFO("Online local HUD property: mode {} (2=Mickey, 3=Oswald)",online_mode);
+        SetLastError(error);_mm_setcsr(csr);last_online_mode=online_mode;
+    }
 }
 
 PPC_FUNC_IMPL(sub_828364F0) {
@@ -839,6 +1058,7 @@ PPC_FUNC_IMPL(sub_827692E0) {
 PPC_FUNC_IMPL(sub_8276A828) {
     const bool trace=REXCVAR_GET(em2_trace_players);
     const auto slot=ctx.r4.u32,mode=ctx.r5.u32,caller=uint32_t(ctx.lr);
+    if(trace)TraceSpawnRecord(ctx.r3.u32,slot,caller,"factory",base,ctx.r6.u32);
     em2::net::PrepareNativeOnlinePlayerRandom(slot,mode);
     __imp__sub_8276A828(ctx,base);
     if(trace && slot<2)
@@ -865,12 +1085,55 @@ PPC_FUNC_IMPL(sub_8276CCF0) {
     const auto caller=uint32_t(ctx.lr);
     Record before;
     if(trace && slot<2) before=ReadRecord(manager,slot,base);
+    if(trace)TraceSpawnRecord(manager,slot,caller,"replacement-before",base);
     __imp__sub_8276CCF0(ctx,base);
     if(trace && manager && slot<2) {
         const auto after=ReadRecord(manager,slot,base);
         REXLOG_INFO("Player entity replacement P{} manager {:08X} caller {:08X}: requested mode {}, option {}, entity {:08X} -> {:08X}, controller {:08X} -> {:08X}, record mode {} -> {}",
             slot,manager,caller,mode,option,before.entity,after.entity,before.controller,after.controller,before.mode,after.mode);
     }
+}
+
+PPC_FUNC_IMPL(sub_82769588) {
+    const auto manager=ctx.r3.u32,slot=ctx.r4.u32,caller=uint32_t(ctx.lr);
+    const auto matrix=ctx.r5.u32;
+    TraceSpawnRecord(manager,slot,caller,"publish-before",base,matrix<=0xFFFFFFCFu?matrix+48:0);
+    __imp__sub_82769588(ctx,base);
+    TraceSpawnRecord(manager,slot,caller,"publish-after",base);
+}
+
+PPC_FUNC_IMPL(sub_82935D30) {
+    const auto task=ctx.r3.u32;
+    auto trace=[&](const char* phase){
+        if(!REXCVAR_GET(em2_trace_players) || task<4096 || uint64_t(task)+80>0x100000000ull)return;
+        struct Host {DWORD error=GetLastError();unsigned csr=_mm_getcsr();~Host(){SetLastError(error);_mm_setcsr(csr);}} host;
+        if(em2::GuestReadBatch::Readable(PPC_RAW_ADDR(task),80))
+            REXLOG_INFO("Native spawn load phase: load {} {} task {:08X} initialized {} state {}",em2::CurrentNativeLoadGeneration(),phase,task,PPC_LOAD_U8(task+73),PPC_LOAD_U32(task+76));
+    };
+    trace("before-publish");__imp__sub_82935D30(ctx,base);trace("after-publish");
+}
+
+PPC_FUNC_IMPL(sub_82935688) {
+    const auto caller=uint32_t(ctx.lr);
+    auto trace=[&](const char* phase){
+        if(!REXCVAR_GET(em2_trace_players))return;
+        for(unsigned slot=0;slot<2;++slot)TraceSpawnRecord(PPC_LOAD_U32(0x833DAB60),slot,caller,phase,base);
+    };
+    trace("apply-before");TraceSpawnBodies("apply-before",base);
+    __imp__sub_82935688(ctx,base);
+    trace("apply-after");TraceSpawnBodies("apply-after",base);
+}
+
+PPC_FUNC_IMPL(sub_829369C0) {
+    __imp__sub_829369C0(ctx,base);
+    TraceSpawnBodies("admit-after",base);
+}
+PPC_FUNC_IMPL(sub_8275F828) {TraceSpawnMutation(ctx,base,"position",0);__imp__sub_8275F828(ctx,base);}
+PPC_FUNC_IMPL(sub_8275FAD0) {TraceSpawnMutation(ctx,base,"pose",0);__imp__sub_8275FAD0(ctx,base);}
+PPC_FUNC_IMPL(sub_8275C4B0) {TraceSpawnMutation(ctx,base,"transform",48);__imp__sub_8275C4B0(ctx,base);}
+PPC_FUNC_IMPL(sub_8273BB90) {
+    struct Restore {uint32_t previous;~Restore(){spawn_trace_lua=previous;}} restore{spawn_trace_lua};
+    spawn_trace_lua=ctx.r3.u32;__imp__sub_8273BB90(ctx,base);
 }
 
 namespace {
@@ -1193,6 +1456,8 @@ bool em2::TestNativePlayerActions() {
        !VirtualAlloc(base+0x82000000,0x10000,MEM_COMMIT,PAGE_READWRITE) ||
        !VirtualAlloc(base+0x82030000,0x10000,MEM_COMMIT,PAGE_READWRITE) ||
        !VirtualAlloc(base+0x82070000,0x10000,MEM_COMMIT,PAGE_READWRITE) ||
+       !VirtualAlloc(base+0x82120000,0x10000,MEM_COMMIT,PAGE_READWRITE) ||
+       !VirtualAlloc(base+0x82200000,0x10000,MEM_COMMIT,PAGE_READWRITE) ||
        !VirtualAlloc(base+0x833D0000,0x10000,MEM_COMMIT,PAGE_READWRITE) ||
        !VirtualAlloc(base+0xA0000000ull,0x10000,MEM_COMMIT,PAGE_READWRITE)) return false;
     PPC_STORE_U8(0x8207873C,'2'); PPC_STORE_U8(0x82078740,'2');
@@ -1341,6 +1606,51 @@ bool em2::TestNativePlayerActions() {
             if(condition==5)PPC_STORE_U32(camera+24,0xF004);
             if(condition==6)joined_player_controls={manager,entity};
             if(!check(NativeCoopReady(base)==(condition==0),"online attachment requires initialized native humans, camera and completed controller activation"))return false;
+            const auto error=GetLastError();const auto fp=_mm_getcsr();
+            const auto failure=NativeCoopReadinessFailure(base);
+            if(!check((failure==nullptr)==(condition==0) && GetLastError()==error && _mm_getcsr()==fp,
+                "read-only co-op failure classification matches original admission and preserves host error/FP"))return false;
+            if(condition==5 && !check(std::string_view(failure)=="native player one camera entered a scripted target transition",
+                "scripted camera transitions have a distinct recovery diagnosis"))return false;
+        }
+        // Authored camera modes are valid only for already admitted humans.
+        // Merely changing the active pointer must never confer that capability.
+        for(unsigned condition=0;condition<8;++condition){
+            setup();joined_player_controls={};PPC_STORE_U32(manager+348,camera+0x800);
+            constexpr uint32_t scripted=0x18000,table=0x82123F50;
+            PPC_STORE_U32(camera+24,scripted);PPC_STORE_U32(camera+396,scripted);
+            PPC_STORE_U32(scripted,table);PPC_STORE_U32(scripted+20,camera);PPC_STORE_U32(table+40,0x82A5DEC0);
+            if(condition==1)PPC_STORE_U32(scripted+20,camera+4);
+            if(condition==2){PPC_STORE_U32(camera+396,0);PPC_STORE_U32(scripted,0x82127460);PPC_STORE_U32(0x82127460+40,0x82A5DEC0);}
+            if(condition==3)PPC_STORE_U32(scripted,0xDEAD0000);
+            if(condition==4)PPC_STORE_U32(table+40,0x18000);
+            if(condition==5)PPC_STORE_U32(manager+352,1);
+            if(condition==6)PPC_STORE_U32(profile+24,1);
+            if(condition==7)PPC_STORE_U32(camera+24,0xDEAD0000);
+            const auto error=GetLastError();const auto fp=_mm_getcsr();
+            if(!check(!NativeCoopReady(base) && NativeCoopRuntimeReady(base)==(condition==0) && GetLastError()==error && _mm_getcsr()==fp,
+                "authored runtime mode requires exact native ownership/interface and live humans; initial admission remains Normal-only"))return false;
+        }
+        for(unsigned condition=0;condition<9;++condition){
+            setup();joined_player_controls={};PPC_STORE_U32(manager+348,camera+0x800);
+            constexpr uint32_t hint=0x18000,blend=0x19000;
+            PPC_STORE_U32(0xF000,0x82126C98);PPC_STORE_U32(0xF000+20,camera);PPC_STORE_U32(0x82126C98+40,0x82A5DEC0);
+            PPC_STORE_U32(hint,0x82123F50);PPC_STORE_U32(hint+20,camera);PPC_STORE_U32(0x82123F50+40,0x82A4F068);
+            PPC_STORE_U32(blend,0x8220EEC8);PPC_STORE_U32(blend+20,camera);PPC_STORE_U32(0x8220EEC8+40,0x831DAA40);
+            PPC_STORE_U32(blend+24,0xF000);PPC_STORE_U32(blend+28,hint);PPC_STORE_U32(camera+24,blend);
+            if(condition==1)PPC_STORE_U32(hint+20,camera+4);
+            if(condition==2)PPC_STORE_U32(blend+24,blend);
+            if(condition==3)PPC_STORE_U32(hint,0x82002000);
+            if(condition==4)PPC_STORE_U32(blend+28,0xDEAD0000);
+            if(condition==5){PPC_STORE_U32(blend+24,0);PPC_STORE_U32(blend+28,0);}
+            if(condition==6)PPC_STORE_U32(blend+24,hint);
+            if(condition==7)PPC_STORE_U32(blend+24,0);
+            if(condition==8){
+                for(unsigned i=0;i<17;++i){const uint32_t node=blend+i*64;PPC_STORE_U32(node,0x8220EEC8);PPC_STORE_U32(node+20,camera);PPC_STORE_U32(node+24,0);PPC_STORE_U32(node+28,i==16?hint:node+64);}
+            }
+            const auto error=GetLastError();const auto fp=_mm_getcsr();
+            if(!check(!NativeCoopReady(base) && NativeCoopRuntimeReady(base)==(condition==0 || condition==6 || condition==7) && GetLastError()==error && _mm_getcsr()==fp,
+                "native blend/hint graphs validate both child owners, bounded depth/cycles, optional/shared links and known native interfaces"))return false;
         }
         joined_player_controls={};
         for(uint32_t ai_mode : {1u,2u})for(unsigned condition=0;condition<9;++condition) {

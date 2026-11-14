@@ -1,9 +1,13 @@
 #include "online_actor_jump.h"
+#include "online_owned_probe.h"
 #include "online_retail_jump.h"
+#include "online_retail_input.h"
 #include "online_actor_frames.h"
 #include "guest_read_batch.h"
 #include "ppc_context.h"
 #include <rex/logging.h>
+#include <rex/cvar.h>
+REXCVAR_DECLARE(bool,em2_private_profile);
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -45,7 +49,7 @@ auto StateSlot(uint64_t peer){
     return slot!=states.end()?slot:std::find_if(states.begin(),states.end(),[](const EdgeState& value){return !value.targets.actor.peer;});
 }
 bool Readable(uint32_t address,size_t size,uint8_t* base){return base && address>=4096 && uint64_t(address)+size<=0x100000000ull && em2::GuestReadBatch::Readable(base+address,size);}
-bool Identity(const Actor& a,const Actor& b){return a.peer==b.peer && a.generation==b.generation && a.registry==b.registry && a.handle==b.handle && a.entity==b.entity && a.controller==b.controller && a.listener==b.listener;}
+bool Identity(const Actor& a,const Actor& b){return a.peer==b.peer && a.generation==b.generation && a.registry==b.registry && a.handle==b.handle && a.entity==b.entity && a.controller==b.controller && a.listener==b.listener && a.action_user==b.action_user;}
 bool Identity(const Targets& a,const Targets& b){return Identity(a.actor,b.actor) && a.task==b.task && a.motion==b.motion && a.physics==b.physics && a.gravity==b.gravity && a.animation==b.animation;}
 uint32_t Typed(const Actor& actor,uint32_t type,uint32_t adjustment,size_t bytes,uint8_t* base){
     const auto kinds=PPC_LOAD_U32(actor.entity+88),list=PPC_LOAD_U32(actor.entity+36);
@@ -82,7 +86,7 @@ Result TargetsFor(uint64_t peer,const Command& command,PPCContext& ctx,uint8_t* 
     if(command.edge!=Edge::Pressed && command.edge!=Edge::Released)return Result::InvalidInput;
     if(!Readable(command.action.action,4,base) || !std::isfinite(command.action.x) || !std::isfinite(command.action.y) ||
        std::abs(command.action.x)>1 || std::abs(command.action.y)>1)return Result::InvalidInput;
-    const auto uid=PPC_LOAD_U32(command.action.action),expected=PPC_LOAD_U32(command.edge==Edge::Pressed?0x833DAEBC:0x833DAEC0);
+    const auto uid=PPC_LOAD_U32(command.action.action),expected=PPC_LOAD_U32((command.edge==Edge::Pressed?0x833DAEBCu:0x833DAEC0u)+actor.action_user*12);
     if(!expected || uid!=expected)return Result::UnsupportedAction;
     for(unsigned offset:{280u,284u,288u,292u,296u,300u})if(PPC_LOAD_U32(actor.listener+offset)==uid)return Result::UnsupportedAction;
     const auto manager=PPC_LOAD_U32(0x833DAB60),profile=PPC_LOAD_U32(0x833DAD98);
@@ -163,6 +167,20 @@ Result em2::net::ValidateOwnedActorJumpBatch(uint64_t peer,std::span<const Comma
 Result em2::net::ReplayOwnedActorJump(uint64_t peer,const Command& command,PPCContext& ctx,uint8_t* base){
     Context preserve(ctx);Targets targets;auto result=TargetsFor(peer,command,ctx,base,targets);if(result!=Result::Applied)return result;
     result=EdgeAdmission(targets,command);if(result!=Result::Applied)return result;
+    ObserveOwnedActorProbeJumpTargets(peer,targets.task,targets.motion,targets.physics,base);
+    if(REXCVAR_GET(em2_private_profile)){
+        Environment log_environment;
+        REXLOG_INFO("Native Room owned Jump preflight: peer {} tick {} edge {} entity {:08X} task {:08X} flags {:08X} task bytes {}/{}/{} controller disabled {:02X} captured {} native state {} mode {}",
+            peer,command.tick,unsigned(command.edge),targets.actor.entity,targets.task,PPC_LOAD_U32(targets.task+8),
+            PPC_LOAD_U8(targets.task+16),PPC_LOAD_U8(targets.task+17),PPC_LOAD_U8(targets.task+18),
+            PPC_LOAD_U8(targets.actor.controller+68),PPC_LOAD_U8(targets.actor.listener+620),PPC_LOAD_U32(targets.motion+384),PPC_LOAD_U32(targets.motion+208));
+        if(command.edge==OwnedJumpEdge::Pressed)LogNativeActorTaskInventory(targets.actor.entity,base);
+        for(unsigned slot=0;slot<2;++slot){
+            RetailActorInput retail;uint32_t flags=0;
+            if(RetailActorInputFor(slot,ctx,base,retail) && ReadNativeJumpTaskFlags(retail.entity,base,flags))
+                REXLOG_INFO("Native Room retail Jump comparison: tick {} slot {} entity {:08X} flags {:08X}",command.tick,slot,retail.entity,flags);
+        }
+    }
     // Native backend checks staged tick readiness before invoking the handler.
     // Claim edge state only for a callback that actually entered native input.
     const Permit next{peer,&command};const auto* previous=permit;permit=&next;
@@ -174,14 +192,83 @@ Result em2::net::ReplayOwnedActorJump(uint64_t peer,const Command& command,PPCCo
         owner_thread=GetCurrentThreadId();throw;
     }
     if(result!=Result::Applied)return result;
+    if(REXCVAR_GET(em2_private_profile)){
+        Environment log_environment;
+        REXLOG_INFO("Native Room owned Jump returned: peer {} tick {} edge {} flags {:08X} native state {} mode {}",
+            peer,command.tick,unsigned(command.edge),PPC_LOAD_U32(targets.task+8),PPC_LOAD_U32(targets.motion+384),PPC_LOAD_U32(targets.motion+208));
+    }
     std::lock_guard lock(state_mutex);auto slot=StateSlot(peer);
     if(slot==states.end())return Result::InvalidContext;
     *slot={targets,command.sequence,command.tick,command.edge==Edge::Pressed,false};owner_thread=GetCurrentThreadId();return Result::Applied;
 }
+bool em2::net::ReadNativeJumpTaskFlags(uint32_t entity,uint8_t* base,uint32_t& flags){
+    Environment preserve;em2::GuestReadBatch reads;
+    if(!Readable(entity,96,base) || PPC_LOAD_U32(entity)!=0x8208D908)return false;
+    Actor actor;actor.entity=entity;actor.controller=Typed(actor,0x833E2188,24,800,base);actor.listener=actor.controller+80;
+    if(!actor.controller || PPC_LOAD_U32(actor.controller+24)!=0x8211DCE0 || PPC_LOAD_U32(actor.controller+64)!=entity-8)return false;
+    const auto task=JumpTask(actor,base);
+    if(!Readable(task,104,base) || PPC_LOAD_U32(task)!=0x820BC838 || PPC_LOAD_U32(task+4)!=entity)return false;
+    flags=PPC_LOAD_U32(task+8);return true;
+}
+void em2::net::LogNativeActorTaskInventory(uint32_t entity,uint8_t* base){
+    Environment preserve;em2::GuestReadBatch reads;
+    if(!Readable(entity,96,base) || PPC_LOAD_U32(entity)!=0x8208D908)return;
+    Actor actor;actor.entity=entity;actor.controller=Typed(actor,0x833E2188,24,800,base);
+    if(!actor.controller || PPC_LOAD_U32(actor.controller+24)!=0x8211DCE0 || PPC_LOAD_U32(actor.controller+64)!=entity-8)return;
+    const auto fsm=PPC_LOAD_U32(actor.controller+104);
+    if(Readable(fsm,32,base)){
+        REXLOG_INFO("Owned actor FSM inventory: entity {:08X} controller {:08X} vtable {:08X} query {:08X} lookup {:08X} words {:08X}/{:08X}/{:08X}/{:08X}/{:08X}/{:08X}/{:08X}/{:08X}/{:08X}/{:08X}/{:08X}/{:08X}",
+            entity,actor.controller,fsm,PPC_LOAD_U32(fsm+20),PPC_LOAD_U32(fsm+28),
+            PPC_LOAD_U32(actor.controller+108),PPC_LOAD_U32(actor.controller+112),PPC_LOAD_U32(actor.controller+116),PPC_LOAD_U32(actor.controller+120),
+            PPC_LOAD_U32(actor.controller+124),PPC_LOAD_U32(actor.controller+128),PPC_LOAD_U32(actor.controller+132),PPC_LOAD_U32(actor.controller+136),
+            PPC_LOAD_U32(actor.controller+140),PPC_LOAD_U32(actor.controller+144),PPC_LOAD_U32(actor.controller+148),PPC_LOAD_U32(actor.controller+152));
+        // 831C1F28 resolves an integer state key through the inline map+12.
+        // Walk its bounded nodes without invoking any FSM query or transition.
+        const auto slots=PPC_LOAD_U32(actor.controller+132),slot_count=PPC_LOAD_U32(actor.controller+136);
+        if(slot_count && slot_count<=256 && Readable(slots,size_t(slot_count)*4,base)){
+            std::array<uint32_t,256> state_nodes{};unsigned state_count=0;
+            for(unsigned bucket=0;bucket<slot_count;++bucket){auto node=PPC_LOAD_U32(slots+bucket*4);
+                while(node){
+                    if(state_count==state_nodes.size() || !Readable(node,12,base) || std::find(state_nodes.begin(),state_nodes.begin()+state_count,node)!=state_nodes.begin()+state_count)return;
+                    state_nodes[state_count++]=node;
+                    const auto key=PPC_LOAD_U32(node),object=PPC_LOAD_U32(node+4);
+                    if((key==PPC_LOAD_U32(actor.controller+108) || key==PPC_LOAD_U32(actor.controller+112)) && Readable(object,8,base)){
+                        const auto table=PPC_LOAD_U32(object);
+                        if(Readable(table,44,base))REXLOG_INFO("Owned actor FSM state: entity {:08X} index {} object {:08X} vtable {:08X} input {:08X} data {:08X}",entity,key,object,table,PPC_LOAD_U32(table+40),PPC_LOAD_U32(object+4));
+                    }
+                    node=PPC_LOAD_U32(node+8);
+                }
+            }
+        }
+    }
+    const auto collection=actor.controller+156;
+    const auto buckets=PPC_LOAD_U32(collection+16),count=PPC_LOAD_U32(collection+20);
+    if(!count || count>4096 || !Readable(buckets,size_t(count)*4,base))return;
+    std::array<uint32_t,256> visited{};unsigned seen=0;
+    for(uint32_t i=0;i<count;++i){auto node=PPC_LOAD_U32(buckets+i*4);
+        while(node){
+            if(seen==visited.size() || !Readable(node,12,base) || std::find(visited.begin(),visited.begin()+seen,node)!=visited.begin()+seen)return;
+            visited[seen++]=node;
+            const auto name=PPC_LOAD_U32(node),task=PPC_LOAD_U32(node+4);
+            std::array<char,97> label{};unsigned length=0;
+            if(name>=4096)for(;length<96;++length){
+                if(uint64_t(name)+length>=0x100000000ull || !Readable(name+length,1,base))break;
+                const auto ch=PPC_LOAD_U8(name+length);if(!ch)break;
+                label[length]=ch>=32 && ch<127?char(ch):'?';
+            }
+            if(Readable(task,12,base) && PPC_LOAD_U32(task+4)==entity){
+                const auto vtable=PPC_LOAD_U32(task);
+                const auto handler=Readable(vtable,44,base)?PPC_LOAD_U32(vtable+40):0;
+                REXLOG_INFO("Owned actor task inventory: entity {:08X} name '{}' task {:08X} flags {:08X} vtable {:08X} input {:08X}",entity,label.data(),task,PPC_LOAD_U32(task+8),vtable,handler);
+            }
+            node=PPC_LOAD_U32(node+8);
+        }
+    }
+}
 bool em2::net::ForgetOwnedActorJump(uint64_t peer,uint64_t generation,PPCContext& ctx,uint8_t* base){
     Context preserve(ctx);{std::lock_guard lock(state_mutex);if(owner_thread && owner_thread!=GetCurrentThreadId())return false;}
     if(!peer || !generation || permit)return false;Actor live;if(OwnedActorInputFor(peer,ctx,base,live) && live.generation==generation)return false;
-    std::lock_guard lock(state_mutex);for(auto& state:states)if(state.targets.actor.peer==peer && state.targets.actor.generation==generation){state={};return true;}return false;
+    std::lock_guard lock(state_mutex);for(auto& state:states)if(state.targets.actor.peer==peer && state.targets.actor.generation==generation){state={};return true;}return true;
 }
 PPC_FUNC_IMPL(sub_82884018){
     if(em2::net::RetailJumpFixtureStimulus(ctx,base))return;
@@ -190,6 +277,7 @@ PPC_FUNC_IMPL(sub_82884018){
         else throw std::logic_error("native owned jump targeted a foreign physics component");
         stimulus->height=float(ctx.f1.f64);if(stimulus->throw_now)throw std::runtime_error("native jump stimulus unwind");return;
     }
+    em2::net::ObserveOwnedActorProbeJumpStimulus(ctx,base);
     __imp__sub_82884018(ctx,base);
 }
 namespace {
@@ -199,7 +287,7 @@ void JumpFixtureProperties(PPCContext& ctx,uint8_t* base){
     PPC_STORE_U32(ctx.r5.u32,std::bit_cast<uint32_t>(result));ctx.r3.u64=1;
 }
 }
-bool em2::net::TestOwnedActorJumps(PPCContext& ctx,uint8_t* base,uint64_t first_peer,uint64_t second_peer){
+bool em2::net::TestOwnedActorJumps(PPCContext& ctx,uint8_t* base,uint64_t first_peer,uint64_t second_peer,void(*native_update)(PPCContext&,uint8_t*)){
     Context preserve_test(ctx);
     struct RestoreState {decltype(states) saved=states;DWORD thread=owner_thread;const Permit* previous=permit;Stimulus* capture=stimulus;
         ~RestoreState(){states=saved;owner_thread=thread;permit=previous;stimulus=capture;}}restore_state;
@@ -215,8 +303,8 @@ bool em2::net::TestOwnedActorJumps(PPCContext& ctx,uint8_t* base,uint64_t first_
         void Save(uint32_t address,size_t size){auto& entry=saved[count++];entry.address=address;entry.size=size;std::memcpy(entry.bytes.data(),base+address,size);}
         ~GuestRestore(){for(unsigned i=0;i<count;++i)std::memcpy(base+saved[i].address,saved[i].bytes.data(),saved[i].size);}
     }restore_guest{base};
-    std::array<uint32_t,9> globals{0x833DAEBC,0x833DAEC0,0x833DDF1C,0x833DDF94,0x833DCCF8,0x833DA6F4,0x833DAE58,0x820BC838+68,0x8203D278};
-    std::array<uint32_t,9> previous_globals{};for(unsigned i=0;i<globals.size();++i)previous_globals[i]=PPC_LOAD_U32(globals[i]);
+    std::array<uint32_t,12> globals{0x833DAEBC,0x833DAEC0,0x833DDF1C,0x833DDF94,0x833DCCF8,0x833DA6F4,0x833DAE58,0x820BC838+68,0x8203D278,0x833DAEC4,0x833DAEC8,0x833DAECC};
+    std::array<uint32_t,12> previous_globals{};for(unsigned i=0;i<globals.size();++i)previous_globals[i]=PPC_LOAD_U32(globals[i]);
     struct GlobalRestore {uint8_t* base;const decltype(globals)& addresses;const decltype(previous_globals)& values;
         ~GlobalRestore(){for(unsigned i=0;i<addresses.size();++i)PPC_STORE_U32(addresses[i],values[i]);}}restore_globals{base,globals,previous_globals};
     struct DispatchRestore {struct Entry{uint32_t address=0;PPCFunc* original=nullptr;};uint8_t* base;std::array<Entry,8> saved{};unsigned count=0;
@@ -229,6 +317,11 @@ bool em2::net::TestOwnedActorJumps(PPCContext& ctx,uint8_t* base,uint64_t first_
        !restore_dispatch.Map(uint32_t(PPC_CODE_BASE)+64,JumpFixtureProperties) || !restore_dispatch.Map(uint32_t(PPC_CODE_BASE)+68,JumpFixtureZero))return false;
     constexpr uint32_t properties_vt=0x66000,fsm_vt=0x66100,event_manager=0x65000,press=0x66200,release=0x66204;
     PPC_STORE_U32(properties_vt+212,uint32_t(PPC_CODE_BASE)+64);PPC_STORE_U32(fsm_vt+20,uint32_t(PPC_CODE_BASE)+68);PPC_STORE_U32(fsm_vt+28,uint32_t(PPC_CODE_BASE)+68);
+    // Controller completion is now exercised too. Preserve the outer fixture's
+    // native-frame continuation sink rather than leaving FSM update+12 null.
+    const auto controller_fsm=PPC_LOAD_U32(a.controller+104);
+    if(!Readable(controller_fsm,16,base) || !PPC_LOAD_U32(controller_fsm+12))return false;
+    PPC_STORE_U32(fsm_vt+12,PPC_LOAD_U32(controller_fsm+12));
     // Keep ORIGINAL task flag notification construction/destruction. Its optional
     // display name is null only in this private image, matching the native empty
     // string singleton so notification copies never enter the uninitialized
@@ -239,8 +332,10 @@ bool em2::net::TestOwnedActorJumps(PPCContext& ctx,uint8_t* base,uint64_t first_
     // after native task flag changes, notification construction and jump stimulus.
     PPC_STORE_U32(event_manager+1008,10);PPC_STORE_U32(0x833DA6F4,event_manager);
     PPC_STORE_U32(0x833DAEBC,0x8207F5B0);PPC_STORE_U32(0x833DAEC0,0x8207F5B8);
+    PPC_STORE_U32(0x833DAEC4,0x8207F5C4);PPC_STORE_U32(0x833DAEC8,0x820BC794);PPC_STORE_U32(0x833DAECC,0x820BC7A8);
     PPC_STORE_U8(0x833DDF1C,12);PPC_STORE_U8(0x833DDF94,13);PPC_STORE_U8(0x833DCCF8,14);PPC_STORE_U8(0x833DAE58,6);
     PPC_STORE_U32(press,0x8207F5B0);PPC_STORE_U32(release,0x8207F5B8);
+    PPC_STORE_U32(press+8,0x820BC794);PPC_STORE_U32(release+8,0x820BC7A8);
     for(unsigned i=0;i<2;++i){
         const auto actor=actors[i];types[i]=PPC_LOAD_U32(actor.entity+88);lists[i]=PPC_LOAD_U32(actor.entity+36);motions[i]=Typed(actor,0x833DAF54,8,896,base);
         if(!motions[i])return false;
@@ -262,11 +357,15 @@ bool em2::net::TestOwnedActorJumps(PPCContext& ctx,uint8_t* base,uint64_t first_
     uint64_t tick=2000000;
     auto prepare=[&](const Actor& actor){ActorLookBasis basis{actor.peer,actor.generation,tick};
         if(PrepareOwnedActorBasis(actor.peer,basis,ctx,base)!=Result::Applied)return false;
-        NativeActorAction neutral{0,0x8000,0,0};return ReplayOwnedActorMovement(actor.peer,neutral,tick,ctx,base)==Result::Applied;};
-    auto command=[&](const Actor& actor,Edge edge,uint64_t sequence){return Command{actor.generation,tick,sequence,edge,{0,edge==Edge::Pressed?press:release,1,0}};};
+        NativeActorAction neutral{0,0x833DAEB8+actor.action_user*12,0,0};return ReplayOwnedActorMovement(actor.peer,neutral,tick,ctx,base)==Result::Applied;};
+    auto command=[&](const Actor& actor,Edge edge,uint64_t sequence){return Command{actor.generation,tick,sequence,edge,{0,(edge==Edge::Pressed?press:release)+actor.action_user*8,1,0}};};
     Stimulus observed{0x54000,0x55000};stimulus=&observed;
     if(!BeginOwnedActorBasisTick(a.registry,tick,ctx,base))return false;
     auto first=command(a,Edge::Pressed,1),second=command(b,Edge::Pressed,1);
+    if(b.action_user==1){auto wrong=second;wrong.action.action=press;
+        if(!check(ValidateOwnedActorJump(b.peer,wrong,ctx,base)==Result::UnsupportedAction &&
+            ReplayOwnedActorJump(b.peer,wrong,ctx,base)==Result::UnsupportedAction && !observed.second_count,
+            "secondary owned action profile rejects primary Jump before consuming an edge or delivering a native stimulus"))return false;}
     if(!check(ReplayOwnedActorJump(a.peer,first,ctx,base)==Result::InvalidTick && observed.first_count==0,
         "Jump requires an admitted current Movement/basis stage before native input delivery"))return false;
     std::array<Command,2> batch{first,command(a,Edge::Released,2)};
@@ -331,7 +430,7 @@ bool em2::net::TestOwnedActorJumps(PPCContext& ctx,uint8_t* base,uint64_t first_
     // The outer input suite owns/restores the basis clock; advance monotonically.
     states={};PPC_STORE_U32(0x50000+8,0);PPC_STORE_U32(0x51000+8,0);
     const auto before_first=observed.first_count,before_second=observed.second_count;
-    if(!check(TestOwnedJumpMovementFrames(ctx,base,a.peer,b.peer) && observed.first_count==before_first+2 &&
+    if(!check(TestOwnedJumpMovementFrames(ctx,base,a.peer,b.peer,native_update) && observed.first_count==before_first+2 &&
         observed.second_count==before_second+1 && !(PPC_LOAD_U32(0x50000+8)&16) && !(PPC_LOAD_U32(0x51000+8)&16),
         "actual TCP frames trigger only two/one original per-peer Jump physics stimuli, held input does not repeat, releases clear native task flags"))return false;
     REXLOG_INFO("Owned actor Jump passed {} original input/task/physics-stimulus and edge lifecycle checks; no body trajectory/animation/live-control assertion",checks);

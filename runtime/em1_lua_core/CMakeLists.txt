@@ -7,7 +7,7 @@ add_custom_command(OUTPUT "${EM1_LUA_LIBRARY}" "${EM1_LUA_C_LIBRARY}"
   COMMAND "${CMAKE_COMMAND}" -E env "CARGO_TARGET_DIR=${EM1_LUA_TARGET}"
     "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/build_native.py"
     "${EM1_CARGO}" "${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml" "${EM1_LUA_C_LIBRARY}"
-  DEPENDS src/seven_archives.rs Cargo.toml Cargo.lock src/chd_images.rs src/disc_images.rs src/lib.rs src/entities.rs src/primary_player.rs src/source_modules.rs src/animation_events.rs src/engine_bridge.rs src/scheduler.rs src/global_state.rs src/global_bridge.rs src/callback_preflight.rs src/callback_arity.rs src/callback_calls.rs src/prefab_data.rs src/source_vector.rs src/source_map.rs build_native.py
+  DEPENDS src/rar_archives.rs src/archive_stream.rs src/seven_archives.rs Cargo.toml Cargo.lock src/chd_images.rs src/disc_images.rs src/lib.rs src/entities.rs src/primary_player.rs src/source_modules.rs src/animation_events.rs src/engine_bridge.rs src/scheduler.rs src/global_state.rs src/global_bridge.rs src/callback_preflight.rs src/callback_arity.rs src/callback_calls.rs src/prefab_data.rs src/source_vector.rs src/source_map.rs build_native.py
   COMMENT "Building embedded native EM1 Lua library" VERBATIM)
 add_custom_target(em1_lua_build DEPENDS "${EM1_LUA_LIBRARY}" "${EM1_LUA_C_LIBRARY}")
 add_library(em1_lua_native STATIC IMPORTED GLOBAL)

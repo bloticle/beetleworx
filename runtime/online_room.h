@@ -1,5 +1,7 @@
 #pragma once
 #include "online_movement_frame.h"
+#include "online_voice_transport.h"
+#include "online_room_history.h"
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -11,6 +13,8 @@
 namespace em2::net {
 struct CheckpointBundle;
 struct RoomCheckpointPeer {uint64_t peer=0;std::size_t total=0,received=0;bool installed=false;};
+struct RoomChatMessage {uint64_t sequence=0,peer=0;std::string name,text;uint8_t color=0;bool operator==(const RoomChatMessage&)const=default;};
+bool ValidRoomChatText(std::string_view);
 struct RoomBootstrapFrame {
     uint64_t tick=0;
     uint16_t players_mask=0;
@@ -21,6 +25,23 @@ struct RoomBootstrapFrame {
 // with the command; no receiving peer consults its local camera for this input.
 using RoomCommand=RoomMovement;
 enum class RoomState {Idle,Listening,Connecting,Transferring,Installing,Lobby,Loading,Bootstrapping,Running,Disconnected,Error};
+// Owner-thread snapshot. Contains no invitation/session nonce, address, player
+// name, chat, media key, save bytes or guest pointers. Not a restorable world.
+struct RoomProofMismatch {
+    bool bootstrap=false;uint64_t tick=0,peer=0;
+    std::array<uint8_t,32> expected{},received{};
+    bool operator==(const RoomProofMismatch&)const=default;
+};
+struct RoomDiagnosticSnapshot {
+    RoomState phase=RoomState::Idle;bool host=false,native_bootstrap=false;
+    uint64_t local_peer=0,next_consume=0,next_submit=0,raw_tick=0;
+    uint16_t players_mask=0;uint8_t verification_window=1;
+    std::optional<uint64_t> verified,pending;
+    std::optional<RoomProofMismatch> mismatch;
+    std::array<uint8_t,32> build{},content{},checkpoint{};
+    bool operator==(const RoomDiagnosticSnapshot&)const=default;
+};
+std::string FormatRoomDiagnosticSnapshot(const RoomDiagnosticSnapshot&);
 // Single-thread-owned direct TCP transport. Up to 16 peers is a transport
 // capability only; Host capacity MUST come from the actual gameplay adapter.
 // Host/Join require a common installed checkpoint. Explicit WithCheckpoint
@@ -29,6 +50,8 @@ enum class RoomState {Idle,Listening,Connecting,Transferring,Installing,Lobby,Lo
 class Room {
 public:
     Room();
+    // Retain the in-process outbound internet bridge across native menu handoff.
+    void KeepInternetRelay(std::shared_ptr<class InternetRelay>);
     ~Room();
     Room(const Room&)=delete;
     Room& operator=(const Room&)=delete;
@@ -56,6 +79,10 @@ public:
     bool Rename(std::string_view);
     bool SetAppearance(LobbyCharacter,uint8_t color);
     bool SetReady(bool);
+    // Owner thread only. Host supplies sender/name/color; never simulation data.
+    // Four-message burst, one token/second; bounded 64-message receive history.
+    bool SendChat(std::string_view);
+    std::vector<RoomChatMessage> TakeChatMessages();
     bool Start();
     // Explicit alternate start: synchronized native raw-Pad bootstrap, never
     // interpreted Movement. Keeps the original negotiated gameplay delay.
@@ -93,10 +120,26 @@ public:
     // bounded credit; this does not change native tick duration or digest.
     bool CompleteGameplay(uint64_t consumed_tick,const std::array<uint8_t,32>& observation_digest);
     bool gameplay_completion_pending()const;
+    // Ordered native loader rendezvous for the consumed gameplay tick. End
+    // must match its Begin, including nested destinations. No world restore
+    // or new-world admission is implied by agreement. Submit each point once,
+    // then Poll until LoadPointAgreed; repeating an agreed local point is safe.
+    bool SubmitLoadPoint(const LoadPoint&);
+    bool LoadPointAgreed(const LoadPoint&)const;
+    // After the agreed successful outer End and the original native finish.
+    // Discards the unverified transition tick and future input only after all
+    // frozen peers assert the same loaded world; resumes raw native admission.
+    bool RebootstrapLoadedWorld(const LoadPoint&,const std::array<uint8_t,32>& loaded_world);
     // Admission credit, distinct from the broad outstanding-proof query above.
     bool gameplay_frame_blocked()const;
     std::size_t pending_gameplay_verifications()const;
     std::optional<uint64_t> verified_gameplay_tick()const;
+    // Read-only replay preparation. Contains consumed, locally completed AND
+    // host-verified input only. It neither restores a native world nor replays
+    // callbacks. Exact scope and complete contiguous range are mandatory.
+    std::optional<RoomHistoryScope> gameplay_history_scope()const;
+    RoomHistoryResult ReadGameplayHistory(const RoomHistoryScope&,uint64_t first,uint64_t last,std::vector<RoomHistoryEntry>&)const;
+    RoomHistoryResult FingerprintGameplayHistory(const RoomHistoryScope&,uint64_t first,uint64_t last,std::string&)const;
     void Disconnect();
     RoomState state()const;
     uint16_t port()const;
@@ -107,9 +150,21 @@ public:
     const LobbySnapshot& lobby()const;
     LobbyResult last_lobby_result()const;
     bool profile_pending()const;
+    // Optional media channel, negotiated only after an admitted request. UDP
+    // failure never changes Room gameplay state. No microphone/device access.
+    bool RequestVoice();
+    bool voice_ready()const;
+    bool SendVoice(const VoicePacket&);
+    std::vector<ReceivedVoice> TakeVoice();
     const std::string& error()const;
+    // The first failure or disconnect freezes this before teardown; later
+    // Disconnect calls cannot erase or replace its original proof context.
+    RoomDiagnosticSnapshot diagnostic_snapshot()const;
 private:
     friend bool TestOnlineRoom();
+    friend bool TestOnlineRoomChat();
+    friend bool TestOnlineRoomVoice();
+    friend bool TestOnlineRoomLoads();
     struct Impl;
     std::unique_ptr<Impl> impl_;
     bool JoinInternal(const Identity&,std::string_view,uint16_t,std::string_view,bool checkpoint);
@@ -117,4 +172,7 @@ private:
     bool WorldReadyInternal(const std::array<uint8_t,32>&,bool native_bootstrap);
 };
 bool TestOnlineRoom();
+bool TestOnlineRoomChat();
+bool TestOnlineRoomVoice();
+bool TestOnlineRoomLoads();
 }

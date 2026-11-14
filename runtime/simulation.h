@@ -5,6 +5,7 @@
 #include "ppc_context.h"
 
 namespace em2 {
+void PrepareSimulationWorldUnload(PPCContext&,uint8_t*);
 struct SimulationBatch {unsigned steps=0;bool finish_pending=false;};
 class SimulationDebt {
 public:

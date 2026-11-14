@@ -1,5 +1,6 @@
 #include "ppc_config.h"
 #include "physics_timing.h"
+#include "players.h"
 #include "character_timing.h"
 #include "pc_settings.h"
 #include "ppc_context.h"
@@ -219,6 +220,7 @@ PPC_FUNC_IMPL(sub_827ADCC8) {
     const auto manager=ctx.r3.u32;
     const uint32_t step=trace?PPC_LOAD_U32(manager+72):0;
     WithNativePhysicsStep(ctx,base,requested_step,__imp__sub_827ADCC8);
+    em2::TracePlayerSpawnPhysicsStep(base);
     if(trace)ObserveNativeBodyRoots(manager,requested_step && step==0x3D088889?requested_step:step,base);
 }
 PPC_FUNC_IMPL(sub_8246AD50) {

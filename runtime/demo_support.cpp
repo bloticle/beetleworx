@@ -1,4 +1,5 @@
 #include "demo_support.h"
+#include "online_runtime.h"
 #include "demo_support_json.h"
 #include "em1_deflate.h"
 #include <windows.h>
@@ -209,6 +210,7 @@ std::string Report(const fs::path&exe,const fs::path&user,const std::string&vers
  SYSTEM_INFO sys{};GetNativeSystemInfo(&sys);MEMORYSTATUSEX mem{sizeof(mem)};GlobalMemoryStatusEx(&mem);DISPLAY_DEVICEW display{sizeof(display)};EnumDisplayDevicesW(nullptr,0,&display,0);
  std::ostringstream s;s<<"Beetleworx diagnostic report\nVersion: "<<version<<"\nBuild SHA-256: ";try{s<<HashFile(exe/"beetleworx.exe");}catch(...){s<<"unavailable";}s<<"\nWindows architecture: "<<sys.wProcessorArchitecture<<"\nLogical processors: "<<sys.dwNumberOfProcessors<<"\nRAM MiB: "<<(mem.ullTotalPhys/(1024*1024))<<"\nGPU: "<<Utf8(display.DeviceString)<<"\n\nDescription:\n"<<description.substr(0,4096)<<"\n\nPrivacy: bounded text logs/settings only. No saves, ROMs, memory dumps, account credentials or automatic upload. Review this text before export.\n";
  s<<"\nBuild SHA-256 above identifies the installed file at report export. Crash logs may belong to earlier runs or versions; use their recorded image identity and timestamps.\n";
+ const auto online=em2::net::NativeOnlineStatus();if(!online.diagnostic_report.empty())s<<"\n--- Current online failure ---\n"<<online.diagnostic_report;
  for(auto name:{"release-manifest.json"}){s<<"\n--- "<<name<<" ---\n";auto p=exe/name;if(fs::is_regular_file(p)&&fs::file_size(p)<=8*1024*1024){try{auto m=ManifestFrom(String(Read(p,8*1024*1024)));s<<"Product: Beetleworx\nVersion: "<<m.version<<"\nTag: "<<m.tag<<"\nExecutable: "<<m.exe_sha<<"\nManifest files: "<<m.files.size()<<"\nManifest SHA-256: "<<HashFile(p)<<'\n';}catch(...){s<<"Unavailable/invalid manifest\n";}}}
  const std::array<std::pair<const char*,fs::path>,5> paths={{{"pc-settings.ini",user/"pc-settings.ini"},{"beetleworx.log",exe/"beetleworx.log"},{"user diagnostic log",user/"diagnostics"/"beetleworx.log"},{"crash.log",exe/"crash.log"},{"user crash.log",user/"diagnostics"/"crash.log"}}};
  for(auto&[name,p]:paths){
@@ -267,6 +269,14 @@ void InitializeDemoSupport(const fs::path&exe,const fs::path&user){
  lock.unlock();if(automatic)Start(CheckUpdates);
 }
 DemoSupportSnapshot SnapshotDemoSupport(){std::lock_guard lock(context.mutex);return context.view;}
+std::string OnlineReleaseVersion(const fs::path& directory){
+ const auto path=directory/"release-manifest.json";
+ if(!fs::exists(path))return {};
+ auto version=ManifestFrom(String(Read(path,8*1024*1024))).version;
+ // SemVer build metadata does not change the release version. Prereleases do.
+ if(const auto metadata=version.find('+');metadata!=std::string::npos)version.resize(metadata);
+ return version;
+}
 bool SupportOption(int id,const std::string&command,std::string&out){try{
  if(id==7310){auto s=SnapshotDemoSupport();out=s.status;return true;}if(id==7311){out=SnapshotDemoSupport().report_preview;return true;}if(id==7312){auto s=SnapshotDemoSupport();out=s.update_version.empty()?s.status:"Update "+s.update_version+" - "+s.status;return true;}
  fs::path exe,user;std::string version;{std::lock_guard lock(context.mutex);Need(context.initialized,"Support has not initialized");exe=context.exe;user=context.user;version=context.view.version;}

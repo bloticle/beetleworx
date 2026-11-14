@@ -10,15 +10,19 @@ public:
     unsigned physical_user()const{return physical_user_;}
     unsigned native_user()const{return native_user_;}
     unsigned retail_slot()const{return retail_slot_;}
+    uint64_t room_peer()const{return room_peer_;}
     uint64_t source_tick()const{return source_tick_;}
     bool operator==(const NativeRoutedPadSample&)const=default;
 private:
     Pad pad_{};
-    uint64_t route_generation_=0,controls_generation_=0,source_tick_=0;
+    uint64_t route_generation_=0,controls_generation_=0,source_tick_=0,room_peer_=0;
     unsigned physical_user_=0,native_user_=0,retail_slot_=0;
     friend bool SampleNativeLocalSource(const Room&,rex::input::InputSystem&,uint64_t,PPCContext&,uint8_t*,NativeRoutedPadSample&);
 };
-// Explicit Room route for local retail peers 1/2 only. It may be armed at an
+// Explicit Room source route for peers1..16. Character selection chooses one
+// of the two native interpreter profiles; it is not a controller/manager index.
+// This source lease does not admit an owned actor or select its local camera.
+// It may be armed at an
 // owning bootstrap gate's completed boundary without sampling, or in Running.
 // Sampling itself requires Running and the cutover sampler's admitted tick.
 // The physical

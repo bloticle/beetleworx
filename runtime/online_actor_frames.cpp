@@ -1,6 +1,8 @@
 #include "online_actor_frames.h"
 #include "online_room.h"
 #include "online_actor_jump.h"
+#include "online_button_actions.h"
+#include <algorithm>
 #include "guest_read_batch.h"
 #include "ppc_context.h"
 #include <windows.h>
@@ -10,28 +12,47 @@
 #include <cstring>
 #include <thread>
 #include <rex/logging.h>
+#include <rex/cvar.h>
+REXCVAR_DECLARE(bool,em2_private_profile);
 namespace em2::net {
 namespace {
+struct ButtonPermit {uint64_t peer,generation,tick;NativeActorAction action;};
+thread_local const ButtonPermit* button_permit=nullptr;
 struct Environment {unsigned csr=_mm_getcsr();DWORD error=GetLastError();~Environment(){_mm_setcsr(csr);SetLastError(error);}};
 bool SameWorld(uint32_t registry,uint8_t* base){return base && GuestReadBatch::Readable(base+0x833DA7E4,4) && PPC_LOAD_U32(0x833DA7E4)==registry;}
 ActorLookBasis Basis(uint64_t peer,uint64_t generation,uint64_t tick,const RoomMovement& movement){
     return {peer,generation,tick,{movement.forward_z,0,-movement.forward_x},{movement.forward_x,0,movement.forward_z}};
 }
-NativeActorAction Action(const RoomMovement& movement){return {0,0x833DAEB8,movement.x,movement.y};}
-std::array<NativeActorJump,kMaxRoomJumpEvents> JumpCommands(uint64_t generation,uint64_t tick,const RoomMovement& movement){
+NativeActorAction Action(const RoomMovement& movement,unsigned user){return {0,0x833DAEB8+user*12,movement.x,movement.y};}
+std::array<NativeActorJump,kMaxRoomJumpEvents> JumpCommands(uint64_t generation,uint64_t tick,const RoomMovement& movement,unsigned user){
     std::array<NativeActorJump,kMaxRoomJumpEvents> commands{};
     for(unsigned i=0;i<movement.jump_count;++i){const auto& event=movement.jump_events[i];
         const bool down=event.edge==RoomJumpEdge::Pressed;
-        commands[i]={generation,tick,event.sequence,down?OwnedJumpEdge::Pressed:OwnedJumpEdge::Released,{0,down?0x833DAEBCu:0x833DAEC0u,1,0}};
+        commands[i]={generation,tick,event.sequence,down?OwnedJumpEdge::Pressed:OwnedJumpEdge::Released,{0,(down?0x833DAEBCu:0x833DAEC0u)+user*12,1,0}};
     }
     return commands;
 }
+bool ButtonCommands(const NativeTriggerBinding& definitions,const RoomMovement& movement,unsigned user,
+                    std::vector<NativeActorAction>& actions,std::array<NativeActorJump,kMaxRoomJumpEvents>& jumps,uint8_t* base){
+    if(!ValidateNativeButtonDefinitionSnapshot(definitions,base) || !MatchNativeButtonActions(definitions,movement.button_actions,actions))return false;
+    const auto press=PPC_LOAD_U32(0x833DAEBC+user*12),release=PPC_LOAD_U32(0x833DAEC0+user*12);
+    unsigned count=0;
+    for(const auto& action:actions){const auto uid=PPC_LOAD_U32(action.action);if(uid!=press && uid!=release)continue;
+        if(count>=movement.jump_count || movement.jump_events[count].edge!=(uid==press?RoomJumpEdge::Pressed:RoomJumpEdge::Released))return false;
+        jumps[count++].action=action;
+    }
+    return count==movement.jump_count;
 }
-bool OwnedMovementFrames::Configure(uint16_t roster,uint16_t retail,const std::array<uint64_t,kOnlineRoomCapacity>& epochs,uint64_t first,uint32_t registry){
+}
+bool detail::OwnedButtonDispatchAuthorized(uint64_t peer,uint64_t generation,uint64_t tick,const NativeActorAction& action)noexcept{
+    return button_permit && button_permit->peer==peer && button_permit->generation==generation && button_permit->tick==tick &&
+        button_permit->action.event==action.event && button_permit->action.action==action.action && button_permit->action.x==action.x && button_permit->action.y==action.y;
+}
+bool OwnedMovementFrames::Configure(uint16_t roster,uint16_t retail,const std::array<uint64_t,kOnlineRoomCapacity>& epochs,uint64_t first,uint32_t registry,RetailAdmission admission){
     if(configured_ || !registry || !(roster&1) || (retail&~uint16_t(3)) || (retail&~roster))return false;
     for(unsigned i=0;i<kOnlineRoomCapacity;++i)if(bool(roster&(1u<<i))!=(epochs[i]!=0))return false;
     roster_=roster;retail_=retail;epochs_=epochs;next_tick_=first;registry_=registry;
-    owner_thread_=GetCurrentThreadId();configured_=true;return true;
+    owner_thread_=GetCurrentThreadId();retail_admission_=admission;configured_=true;return true;
 }
 bool OwnedMovementFrames::Bind(uint8_t peer,uint64_t native_peer,PPCContext& ctx,uint8_t* base){
     Environment environment;
@@ -40,7 +61,17 @@ bool OwnedMovementFrames::Bind(uint8_t peer,uint64_t native_peer,PPCContext& ctx
     if(!(roster_&(1u<<index)) || (retail_&(1u<<index)) || bindings_[index].native_peer)return false;
     OwnedActorInput actor;if(!OwnedActorInputFor(native_peer,ctx,base,actor) || actor.registry!=registry_ || !actor.enabled)return false;
     for(const auto& binding:bindings_)if(binding.native_peer==native_peer || binding.entity==actor.entity)return false;
-    bindings_[index]={native_peer,actor.generation,actor.entity,actor.controller};return true;
+    bindings_[index]={native_peer,actor.generation,actor.entity,actor.controller,actor.action_user};return true;
+}
+bool OwnedMovementFrames::BindButtons(uint8_t peer,const NativeTriggerBinding& definitions,PPCContext& ctx,uint8_t* base){
+    Environment environment;
+    if(!configured_ || owner_thread_!=GetCurrentThreadId() || faulted_ || delivered_ || !peer || peer>kOnlineRoomCapacity)return false;
+    auto& binding=bindings_[peer-1];OwnedActorInput actor;
+    if(!binding.native_peer || binding.buttons || definitions.parent.registry!=registry_ ||
+        definitions.parent.logical_user!=binding.action_user || !HashNativeButtonSchema(definitions) ||
+        !ValidateNativeButtonDefinitionSnapshot(definitions,base) || !OwnedActorInputFor(binding.native_peer,ctx,base,actor) ||
+        actor.generation!=binding.generation || actor.entity!=binding.entity || !actor.enabled)return false;
+    binding.buttons=definitions;return true;
 }
 OwnedFrameResult OwnedMovementFrames::Preflight(const RoomFrame& frame,PPCContext& ctx,uint8_t* base)const{
     Environment environment;
@@ -56,25 +87,34 @@ OwnedFrameResult OwnedMovementFrames::Preflight(const RoomFrame& frame,PPCContex
         if(!(roster_&(1u<<i))){if(movement!=RoomMovement{})return OwnedFrameResult::InvalidRoster;continue;}
         if(movement.actor_epoch!=epochs_[i])return OwnedFrameResult::EpochMismatch;
         if(!ValidRoomMovement(movement))return OwnedFrameResult::InvalidMovement;
-        if(movement.source==RoomMovementSource::NativeActionV3)return OwnedFrameResult::UnsupportedIntent;
-        // Retail input is still published through its existing raw gate; that
-        // adapter does not yet consume V2 interpreted edges. Never drop them.
         if(retail_&(1u<<i)){
-            if(movement.source==RoomMovementSource::NativeActionV2)return OwnedFrameResult::UnsupportedIntent;
+            // Interpreted edges require a live native retail receiver, not a
+            // boolean promise that some other code will consume them later.
+            if(movement.source!=RoomMovementSource::NativeActionV1 && !retail_admission_)return OwnedFrameResult::UnsupportedIntent;
             continue;
         }
+        const bool buttons=movement.source==RoomMovementSource::NativeActionV3;
+        if(buttons && !bindings_[i].buttons)return OwnedFrameResult::UnsupportedIntent;
         const uint16_t allowed=movement.source==RoomMovementSource::NativeActionV2?movement.jump_button_mask:0;
-        if((movement.pad.buttons&~allowed) || movement.pad.left_trigger || movement.pad.right_trigger)return OwnedFrameResult::UnsupportedIntent;
+        if(!buttons && ((movement.pad.buttons&~allowed) || movement.pad.left_trigger || movement.pad.right_trigger))return OwnedFrameResult::UnsupportedIntent;
         auto stream=jumps_[i];if(!AdvanceRoomJumpStream(stream,movement))return OwnedFrameResult::InvalidMovement;
         const auto& binding=bindings_[i];if(!binding.native_peer)return OwnedFrameResult::UnboundActor;
         OwnedActorInput actor;
         if(!OwnedActorInputFor(binding.native_peer,ctx,base,actor) || actor.registry!=registry_ ||
-           actor.generation!=binding.generation || actor.entity!=binding.entity || actor.controller!=binding.controller)return OwnedFrameResult::StaleActor;
-        const auto result=ValidateOwnedActorMovement(binding.native_peer,Action(movement),ctx,base);
+           actor.generation!=binding.generation || actor.entity!=binding.entity || actor.controller!=binding.controller || actor.action_user!=binding.action_user)return OwnedFrameResult::StaleActor;
+        const auto result=ValidateOwnedActorMovement(binding.native_peer,Action(movement,binding.action_user),ctx,base);
         if(result!=ActorInputResult::Applied)return OwnedFrameResult::NativeNotReady;
-        const auto commands=JumpCommands(binding.generation,frame.tick,movement);
+        auto commands=JumpCommands(binding.generation,frame.tick,movement,binding.action_user);
+        if(buttons){std::vector<NativeActorAction> actions;
+            if(!ButtonCommands(*binding.buttons,movement,binding.action_user,actions,commands,base))return OwnedFrameResult::InvalidMovement;
+        }
         if(ValidateOwnedActorJumpBatch(binding.native_peer,std::span<const NativeActorJump>(commands.data(),movement.jump_count),ctx,base)!=ActorInputResult::Applied)
             return OwnedFrameResult::NativeNotReady;
+    }
+    if(retail_ && retail_admission_){
+        RoomFrame retail;retail.tick=frame.tick;retail.players_mask=retail_;
+        for(unsigned i=0;i<2;++i)if(retail_&(1u<<i))retail.players[i]=frame.players[i];
+        if(retail_admission_(retail,ctx,base)!=ActorInputResult::Applied)return OwnedFrameResult::NativeNotReady;
     }
     return OwnedFrameResult::Ready;
 }
@@ -93,18 +133,41 @@ OwnedFrameResult OwnedMovementFrames::Deliver(const RoomFrame& frame,PPCContext&
     }
     try{
         for(unsigned i=0;i<kOnlineRoomCapacity;++i)if(extras&(1u<<i))
-            if(ReplayOwnedActorMovement(bindings_[i].native_peer,Action(frame.players[i]),frame.tick,ctx,base)!=ActorInputResult::Applied){
+            if(ReplayOwnedActorMovement(bindings_[i].native_peer,Action(frame.players[i],bindings_[i].action_user),frame.tick,ctx,base)!=ActorInputResult::Applied){
                 faulted_=true;return OwnedFrameResult::NativeFailure;
             }
         // Movement claims for ALL peers precede the first edge. The complete
         // edge batches were checked before any native delivery; an exception
         // after entering native code is terminal, never retried as a rollback.
         for(unsigned i=0;i<kOnlineRoomCapacity;++i)if(extras&(1u<<i)){
-            const auto commands=JumpCommands(bindings_[i].generation,frame.tick,frame.players[i]);
-            for(unsigned n=0;n<frame.players[i].jump_count;++n)
-                if(ReplayOwnedActorJump(bindings_[i].native_peer,commands[n],ctx,base)!=ActorInputResult::Applied){
-                    faulted_=true;return OwnedFrameResult::NativeFailure;
+            const auto& binding=bindings_[i];const auto& movement=frame.players[i];
+            auto commands=JumpCommands(binding.generation,frame.tick,movement,binding.action_user);
+            if(movement.source!=RoomMovementSource::NativeActionV3){
+                for(unsigned n=0;n<movement.jump_count;++n)if(ReplayOwnedActorJump(binding.native_peer,commands[n],ctx,base)!=ActorInputResult::Applied){faulted_=true;return OwnedFrameResult::NativeFailure;}
+            }else{
+                std::vector<NativeActorAction> actions;
+                if(!ButtonCommands(*binding.buttons,movement,binding.action_user,actions,commands,base)){faulted_=true;return OwnedFrameResult::NativeNotReady;}
+                unsigned jump=0;
+                for(const auto& action:actions){
+                    if(!SameWorld(registry_,base) || !ValidateNativeButtonDefinitionSnapshot(*binding.buttons,base)){faulted_=true;return OwnedFrameResult::StaleActor;}
+                    ActorInputResult result;
+                    const auto uid=PPC_LOAD_U32(action.action);
+                    if(uid==PPC_LOAD_U32(0x833DAEBC+binding.action_user*12) || uid==PPC_LOAD_U32(0x833DAEC0+binding.action_user*12)){
+                        result=ReplayOwnedActorJump(binding.native_peer,commands[jump++],ctx,base);
+                    }else{
+                        const ButtonPermit permit{binding.native_peer,binding.generation,frame.tick,action};
+                        struct Scope {explicit Scope(const ButtonPermit& p){button_permit=&p;}~Scope(){button_permit=nullptr;}}scope(permit);
+                        uint32_t native_result=0;
+                        result=detail::DispatchOwnedActorButton(binding.native_peer,binding.generation,frame.tick,action,ctx,base,native_result);
+                        if(REXCVAR_GET(em2_private_profile)){
+                            Environment log_environment;
+                            const auto definition=std::find_if(binding.buttons->actions.begin(),binding.buttons->actions.end(),[&](const auto& d){return d.action==action.action && d.event==action.event;});
+                            if(definition!=binding.buttons->actions.end())REXLOG_INFO("Native Room owned button callback: tick {} peer {} profile {} action '{}' result {} native return {}; original derived handler",frame.tick,i+1,binding.action_user,definition->name,int(result),native_result);
+                        }
+                    }
+                    if(result!=ActorInputResult::Applied){faulted_=true;return OwnedFrameResult::NativeFailure;}
                 }
+            }
         }
     }catch(...){faulted_=true;throw;}
     for(unsigned i=0;i<kOnlineRoomCapacity;++i)if(extras&(1u<<i))AdvanceRoomJumpStream(jumps_[i],frame.players[i]);
@@ -117,6 +180,10 @@ OwnedFrameResult OwnedMovementFrames::Finish(uint64_t tick,uint8_t* base){
     if(faulted_)return OwnedFrameResult::Faulted;
     if(!delivered_ || delivered_->tick!=tick || tick!=next_tick_)return OwnedFrameResult::IncompleteTick;
     if(!SameWorld(registry_,base)){faulted_=true;return OwnedFrameResult::StaleActor;}
+    for(unsigned i=0;i<kOnlineRoomCapacity;++i)if((roster_&~retail_)&(1u<<i)){
+        const auto& binding=bindings_[i];
+        if(!OwnedActorBasisConsumed(binding.native_peer,binding.generation,tick))return OwnedFrameResult::IncompleteTick;
+    }
     delivered_.reset();if(next_tick_==UINT64_MAX)exhausted_=true;else ++next_tick_;return OwnedFrameResult::Ready;
 }
 bool TestOwnedMovementFrames(PPCContext& ctx,uint8_t* base,uint64_t first_peer,uint64_t second_peer,OwnedFrameUpdate update){
@@ -134,6 +201,12 @@ bool TestOwnedMovementFrames(PPCContext& ctx,uint8_t* base,uint64_t first_peer,u
     if(!check(pump([&]{return host.lobby().players.size()==2 && client.lobby().players.size()==2;}) &&
         host.SetReady(true) && client.SetReady(true) && pump([&]{return !client.profile_pending() && host.lobby().players[1].ready;}) &&
         host.Start() && pump([&]{return host.state()==RoomState::Loading && client.state()==RoomState::Loading;}),"frozen native-room roster waits for native world admission"))return false;
+    {
+        const auto caller=ctx;const auto fp=_mm_getcsr();const auto error=GetLastError();uint32_t native_result=0xCDCDCDCD;
+        if(!check(detail::DispatchOwnedActorButton(a.peer,a.generation,identity.first_tick,{0,0x833DAEB8,0,0},ctx,base,native_result)==ActorInputResult::InvalidContext &&
+                  !native_result && !std::memcmp(&caller,&ctx,sizeof(ctx)) && _mm_getcsr()==fp && GetLastError()==error,
+                  "direct generic button dispatch cannot obtain a coordinator permit or change caller state"))return false;
+    }
     OwnedMovementFrames coordinator;std::array<uint64_t,kOnlineRoomCapacity> epochs{};epochs[0]=epochs[1]=1;
     if(!check(coordinator.Configure(3,0,epochs,identity.first_tick,a.registry) && coordinator.Bind(1,a.peer,ctx,base) &&
         coordinator.Bind(2,b.peer,ctx,base) && !coordinator.Bind(3,a.peer,ctx,base),"room IDs bind distinct native actors without retail slot fabrication"))return false;
@@ -179,8 +252,18 @@ bool TestOwnedMovementFrames(PPCContext& ctx,uint8_t* base,uint64_t first_peer,u
             client.next_tick()==tick+1,"transport consumption follows successful all-actor preflight"))return false;
         if(!check(coordinator.Deliver(committed,ctx,base)==OwnedFrameResult::Ready &&
             coordinator.Deliver(received,ctx,base)==OwnedFrameResult::IncompleteTick,"one authoritative frame delivers once before world update"))return false;
-        for(const auto actor:{a,b}){auto call=ctx;call.r3.u64=actor.controller+24;update(call,base);}
+        if(!check(coordinator.Finish(tick,base)==OwnedFrameResult::IncompleteTick && coordinator.next_tick()==tick,
+            "delivery without native controller consumption cannot complete or advance the network tick"))return false;
+        {auto call=ctx;call.r3.u64=a.controller+24;update(call,base);}
+        if(!check(coordinator.Finish(tick,base)==OwnedFrameResult::IncompleteTick && coordinator.next_tick()==tick,
+            "one processed extra cannot acknowledge a tick while another actor still has pending native motion"))return false;
+        {auto call=ctx;call.r3.u64=b.controller+24;update(call,base);}
+        if(!check(OwnedActorBasisConsumed(a.peer,a.generation,tick) && OwnedActorBasisConsumed(b.peer,b.generation,tick) &&
+            !OwnedActorBasisConsumed(a.peer,a.generation+1,tick) && !OwnedActorBasisConsumed(a.peer,a.generation,tick+1),
+            "completed native controller updates expose only their exact actor generation and staged tick consumption"))return false;
         auto sample=[&](uint32_t address){return std::bit_cast<float>(PPC_LOAD_U32(address));};
+        if(sample(a.listener+168)!=first.y || sample(a.listener+172)!=first.x || sample(b.listener+168)!=second.y || sample(b.listener+172)!=second.x)
+            REXLOG_ERROR("Owned movement profile diagnostic: tick {}, users {}/{}, first cache {}/{}, expected {}/{}, second cache {}/{}, expected {}/{}",tick,a.action_user,b.action_user,sample(a.listener+168),sample(a.listener+172),first.y,first.x,sample(b.listener+168),sample(b.listener+172),second.y,second.x);
         if(!check(sample(a.listener+168)==first.y && sample(a.listener+172)==first.x &&
             sample(b.listener+168)==second.y && sample(b.listener+172)==second.x,"network movement reaches only its owned native action cache, including neutral release"))return false;
         auto motion_for=[&](const OwnedActorInput& actor){
@@ -202,7 +285,8 @@ bool TestOwnedMovementFrames(PPCContext& ctx,uint8_t* base,uint64_t first_peer,u
     REXLOG_INFO("Owned network frame passed {} checks: actual TCP room/authoritative frames into original native action/controller callbacks, distinct peers/views, preflight failure isolation, explicit neutral, epochs and tick ownership; fixture motion sink excludes contacts/full multiplayer",checks);
     return true;
 }
-bool TestOwnedJumpMovementFrames(PPCContext& ctx,uint8_t* base,uint64_t first_peer,uint64_t second_peer){
+bool TestOwnedJumpMovementFrames(PPCContext& ctx,uint8_t* base,uint64_t first_peer,uint64_t second_peer,OwnedFrameUpdate update){
+    if(!update)return false;
     Environment environment;OwnedActorInput a,b;
     if(!OwnedActorInputFor(first_peer,ctx,base,a) || !OwnedActorInputFor(second_peer,ctx,base,b))return false;
     Identity identity;identity.build[0]=11;identity.content[0]=12;identity.checkpoint[0]=13;identity.session[0]=14;
@@ -257,8 +341,16 @@ bool TestOwnedJumpMovementFrames(PPCContext& ctx,uint8_t* base,uint64_t first_pe
         }
         RoomFrame committed;
         if(!check(coordinator.Preflight(received,ctx,base)==OwnedFrameResult::Ready && client.TakeFrame(committed) && committed==received &&
-            coordinator.Deliver(committed,ctx,base)==OwnedFrameResult::Ready && coordinator.Deliver(committed,ctx,base)==OwnedFrameResult::IncompleteTick &&
-            coordinator.Finish(tick,base)==OwnedFrameResult::Ready,"one agreed frame delivers Movement for all actors before ordered original Jump callbacks"))return false;
+            coordinator.Deliver(committed,ctx,base)==OwnedFrameResult::Ready && coordinator.Deliver(committed,ctx,base)==OwnedFrameResult::IncompleteTick,
+            "one agreed frame delivers Movement for all actors before ordered original Jump callbacks"))return false;
+        if(!check(coordinator.Finish(tick,base)==OwnedFrameResult::IncompleteTick && coordinator.next_tick()==tick,
+            "Jump stimulus delivery alone does not prove the native motion stage ran"))return false;
+        {auto call=ctx;call.r3.u64=a.controller+24;update(call,base);}
+        if(!check(coordinator.Finish(tick,base)==OwnedFrameResult::IncompleteTick,
+            "Jump frame waits for both native actor updates"))return false;
+        {auto call=ctx;call.r3.u64=b.controller+24;update(call,base);}
+        if(!check(coordinator.Finish(tick,base)==OwnedFrameResult::Ready && coordinator.next_tick()==tick+1,
+            "Jump frame completes only after every native movement stage consumed its exact tick"))return false;
         std::array<uint8_t,32> fixture_digest{};fixture_digest[0]=0xA2;fixture_digest[1]=uint8_t(n+1);
         if(!check(host.CompleteGameplay(tick,fixture_digest) && client.CompleteGameplay(tick,fixture_digest) &&
             pump([&]{return !host.gameplay_completion_pending() && !client.gameplay_completion_pending() &&

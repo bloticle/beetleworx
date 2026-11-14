@@ -12,6 +12,7 @@ void Append(std::string& out,char32_t c){
 bool Allowed(char32_t c){return c>=32 && !(c>=127 && c<=159) && !(c>=0xD800 && c<=0xDFFF) && c<=0x10FFFF && c!=0x2028 && c!=0x2029;}
 }
 bool LobbyNameInput::Begin(std::string_view source){
+    if(source.size()>max_bytes_)return false;
     std::u32string decoded;
     for(size_t i=0;i<source.size();){
         auto first=uint8_t(source[i++]);char32_t c=first;unsigned extra=0;
@@ -21,7 +22,7 @@ bool LobbyNameInput::Begin(std::string_view source){
         else if(first>=128)return false;
         auto count=extra;
         while(extra--){if(i==source.size() || (uint8_t(source[i])&0xC0)!=0x80)return false;c=(c<<6)|(uint8_t(source[i++])&63);}
-        if(!Allowed(c) || (count==1 && c<128) || (count==2 && c<2048) || (count==3 && c<65536) || decoded.size()==24)return false;
+        if(!Allowed(c) || (count==1 && c<128) || (count==2 && c<2048) || (count==3 && c<65536) || decoded.size()>=max_scalars_)return false;
         decoded.push_back(c);
     }
     text_=std::move(decoded);cursor_=text_.size();anchor_=0;high_=0;active_=true;return true;
@@ -31,7 +32,10 @@ void LobbyNameInput::EraseSelection(){
     text_.erase(first,last-first);cursor_=anchor_=first;
 }
 bool LobbyNameInput::Insert(char32_t c){
-    if(!Allowed(c) || text_.size()-(std::max(cursor_,anchor_)-std::min(cursor_,anchor_))>=24)return false;
+    if(!Allowed(c) || text_.size()-(std::max(cursor_,anchor_)-std::min(cursor_,anchor_))>=max_scalars_)return false;
+    std::string candidate;const auto first=std::min(cursor_,anchor_),last=std::max(cursor_,anchor_);
+    for(size_t i=0;i<text_.size();++i)if(i<first || i>=last)Append(candidate,text_[i]);
+    Append(candidate,c);if(candidate.size()>max_bytes_)return false;
     EraseSelection();text_.insert(text_.begin()+cursor_,c);anchor_=++cursor_;return true;
 }
 bool LobbyNameInput::Character(uint32_t unit){
@@ -76,6 +80,11 @@ bool TestLobbyNameInput(){
     edit.Key(0x08,false,false);check(edit.text().size()==92,"backspace removes complete nonBMP scalar");
     const auto before=edit.text();check(!edit.Begin("\xC0\xAF") && edit.text()==before,"malformed initial UTF8 rejected atomically");
     edit.End();check(!edit.Character('A') && edit.text()==before,"inactive editor cannot capture text");
+    LobbyNameInput chat(240,240);check(chat.Begin(""),"empty chat draft");
+    for(unsigned i=0;i<61;++i)chat.Character(0x1F600);
+    check(chat.text().size()==240 && chat.cursor_utf16()==120,"chat byte limit counts complete Unicode scalars");
+    chat.Key('A',false,true);chat.Character('A');check(chat.text()=="A","replacement reclaims UTF8 budget");
+    chat.Begin("");for(unsigned i=0;i<241;++i)chat.Character('a');check(chat.text().size()==240,"chat ASCII limit");
     if(ok)REXLOG_INFO("Native lobby name input passed: selection, B character, cursor, delete/backspace, Unicode pairs, controls, bounds and inactive ownership");return ok;
 }
 }

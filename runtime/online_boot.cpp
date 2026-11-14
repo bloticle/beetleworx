@@ -100,7 +100,7 @@ struct OnlineBoot::Impl {
 };
 OnlineBoot::OnlineBoot():impl_(std::make_unique<Impl>()){}
 OnlineBoot::~OnlineBoot(){impl_->stop.request_stop();}
-bool OnlineBoot::Host(BootPaths paths,const fs::path& source,std::string listen,std::string advertised,uint16_t port,uint8_t delay) {
+bool OnlineBoot::Host(BootPaths paths,const fs::path& source,std::string listen,std::string advertised,uint16_t port,uint8_t delay,std::optional<std::array<uint8_t,16>> session_nonce) {
     auto& p=*impl_;if(p.status.state!=BootState::Idle || delay>12)return false;
     // Validate the advertised endpoint before any expensive work; bind may use
     // wildcard while the invitation must name a usable numeric unicast address.
@@ -109,7 +109,10 @@ bool OnlineBoot::Host(BootPaths paths,const fs::path& source,std::string listen,
     const auto bound=ParseNumericAddress(listen,true),target=ParseNumericAddress(advertised);
     if(!bound || !target || bound->ipv6()!=target->ipv6())return false;
     std::array<uint8_t,16> nonce{};
-    if(!NewSessionNonce(nonce))return false;
+    if(session_nonce){
+        nonce=*session_nonce;
+        if(std::all_of(nonce.begin(),nonce.end(),[](auto byte){return byte==0;}))return false;
+    }else if(!NewSessionNonce(nonce))return false;
     p.status.error.clear();
     p.host=true;p.paths=std::move(paths);p.listen=std::move(listen);p.advertised=std::move(advertised);p.port=port;p.delay=delay;
     p.status.state=BootState::Preparing;p.status.user_data=p.paths.new_user_data;
@@ -244,11 +247,15 @@ bool TestOnlineBoot(const fs::path& root) {
                 !host.Host(paths("bad-address"),base/"frozen","invalid","127.0.0.1"),"invalid invitations/endpoints rejected before I/O"))return false;
             if(!check(!host.Host(paths("bad-delay"),base/"frozen","127.0.0.1","127.0.0.1",0,13) &&
                 host.status().state==BootState::Idle && !fs::exists(base/"bad-delay"),"unsupported input buffer rejected before save I/O"))return false;
-            if(!check(host.Host(paths("host"),base/"frozen","127.0.0.1","127.0.0.1",0,0) && host.status().state==BootState::Preparing &&
+            if(!check(!host.Host(paths("bad-nonce"),base/"frozen","127.0.0.1","127.0.0.1",0,0,std::array<uint8_t,16>{}) &&
+                host.status().state==BootState::Idle && !fs::exists(base/"bad-nonce"),"zero replay nonce rejected before opening sockets or save IO"))return false;
+            std::array<uint8_t,16> replay_nonce{};replay_nonce[0]=0xA5;
+            if(!check(host.Host(paths("host"),base/"frozen","127.0.0.1","127.0.0.1",0,0,replay_nonce) && host.status().state==BootState::Preparing &&
                 !host.Host(paths("other"),base/"frozen","127.0.0.1","127.0.0.1"),"asynchronous preparation cannot be silently replaced"))return false;
             if(!check(pump(host,nullptr,[&]{return host.status().state==BootState::WaitingForPeer;}),"host verifies installation and exposes a real invitation"))return false;
             const auto code=host.status().invitation;
-            const auto direct=DecodeInvite(code);if(!check(direct && direct->input_delay==0,"host invitation carries zero-tick input buffer"))return false;
+            const auto direct=DecodeInvite(code);if(!check(direct && direct->input_delay==0 && direct->session==replay_nonce,
+                "host invitation retains the requested replay nonce after fresh identity verification"))return false;
             auto public_invite=*direct;public_invite.address="203.0.113.19";
             LANAdvertiser advertisement;LANBrowser browser;
             if(!check(advertisement.Start(public_invite,"127.0.0.1",0) && browser.Start({{"127.0.0.1",advertisement.port()}}),"boot host starts loopback-only LAN discovery"))return false;

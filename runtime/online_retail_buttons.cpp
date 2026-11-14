@@ -3,6 +3,8 @@
 #include "guest_read_batch.h"
 #include "ppc_context.h"
 #include <rex/logging.h>
+#include <rex/cvar.h>
+REXCVAR_DECLARE(bool,em2_private_profile);
 #include <windows.h>
 #include <immintrin.h>
 #include <algorithm>
@@ -39,8 +41,12 @@ struct RetailButtonReceiver::Impl {
     bool Current(PPCContext& ctx,uint8_t* memory){
         if(!armed || thread!=GetCurrentThreadId() || base!=memory || stale)return false;
         RetailActorInput current;
-        if(!RetailActorInputFor(actor.slot,ctx,memory,current) || current!=actor || !DefinitionOwner(actor,definitions,ctx,memory)){
-            stale=true;return false;
+        const bool body=RetailActorInputFor(actor.slot,ctx,memory,current) && current==actor;
+        const bool definition=body && DefinitionOwner(actor,definitions,ctx,memory);
+        if(!definition){
+            stale=true;
+            if(REXCVAR_GET(em2_private_profile))REXLOG_ERROR("Native retail button receiver stale: slot {} body lease {} definition snapshot {} active context {:08X}/{:08X}",actor.slot,body,ValidateNativeButtonDefinitionSnapshot(definitions,memory),definitions.parent.active_event_uid,Readable(definitions.parent.manager,20,memory)?PPC_LOAD_U32(definitions.parent.manager+16):0);
+            return false;
         }
         return true;
     }
@@ -170,13 +176,25 @@ ActorInputResult ReplayRetailButtonBatch(unsigned slot,const RoomFrame& frame,PP
         ctx.r4.u64=action.event;ctx.r5.u64=action.action;ctx.f1.f64=action.x;ctx.f2.f64=action.y;
         sub_82A3C930(ctx,base);
         if(!permit.derived || permit.invalid){delivery.faulted=true;return ActorInputResult::InvalidContext;}
+        if(REXCVAR_GET(em2_private_profile)){
+            const auto& definitions=RetailButtonAccess::Get(*delivery.receivers[slot]).definitions.actions;
+            const auto definition=std::find_if(definitions.begin(),definitions.end(),[&](const auto& d){return d.event==action.event && d.action==action.action;});
+            if(definition!=definitions.end())REXLOG_INFO("Native Room button callback: tick {} slot {} action '{}' kind {} axes {}/{} base {} return {}; original derived handler",frame.tick,slot,definition->name,definition->kind,action.x,action.y,permit.base,ctx.r3.u32);
+        }
     }}catch(...){delivery.faulted=true;throw;}
     return ActorInputResult::Applied;
 }
 ActorInputResult FinishRetailButtonTick(uint64_t tick,PPCContext& ctx,uint8_t* base){
     Preserve preserve;if(!DeliveryOwner(base))return ActorInputResult::WrongThread;
-    if(!delivery.active || delivery.frame.tick!=tick || !delivery.delivered[0] || !delivery.delivered[1] ||
-       ValidateRetailButtonFrame(delivery.frame,ctx,base)!=ActorInputResult::Applied)return ActorInputResult::InvalidTick;
+    if(!delivery.active || delivery.frame.tick!=tick || !delivery.delivered[0] || !delivery.delivered[1]){
+        if(REXCVAR_GET(em2_private_profile))REXLOG_ERROR("Native button completion header rejected: tick {} expected {} active {} delivered {}/{}",tick,delivery.frame.tick,delivery.active,delivery.delivered[0],delivery.delivered[1]);
+        return ActorInputResult::InvalidTick;
+    }
+    const auto admitted=ValidateRetailButtonFrame(delivery.frame,ctx,base);
+    if(admitted!=ActorInputResult::Applied){
+        if(REXCVAR_GET(em2_private_profile))REXLOG_ERROR("Native button completion revalidation rejected: tick {} result {} faulted {} started {} next {}",tick,int(admitted),delivery.faulted,delivery.started,delivery.next);
+        return ActorInputResult::InvalidTick;
+    }
     for(unsigned i=0;i<2;++i){RetailActorInput actor;bool moved=false;RoomMovement prepared;
         if(!RetailInputTickFor(i,tick,ctx,base,actor,moved,&prepared) || !moved || prepared!=delivery.frame.players[i]){
             delivery.faulted=true;return ActorInputResult::InvalidContext;}}
@@ -234,7 +252,7 @@ bool TestRetailButtonReceivers(PPCContext& ctx,uint8_t* base,const std::function
         b.scope=NativeButtonScope::DigitalAndTriggers;b.threshold=32;b.active_context_name="fixture-game";
         NativeTriggerContext context;context.event=event;context.retail_listener=true;
         for(unsigned i=0;i<6;++i)context.header[i]=PPC_LOAD_U32(event+i*4);
-        for(unsigned i=0;i<2;++i)context.listeners.push_back(PPC_LOAD_U32(0xB000+i*4));
+        context.header[1]=0;context.header[2]=1;context.header[3]=0;context.listeners.push_back(p.listener);
         for(unsigned i=0;i<4;++i)context.action_order.push_back(PPC_LOAD_U32(0xB100+i*4));b.contexts.push_back(context);
         NativeTriggerAction a;a.event=event;a.action=0x54000+slot*512;a.ordinal=slot+2;a.uid=0x59000+slot*128;a.name=slot?"Interact2":"Interact";a.kind=2;a.key=0x01400010;
         std::memcpy(a.shape.data(),base+a.action,a.shape.size());b.actions.push_back(a);

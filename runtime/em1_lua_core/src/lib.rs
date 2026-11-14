@@ -17,7 +17,9 @@ mod source_vector;
 mod source_map;
 mod disc_images;
 mod chd_images;
+mod archive_stream;
 mod seven_archives;
+mod rar_archives;
 
 const MAX_CHUNK: usize = 1024 * 1024;
 const MAX_SOURCE: usize = 4 * 1024 * 1024;

@@ -53,18 +53,23 @@ def main():
     relative=Path('__Packages/em2/mainmenu/TopMenu.as')
     text=(work/'export/scripts'/relative).read_text(encoding='utf-8-sig')
     start=text.index('      if(_loc3_)\n');end=text.index('   function _itemSelected()',start)
-    text=text[:start]+'      if(_level0.SetOption(7203,-1)==1) { this.b_5.disable(); this.b_5._visible=false; } else { this.b_5.enable(); this.b_5._visible=true; }\n   }\n'+text[end:]
+    text=text[:start]+'      if(_level0.SetOption(2743,-1)!=1) { this.b_5.disable(); this.b_5._visible=false; } else { this.b_5.enable(); this.b_5._visible=true; }\n   }\n'+text[end:]
     text=replace_once(text,'   function _itemSelected()\n   {','   function _itemSelected()\n   {\n      if(this._em2Online) { this._em2OnlineSelect(); return; }')
     text=replace_once(text,'this.b_5.label = "**LEVEL SELECT";','this.b_5.label = "Online Multiplayer";')
     text=replace_once(text,'      this.dispatchEvent({type:em2.Events.LEVEL_SELECT_LOAD});\n      this.b_5._rollout();','      this._em2OnlineOpen();\n      this.b_5._rollout();')
-    text=replace_once(text,'   function _goBack()\n   {','   function _goBack()\n   {\n      if(this._em2Online) { if(this._em2OnlineEditingName) { this._em2OnlineEndName(false); return; } if(this._em2OnlineHostPage) { this._em2OnlineHostPage = false; this._em2OnlineRefresh(); } else if(this._em2OnlineState != 7) this._em2OnlineClose(); return; }')
+    text=replace_once(text,'   function _goBack()\n   {','   function _goBack()\n   {\n      if(this._em2Online) { this._em2OnlineBack(); return; }')
     text=replace_once(text,'      _level0.APressed = this._itemSelectedListener;','''      _level0.APressed = this._itemSelectedListener;
       this._em2OnlineStartPump = this.createEmptyMovieClip("_em2OnlineStartPump",this.getNextHighestDepth());
       this._em2OnlineStartPump.onEnterFrame = function()
       {
          if(_level0.SetOption == undefined) return;
-         var owner = this._parent; this.removeMovieClip();
-         if(_level0.SetOption(7203,-1) != 1 && _level0.SetOption(2705,-1) == 1 && !owner._em2OnlineOpenedOnce)
+         var owner = this._parent;
+         if(owner._visible == false) return;
+         if(_level0.SetOption(2744,-1) == 1 && !owner._em2Online)
+         {
+            owner._em2OnlineOpen(); return;
+         }
+         if(_level0.SetOption(2743,-1) == 1 && _level0.SetOption(2705,-1) == 1 && !owner._em2OnlineOpenedOnce)
          {
             owner._em2OnlineOpenedOnce = true; owner._em2OnlineOpen();
          }
@@ -74,7 +79,7 @@ def main():
     modified=work/'modified.gfx';run('java','-jar',jar,'-importScript',source,modified,work/'import')
     run('java','-jar',jar,'-export','script',work/'roundtrip',modified)
     result=(work/'roundtrip/scripts'/relative).read_text(encoding='utf-8-sig')
-    for marker in ('Online Multiplayer','function _em2OnlineOpen()','function _em2OnlineBeginName()','_level0.SetOption(2727,2)','_level0.SetOption(2727,-1)','_level0.SetOption(2725,0)','_level0.SetOption(2700,2)','_level0.SetOption(2701,-1)', '_level0.SetOption(7203,-1) == 1', '_level0.SetOption(7203,-1) != 1', 'Auto Internet port: On', 'Copy Internet invite', '_level0.SetOption(2715,1)', 'Visibility: Invite only', '_level0.SetOption(2700,16)', '_level0.SetOption(2716,-1)'):
+    for marker in ('Online Multiplayer','function _em2OnlineOpen()','function _em2OnlineBeginName()','_level0.SetOption(2727,2)','_level0.SetOption(2727,-1)','_level0.SetOption(2725,0)','_level0.SetOption(2700,2)','_level0.SetOption(2701,-1)', '_level0.SetOption(2743,-1) != 1', '_level0.SetOption(2743,-1) == 1', 'Auto Internet port: On', 'Copy Internet invite', '_level0.SetOption(2715,1)', 'Visibility: Invite only', '_level0.SetOption(2700,16)', '_level0.SetOption(2716,-1)', 'Pants / name color:', '_level0.SetOption(2734,0)', '_level0.SetOption(2735,0)', '_level0.SetOption(2737,-1)', 'Next players (', 'function _em2OnlineBack()', '_level0.SetOption(2742,2)'):
         if marker not in result:raise RuntimeError('Native lobby bridge lost during ActionScript compilation: '+marker)
     before=work/'export/scripts';after=work/'roundtrip/scripts'
     changed=[p.relative_to(before).as_posix() for p in before.rglob('*.as')

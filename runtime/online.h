@@ -17,6 +17,9 @@ struct Pad {
     uint16_t buttons=0;
     uint8_t left_trigger=0,right_trigger=0;
     int16_t left_x=0,left_y=0,right_x=0,right_y=0;
+    // Session v9 metadata, never an emulated controller button. A native menu
+    // requests a common paused simulation until both peers have resumed.
+    bool menu_pause=false;
     bool operator==(const Pad&) const = default;
 };
 struct Frame {
@@ -176,6 +179,8 @@ private:
     Identity identity_{};unsigned device_=0;uint64_t tick_=0;
     bool stopped_=false,prepared_=false,exhausted_=false,waiting_=false;
     bool completion_pending_=false,native_join_pending_=false;
+    std::optional<uint64_t> local_pause_tick_;
+    bool local_pause_=false;
     InputWait wait_reason_=InputWait::None;
     uint64_t committed_tick_=0;
     uint64_t load_sequence_=0;

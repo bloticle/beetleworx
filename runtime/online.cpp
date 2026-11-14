@@ -23,7 +23,7 @@ namespace {
 using Clock=std::chrono::steady_clock;
 using Bytes=std::vector<uint8_t>;
 constexpr size_t kWindow=256,kQueueLimit=256,kStreamLimit=4096;
-constexpr uint16_t kVersion=8;
+constexpr uint16_t kVersion=9;
 enum class Kind:uint8_t {Hello=1,Input=2,Frame=3,Ping=4,Pong=5,Digest=6,CheckpointBegin=7,CheckpointChunk=8,CheckpointEnd=9,CheckpointInstalled=10,CheckpointReady=11,CheckpointProgress=12,Load=13,LobbyStart=14,LobbyProfile=15,LobbySnapshot=16,LobbyReply=17};
 enum class LobbyStart:uint8_t {ClientReady=1,Start=2,Acknowledge=3};
 enum class LobbyStartPhase {Waiting,ClientReady,Requested,Confirmed};
@@ -103,11 +103,13 @@ uint64_t Get(std::span<const uint8_t> in,size_t& offset,unsigned count) {
 void PutPad(Bytes& out,const Pad& pad) {
     Put(out,pad.buttons,2);Put(out,pad.left_trigger,1);Put(out,pad.right_trigger,1);
     for(auto value:{pad.left_x,pad.left_y,pad.right_x,pad.right_y}) Put(out,std::bit_cast<uint16_t>(value),2);
+    Put(out,pad.menu_pause?1:0,1);
 }
 Pad GetPad(std::span<const uint8_t> in,size_t& at) {
     Pad pad;pad.buttons=uint16_t(Get(in,at,2));pad.left_trigger=uint8_t(Get(in,at,1));pad.right_trigger=uint8_t(Get(in,at,1));
     pad.left_x=std::bit_cast<int16_t>(uint16_t(Get(in,at,2)));pad.left_y=std::bit_cast<int16_t>(uint16_t(Get(in,at,2)));
-    pad.right_x=std::bit_cast<int16_t>(uint16_t(Get(in,at,2)));pad.right_y=std::bit_cast<int16_t>(uint16_t(Get(in,at,2)));return pad;
+    pad.right_x=std::bit_cast<int16_t>(uint16_t(Get(in,at,2)));pad.right_y=std::bit_cast<int16_t>(uint16_t(Get(in,at,2)));
+    pad.menu_pause=Get(in,at,1)!=0;return pad;
 }
 size_t BodySize(Kind kind) {
     switch(kind) {
@@ -116,8 +118,8 @@ size_t BodySize(Kind kind) {
         case Kind::CheckpointChunk:return 1032;
         case Kind::CheckpointEnd:case Kind::CheckpointProgress:return 4;
         case Kind::CheckpointInstalled:case Kind::CheckpointReady:return 32;
-        case Kind::Input:return 24;
-        case Kind::Frame:return 32;
+        case Kind::Input:return 25;
+        case Kind::Frame:return 34;
         case Kind::Digest:return 40;
         case Kind::Load:return 116;
         case Kind::LobbyStart:return 1;
@@ -242,11 +244,13 @@ std::optional<Message> Decode(Kind kind,std::span<const uint8_t> body) {
         return snap;
     }
     if(kind==Kind::Input) {
+        if(body[24]>1)return {};
         Input input{};input.tick=Get(body,at,8);input.player=uint8_t(Get(body,at,1));
         if(input.player>1 || Get(body,at,3)!=0) return {};
         input.pad=GetPad(body,at);return input;
     }
     if(kind==Kind::Frame) {
+        if(body[20]>1 || body[33]>1)return {};
         Frame frame{};frame.tick=Get(body,at,8);for(auto& pad:frame.players) pad=GetPad(body,at);return frame;
     }
     if(kind==Kind::CheckpointBegin){CheckpointBegin value{};value.size=uint32_t(Get(body,at,4));std::copy_n(body.begin()+at,32,value.identity.begin());return value;}
@@ -545,7 +549,7 @@ struct Session::Impl {
             else if(hello->checkpoint!=checkpoint_mode)mismatch="Different online startup methods. Both players must use the same Host/Join flow.";
             else if(compatible.startup_policy!=identity.startup_policy)mismatch="Different online startup paths. Both players must open Online Multiplayer from the native title menu, or both use the same prelaunch diagnostic flow.";
             else if(compatible.initialization_policy!=identity.initialization_policy)mismatch="Different native initialization policies. Both players must enable the same deterministic online initialization before hosting or joining.";
-            else if(compatible.build!=identity.build)mismatch="Different game builds. Both players must use the same beetleworx.exe.";
+            else if(compatible.build!=identity.build)mismatch="Different Beetleworx versions. Install the same release version on both devices. Unversioned development copies must use the same build.";
             else if(compatible.content!=identity.content)mismatch="Different game content or mods. Both players must use matching game files.";
             else if(compatible.session!=identity.session)mismatch="This invitation belongs to a different session. Copy the host's current invitation and retry.";
             else if(compatible.first_tick!=identity.first_tick || compatible.input_delay!=identity.input_delay)mismatch="Different session timing or input buffer. Join using the host's current invitation.";
@@ -1058,6 +1062,15 @@ bool TestOnlineSession() {
         if(!check(invalid.failed(),"noncanonical profile fields rejected"))return false;
     }
     unsigned decoded=0;
+    {
+        auto paused=b;paused.menu_pause=true;
+        for(const Message& message:{Message(Input{identity.first_tick,1,paused}),Message(Frame{identity.first_tick,{a,paused}})}){
+            const auto bytes=Encode(message);Decoder good;good.Append(bytes);
+            if(!check(good.Next()==std::optional<Message>(message),"menu pause request survives the authoritative input/echo codec"))return false;
+            auto bad=bytes;bad.back()=2;Decoder invalid;invalid.Append(bad);invalid.Next();
+            if(!check(invalid.failed(),"non-boolean menu pause metadata rejected"))return false;
+        }
+    }
     for(const auto& message:messages) {
         const auto wire=Encode(message);Decoder decoder;
         for(size_t i=0;i<wire.size();++i) {
@@ -1133,6 +1146,7 @@ bool TestOnlineSession() {
     if(!check(!host.SubmitStateDigest(identity.first_tick,identity.checkpoint) && !host.verified_tick(),"unconsumed input is not a completed world tick")) return false;
     for(uint64_t i=0;i<300;++i) {
         const auto tick=identity.first_tick+i;auto local=a;auto remote=b;local.buttons=uint16_t(i);remote.right_x=int16_t(int(i)-150);
+        local.menu_pause=i%7==1;remote.menu_pause=i%7==3;
         if(!check(host.SubmitLocal(tick,local) && !host.TakeFrame(frame) && client.SubmitLocal(tick,remote),"local input cannot advance an incomplete tick")) return false;
         Frame authoritative{},received{};bool host_taken=false,client_taken=false;
         if(!check(pump_until([&] {

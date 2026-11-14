@@ -22,6 +22,8 @@
 
 REXCVAR_DEFINE_BOOL(em1_trace_draw_state,false,"Debug","Bounded native draw depth and sampler observations after EM1 player readiness");
 REXCVAR_DECLARE(bool,em2_restore_ink_drips);
+REXCVAR_DECLARE(bool,em2_private_profile);
+REXCVAR_DECLARE(bool,em2_online_clothing_bind);
 
 namespace em2 {
 namespace {
@@ -330,6 +332,16 @@ bool Em2CommandProcessor::IssueDraw(rex::graphics::xenos::PrimitiveType type,uin
     static bool authored_lighting_reported=false;
     if(authored && !authored_lighting_reported){authored_lighting_reported=true;REXLOG_INFO("[em1] native Mickey SH bound: first=c{} actor={:08X} position={}/{}/{} ambient={}/{}/{}; guest constants restored after draw",first,authored->entity,authored->position[0],authored->position[1],authored->position[2],authored->coefficients[0][0],authored->coefficients[0][1],authored->coefficients[0][2]);}
     const bool accepted=RefreshLivePixelShader() && D3D12CommandProcessor::IssueDraw(type,count,indices,explicit_mode);
+    if(accepted && REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_online_clothing_bind) && active_pixel_shader_ && active_pixel_shader_->is_ucode_analyzed()){
+        struct RestoreTraceState {unsigned fp=_mm_getcsr();DWORD error=GetLastError();~RestoreTraceState(){_mm_setcsr(fp);SetLastError(error);}} restore_trace;
+        const auto a=register_file_->GetTextureFetch(0),b=register_file_->GetTextureFetch(1),c=register_file_->GetTextureFetch(2);
+        const auto& bindings=active_pixel_shader_->texture_bindings();
+        constexpr std::array slots{0u,1u,2u};const bool used=std::all_of(slots.begin(),slots.end(),[&](unsigned slot){return std::any_of(bindings.begin(),bindings.end(),[&](const auto& binding){return binding.fetch_constant==slot;});});
+        if(used && uint32_t(a.type)==2 && uint32_t(a.dimension)==1 && a.size_2d.width==255 && a.size_2d.height==255){
+            static std::vector<std::array<uint64_t,4>> seen;const std::array<uint64_t,4> key{active_pixel_shader_->ucode_data_hash(),(a.base_address<<12)&0x1FFFFFFFu,(b.base_address<<12)&0x1FFFFFFFu,(c.base_address<<12)&0x1FFFFFFFu};
+            if(seen.size()<256 && std::find(seen.begin(),seen.end(),key)==seen.end()){seen.push_back(key);REXLOG_INFO("Native Room clothing GPU draw sources: shader {:016X} diffuse {:08X} normal {:08X} specular {:08X} count {}; analyzed original material references all three fetches, accepted native draw",key[0],uint32_t(key[1]),uint32_t(key[2]),uint32_t(key[3]),count);}
+        }
+    }
     transfer_benchmark_draws+=accepted;
     if(accepted && count>=3)scene_draw_inputs_=CaptureSceneDrawInputs(active_vertex_shader_,active_pixel_shader_,*register_file_,GetCurrentFrame(),++scene_draw_serial_);
     if(scene_draw_inputs_ && !IsSceneColourRaster(*register_file_))scene_draw_inputs_.reset();

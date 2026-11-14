@@ -4,6 +4,8 @@
 #include "online_actor_frames.h"
 #include "online_actor_death.h"
 #include "online_actor_jump.h"
+#include "online_actor_roster.h"
+#include "online_behavior_trace.h"
 #include "guest_read_batch.h"
 #include "ppc_context.h"
 #include <rex/logging.h>
@@ -22,6 +24,8 @@
 PPC_EXTERN_FUNC(__imp__sub_82A3C930);
 PPC_EXTERN_FUNC(__imp__sub_82783CE8);
 PPC_EXTERN_FUNC(__imp__sub_8276B968);
+PPC_EXTERN_FUNC(__imp__sub_8276BA50);
+PPC_EXTERN_FUNC(__imp__sub_82A26B60);
 PPC_EXTERN_FUNC(__imp__sub_82732A18);
 PPC_EXTERN_FUNC(__imp__sub_827B58D0);
 PPC_EXTERN_FUNC(__imp__sub_82A69948);
@@ -63,6 +67,7 @@ bool Resolve(uint32_t registry,uint32_t handle,PPCContext& ctx,uint8_t* base,uin
     __imp__sub_82732A18(ctx,base);entity=ctx.r3.u32;return entity!=0;
 }
 bool Inspect(Actor& actor,PPCContext& ctx,uint8_t* base){
+    if(actor.action_user>1)return false;
     const auto registry=PPC_LOAD_U32(0x833DA7E4),manager=PPC_LOAD_U32(0x833DAB60);
     if(registry!=actor.registry || !Readable(manager,640,base) || !actor.handle ||
         PPC_LOAD_U32(manager+20)==actor.handle || PPC_LOAD_U32(manager+340)==actor.handle)return false;
@@ -196,7 +201,7 @@ Result MovementAdmission(uint64_t peer,const Action& action,PPCContext& ctx,uint
     if(!actor.enabled)return Result::Disabled;
     if(!Readable(action.action,4,base) || !std::isfinite(action.x) || !std::isfinite(action.y) ||
        std::abs(action.x)>1 || std::abs(action.y)>1)return Result::InvalidInput;
-    const auto uid=PPC_LOAD_U32(action.action),movement=PPC_LOAD_U32(0x833DAEB8);
+    const auto uid=PPC_LOAD_U32(action.action),movement=PPC_LOAD_U32(0x833DAEB8+actor.action_user*12);
     if(!movement || uid!=movement)return Result::UnsupportedAction;
     // These native Mickey tool/brush branches precede its ordinary Movement
     // branch and may affect shared resources. Never admit aliased authored IDs.
@@ -214,18 +219,36 @@ Result NativeCallbackFixture(uint64_t peer,const Action& action,const em2::net::
     callback(ctx,base);return Result::Applied;
 }
 }
-bool em2::net::RegisterOwnedActorInput(uint64_t peer,uint32_t handle,PPCContext& ctx,uint8_t* base,Actor& output){
-    Environment preserve;output={};if(!peer || !base)return false;
+bool em2::net::RegisterOwnedActorInput(uint64_t peer,uint32_t handle,PPCContext& ctx,uint8_t* base,Actor& output,unsigned action_user){
+    Environment preserve;output={};if(!peer || !base || action_user>1 || basis_update || replay)return false;
     {std::lock_guard lock(mutex);if(owner_thread && owner_thread!=GetCurrentThreadId())return false;}
-    Actor candidate;candidate.peer=peer;candidate.handle=handle;candidate.registry=PPC_LOAD_U32(0x833DA7E4);
+    Actor candidate;candidate.peer=peer;candidate.handle=handle;candidate.action_user=action_user;candidate.registry=PPC_LOAD_U32(0x833DA7E4);
     if(!Inspect(candidate,ctx,base))return false;
     std::lock_guard lock(mutex);
     for(const auto& actor:actors)if(actor.peer && (actor.peer==peer || actor.handle==handle || actor.entity==candidate.entity || actor.controller==candidate.controller || actor.listener==candidate.listener))return false;
     const auto free=std::find_if(actors.begin(),actors.end(),[](const Actor& value){return !value.peer;});if(free==actors.end())return false;
+    if(generation==UINT64_MAX)return false;
+    // The registry itself persists across title/level reloads. Its address is
+    // not a session epoch: after the last actor is retired, the next admitted
+    // group owns a fresh input clock. Never rewind a group with live members.
+    if(std::none_of(actors.begin(),actors.end(),[](const Actor& value){return value.peer!=0;})){
+        basis_clock={};basis_entries={};
+    }
     owner_thread=GetCurrentThreadId();candidate.generation=++generation;candidate.enabled=true;*free=candidate;output=candidate;return true;
 }
 bool em2::net::SetOwnedActorInputEnabled(uint64_t peer,bool enabled){std::lock_guard lock(mutex);if(owner_thread!=GetCurrentThreadId())return false;for(auto& actor:actors)if(actor.peer==peer && peer){actor.enabled=enabled;for(auto& entry:basis_entries)if(entry.actor.peer==peer)entry={};return true;}return false;}
+bool em2::net::SetOwnedActorInputEnabled(uint64_t peer,uint64_t actor_generation,bool enabled){
+    std::lock_guard lock(mutex);if(owner_thread!=GetCurrentThreadId() || !peer || !actor_generation)return false;
+    for(auto& actor:actors)if(actor.peer==peer){if(actor.generation!=actor_generation)return false;
+        actor.enabled=enabled;for(auto& entry:basis_entries)if(entry.actor.peer==peer && entry.actor.generation==actor_generation)entry={};return true;}
+    return false;
+}
 void em2::net::UnregisterOwnedActorInput(uint64_t peer){std::lock_guard lock(mutex);if(owner_thread!=GetCurrentThreadId())return;for(auto& actor:actors)if(actor.peer==peer && peer)actor={};for(auto& entry:basis_entries)if(entry.actor.peer==peer)entry={};}
+bool em2::net::UnregisterOwnedActorInput(uint64_t peer,uint64_t actor_generation){
+    std::lock_guard lock(mutex);if(owner_thread!=GetCurrentThreadId() || !peer || !actor_generation)return false;
+    for(auto& actor:actors)if(actor.peer==peer){if(actor.generation!=actor_generation)return false;actor={};break;}
+    for(auto& entry:basis_entries)if(entry.actor.peer==peer && entry.actor.generation==actor_generation)entry={};return true;
+}
 void em2::net::ResetOwnedActorInputs(){std::lock_guard lock(mutex);if(owner_thread && owner_thread!=GetCurrentThreadId())return;actors={};basis_entries={};basis_clock={};owner_thread=0;}
 bool em2::net::OwnedActorInputFor(uint64_t peer,PPCContext& ctx,uint8_t* base,Actor& output){Environment preserve;output={};auto found=ByPeer(peer);if(!found || !Owner() || !Current(*found,ctx,base))return false;output=*found;return true;}
 bool em2::net::OwnedActorInputForController(uint32_t controller,PPCContext& ctx,uint8_t* base,Actor& output){
@@ -287,6 +310,13 @@ em2::net::ActorInputResult em2::net::ReplayOwnedActorMovement(uint64_t peer,cons
     }
     return Result::Applied;
 }
+bool em2::net::OwnedActorBasisConsumed(uint64_t peer,uint64_t actor_generation,uint64_t tick){
+    if(!Owner())return false;std::lock_guard lock(mutex);
+    if(!basis_clock.valid || basis_clock.tick!=tick)return false;
+    for(const auto& entry:basis_entries)if(entry.staged && entry.actor.peer==peer && entry.actor.generation==actor_generation && entry.basis.tick==tick)
+        return entry.input_claimed && entry.consumed;
+    return false;
+}
 em2::net::ActorInputResult em2::net::detail::DispatchOwnedActorJump(uint64_t peer,const em2::net::NativeActorJump& command,PPCContext& ctx,uint8_t* base){
     // Preserve the exact caller bytes, including ABI padding. This backend is
     // callable only during the Jump module's private, exact-command permit.
@@ -317,10 +347,29 @@ em2::net::ActorInputResult em2::net::detail::DispatchOwnedActorJump(uint64_t pee
     // Jump input does not consume the independently staged view/motion update.
     return Result::Applied;
 }
+em2::net::ActorInputResult em2::net::detail::DispatchOwnedActorButton(uint64_t peer,uint64_t actor_generation,uint64_t tick,const Action& action,PPCContext& ctx,uint8_t* base,uint32_t& native_result){
+    ContextScope preserve(ctx);native_result=0;
+    if(!OwnedButtonDispatchAuthorized(peer,actor_generation,tick,action))return Result::InvalidContext;
+    if(!Owner())return Result::WrongThread;
+    if(replay || basis_update)return Result::Nested;
+    const auto actor=ByPeer(peer);if(!actor)return Result::Unregistered;
+    if(actor->generation!=actor_generation || !Current(*actor,ctx,base))return Result::Stale;
+    if(!actor->enabled)return Result::Disabled;
+    if(!Readable(action.action,436,base) || PPC_LOAD_U32(action.action+80)>3 || !std::isfinite(action.x) || !std::isfinite(action.y))return Result::InvalidInput;
+    const auto uid=PPC_LOAD_U32(action.action);
+    if(uid==PPC_LOAD_U32(0x833DAEB8+actor->action_user*12) || uid==PPC_LOAD_U32(0x833DAEBC+actor->action_user*12) || uid==PPC_LOAD_U32(0x833DAEC0+actor->action_user*12))return Result::UnsupportedAction;
+    uint32_t motion=0,reference=0;const auto context=BasisContext(*actor,ctx,base,motion,reference);if(context!=Result::Applied)return context;
+    const auto stage=BasisForComponent(actor->controller+24,ctx,base,false);
+    if(!stage || !stage->input_claimed || stage->consumed || stage->basis.tick!=tick || stage->actor.generation!=actor_generation || stage->motion!=motion || stage->reference!=reference)return Result::InvalidTick;
+    const Replay state{*actor};ReplayScope scope(state);
+    ctx.r3.u64=actor->listener;ctx.r4.u64=action.event;ctx.r5.u64=action.action;ctx.f1.f64=action.x;ctx.f2.f64=action.y;
+    __imp__sub_82A3C930(ctx,base);native_result=ctx.r3.u32;
+    return Result::Applied;
+}
 em2::net::ActorInputResult em2::net::ReplayOwnedActorAction(uint64_t peer,const Action& action,const ActorLookBasis& basis,PPCContext& ctx,uint8_t* base){
     Environment preserve;Actor actor;const auto admitted=AdmitNativeActorAction(peer,action,basis,ctx,base,actor);
     if(admitted!=Result::Applied)return admitted;
-    if(PPC_LOAD_U32(action.action)!=PPC_LOAD_U32(0x833DAEB8))return Result::UnsupportedAction;
+    if(PPC_LOAD_U32(action.action)!=PPC_LOAD_U32(0x833DAEB8+actor.action_user*12))return Result::UnsupportedAction;
     // Even an orthonormal peer basis is NOT permission to let the later native
     // NavigationInput task resolve its view through a retail two-slot camera.
     // Only ReplayOwnedActorMovement can authorize the proved staged-tick route.
@@ -329,6 +378,39 @@ em2::net::ActorInputResult em2::net::ReplayOwnedActorAction(uint64_t peer,const 
     return Result::BasisRouteUnverified;
 }
 bool em2::net::SuppressOwnedActorInput(PPCContext& ctx,uint8_t* base){if(!Quarantine(ctx,base))return false;ctx.r3.u64=0;return true;}
+bool em2::net::ApplyOwnedActorTaskPermissions(uint64_t peer,PPCContext& ctx,uint8_t* base){
+    ContextScope preserve(ctx);
+    auto reject=[&](const char* reason,uint32_t value=0){REXLOG_ERROR("Owned actor task policy preflight: peer {} rejected {} value {:08X}",peer,reason,value);return false;};
+    if(!Owner() || replay || basis_update)return reject("owner or active dispatch");
+    const auto actor=ByPeer(peer);
+    if(!actor || !actor->enabled || !Current(*actor,ctx,base))return reject("actor identity");
+    const auto manager=PPC_LOAD_U32(0x833DAB60),collection=actor->controller+156;
+    if(!Readable(manager,640,base) || actor->action_user>1)return reject("manager or action profile",manager);
+    const auto buckets=PPC_LOAD_U32(collection+16),count=PPC_LOAD_U32(collection+20);
+    if(!count || count>4096 || !Readable(buckets,size_t(count)*4,base))return reject("bucket bounds",count);
+    std::array<uint32_t,256> visited{};unsigned seen=0;
+    for(unsigned i=0;i<count;++i){auto node=PPC_LOAD_U32(buckets+i*4);
+        while(node){
+            if(seen==visited.size() || !Readable(node,12,base) || std::find(visited.begin(),visited.begin()+seen,node)!=visited.begin()+seen)return false;
+            visited[seen++]=node;
+            const auto task=PPC_LOAD_U32(node+4);
+            if(!Readable(task,12,base) || PPC_LOAD_U32(task+4)!=actor->entity)return reject("task owner",task);
+            const auto table=PPC_LOAD_U32(task);
+            if(!Readable(table,72,base))return reject("task vtable",table);
+            const auto name_method=PPC_LOAD_U32(table+68);
+            if(name_method<0x82300000 || name_method>=0x83300000)return reject("task name method",name_method);
+            node=PPC_LOAD_U32(node+8);
+        }
+    }
+    // Retail human initialization82A2725C uses this exact existing-policy
+    // reader.82A26990 instead REGISTERS permissions and is deliberately absent.
+    ctx.r3.u64=manager;ctx.r4.u64=actor->action_user;ctx.r5.u64=collection;
+    ctx.r6.u64=1;ctx.r7.u64=0;
+    __imp__sub_82A26B60(ctx,base);
+    const auto current=ByPeer(peer);
+    return current && current->enabled && current->generation==actor->generation &&
+        current->entity==actor->entity && Current(*current,ctx,base);
+}
 PPC_FUNC_IMPL(sub_8276B968){
     // Only this exact base human movement query, while replaying this actor,
     // can resolve to its owned entity. All normal native routes stay untouched.
@@ -337,9 +419,24 @@ PPC_FUNC_IMPL(sub_8276B968){
     }
     __imp__sub_8276B968(ctx,base);
 }
+PPC_FUNC_IMPL(sub_8276BA50){
+    // The shared human handler classifies its action names using the retail
+    // P2-identity query. Extras have no retail record: during this exact owned
+    // replay only, classify by the actor's pinned native action profile.
+    if(!replay || uint32_t(ctx.lr)!=0x82A3C9C8 || ctx.r30.u32!=replay->actor.listener ||
+       ctx.r4.u32!=replay->actor.entity || ctx.r5.u32!=1){__imp__sub_8276BA50(ctx,base);return;}
+    const auto owned=replay->actor;const auto manager=ctx.r3.u32;
+    __imp__sub_8276BA50(ctx,base);
+    bool admitted=false;
+    {ContextScope preserve(ctx);const auto current=ByPeer(owned.peer);
+        admitted=current && current->enabled && current->generation==owned.generation &&
+            current->action_user==owned.action_user && manager==PPC_LOAD_U32(0x833DAB60) && Current(*current,ctx,base);}
+    if(admitted)ctx.r3.u64=owned.action_user==1;
+}
 namespace {void ContinueOwnedBasisController(PPCContext& ctx,uint8_t* base){UpdateBasisController(ctx,base,__imp__sub_827835A8);}}
 PPC_FUNC_IMPL(sub_827835A8){em2::net::UpdateRetailBasisController(ctx,base,ContinueOwnedBasisController);}
-PPC_FUNC_IMPL(sub_827874B0){if(!em2::net::ApplyRetailBasisMotion(ctx,base,__imp__sub_827874B0))ApplyBasisMotion(ctx,base,__imp__sub_827874B0);}
+namespace {void ContinueBasisMotion(PPCContext& ctx,uint8_t* base){if(!em2::net::ApplyRetailBasisMotion(ctx,base,__imp__sub_827874B0))ApplyBasisMotion(ctx,base,__imp__sub_827874B0);}}
+PPC_FUNC_IMPL(sub_827874B0){em2::net::RunNativeMotionInputTrace(ctx,base,ContinueBasisMotion);}
 
 namespace {
 void FixtureBase(PPCContext& ctx,uint8_t* base){if(!em2::net::SuppressOwnedActorInput(ctx,base))__imp__sub_82783CE8(ctx,base);}
@@ -820,7 +917,25 @@ bool em2::net::TestOwnedActorInput(){
         {
             struct PreserveJumpFixtureStages {BasisClock clock=basis_clock;decltype(basis_entries) entries=basis_entries;
                 ~PreserveJumpFixtureStages(){basis_clock=clock;basis_entries=entries;}} preserve_jump_fixture_stages;
-            if(!TestOwnedActorJumps(ctx,base,a.peer,b.peer))return false;
+            if(!TestOwnedActorJumps(ctx,base,a.peer,b.peer,FixtureBoundedOwnedController))return false;
+        }
+        {
+            struct PreserveProfileStages {BasisClock clock=basis_clock;decltype(basis_entries) entries=basis_entries;
+                ~PreserveProfileStages(){basis_clock=clock;basis_entries=entries;}} preserve_profile_stages;
+            const auto peer=b.peer,handle=uint64_t(b.handle);
+            UnregisterOwnedActorInput(peer);
+            Actor rejected;
+            if(!check(!RegisterOwnedActorInput(peer,uint32_t(handle),ctx,base,rejected,2) &&
+                RegisterOwnedActorInput(peer,uint32_t(handle),ctx,base,b,1) && b.action_user==1,
+                "owned actors bind one of two native action profiles independently of room peer IDs"))return false;
+            if(!check(ValidateOwnedActorMovement(b.peer,first,ctx,base)==Result::UnsupportedAction,
+                "secondary owned profile cannot consume a primary Movement action"))return false;
+            const auto old_secondary=PPC_LOAD_U32(0x833DAEC4);PPC_STORE_U32(0x833DAEC4,0x8207F5C4);
+            const bool movement_ok=TestOwnedMovementFrames(ctx,base,a.peer,b.peer,FixtureBoundedOwnedController);
+            PPC_STORE_U32(0x833DAEC4,old_secondary);
+            if(!movement_ok || !TestOwnedActorJumps(ctx,base,a.peer,b.peer,FixtureBoundedOwnedController))return false;
+            UnregisterOwnedActorInput(peer);
+            if(!RegisterOwnedActorInput(peer,uint32_t(handle),ctx,base,b))return false;
         }
         // Restore initial per-peer cache values through ORIGINAL base callback
         // for the following historical lifecycle assertions, not manual writes.
@@ -861,6 +976,50 @@ bool em2::net::TestOwnedActorInput(){
     std::memcpy(base+actual.r1.u32-4096,original_stack.data(),original_stack.size());FixtureMickey(actual,base);
     if(!check(!std::memcmp(&native,&actual,sizeof(native)) && !std::memcmp(base+actual.r1.u32-4096,expected_stack.data(),expected_stack.size()) && _mm_getcsr()==native_csr,
         "unowned/retail derived listener retains exact native context/stack/FP behavior"))return false;
+    ResetOwnedActorInputs();
+    {
+        OwnedActorRoster group;
+        if(!check(group.Add(3,300,1,0,ctx,base) && group.Add(16,400,2,1,ctx,base) && group.mask()==0x8004 && group.actors().size()==2,
+            "native roster maps lobby peers3/16 to independent real handles and two native profiles"))return false;
+        OwnedActorInput first_group,second_group;
+        if(!check(OwnedActorInputFor(300,ctx,base,first_group) && OwnedActorInputFor(400,ctx,base,second_group) &&
+            !first_group.enabled && !second_group.enabled && !group.Add(3,500,1,0,ctx,base) && !group.Add(4,300,2,0,ctx,base),
+            "all newly registered group actors stay disabled; duplicate lobby/actor ownership cannot enter admission"))return false;
+        OwnedMovementFrames unconfigured;
+        if(!check(!group.Activate(0x0004,1,ctx,base) && !group.BindFrames(unconfigured,ctx,base) &&
+            !group.CompleteRetirement(ctx,base) && !group.AbandonDestroyedWorld(ctx,base),
+            "incomplete roster masks, unactivated frame binding and live-world abandonment are rejected"))return false;
+        if(!check(group.BeginRetirement(ctx,base) && !group.CompleteRetirement(ctx,base) &&
+            !SetOwnedActorInputEnabled(300,first_group.generation+1,true) && !UnregisterOwnedActorInput(300,first_group.generation+1),
+            "group retirement waits for real native handle removal and rejects a different generation"))return false;
+        PPC_STORE_U32(0x833DA7E4,registry+4);
+        if(!check(group.AbandonDestroyedWorld(ctx,base) && ForgetOwnedActorJump(300,first_group.generation,ctx,base),
+            "world teardown forgets registered ownership and absent Jump history without stale native reference calls"))return false;
+        PPC_STORE_U32(0x833DA7E4,registry);
+        OwnedActorInput replacement;
+        if(!RegisterOwnedActorInput(300,1,ctx,base,replacement))return false;
+        if(!check(!SetOwnedActorInputEnabled(300,first_group.generation,false) && !UnregisterOwnedActorInput(300,first_group.generation) &&
+            OwnedActorInputFor(300,ctx,base,replacement) && replacement.enabled,
+            "late cleanup from the old group cannot disable or unregister a reused native peer"))return false;
+    }
+    OwnedActorInput after_group;
+    if(!check(OwnedActorInputFor(300,ctx,base,after_group) && after_group.enabled,"retired group destruction preserves a later actor generation"))return false;
+    {
+        const auto old_ready=PPC_LOAD_U8(manager+357),old_pause=PPC_LOAD_U8(0x26000+102);
+        struct RestoreReady{uint8_t* base;uint8_t ready,paused;~RestoreReady(){PPC_STORE_U8(manager+357,ready);PPC_STORE_U8(0x26000+102,paused);}}restore_ready{base,old_ready,old_pause};
+        PPC_STORE_U8(manager+357,1);PPC_STORE_U8(0x26000+102,0);
+        if(!check(BeginOwnedActorBasisTick(registry,500,ctx,base),"clock re-entry fixture has a ready native world and a completed prior clock"))return false;
+        OwnedActorInput companion,fresh;
+        if(!check(RegisterOwnedActorInput(301,2,ctx,base,companion) &&
+            !BeginOwnedActorBasisTick(registry,1,ctx,base),"adding a peer cannot rewind a live group's authoritative clock"))return false;
+        if(!check(UnregisterOwnedActorInput(300,after_group.generation) &&
+            !BeginOwnedActorBasisTick(registry,1,ctx,base),"retiring one peer preserves the surviving group's clock"))return false;
+        if(!check(UnregisterOwnedActorInput(301,companion.generation) &&
+            RegisterOwnedActorInput(302,1,ctx,base,fresh) && fresh.generation>companion.generation &&
+            BeginOwnedActorBasisTick(registry,1,ctx,base) && !BeginOwnedActorBasisTick(registry,1,ctx,base) &&
+            !UnregisterOwnedActorInput(302,after_group.generation),
+            "fully retired group permits a fresh session clock, with monotonic actor generations and duplicate/stale rejection"))return false;
+    }
     ResetOwnedActorInputs();
     REXLOG_INFO("Owned actor input passed {} native registry/controller/quarantine, original action, camera projection and native motion/basis checks: independent actor samples/views, native world vectors/smoothing/permission flags, tick/generation/context guards, exact native callsite/stack restoration and retail fallback; exact Movement-only original derived dispatch available under staged tick contract; generic actions remain BLOCKED; not sixteen-player gameplay",checks);
     return true;

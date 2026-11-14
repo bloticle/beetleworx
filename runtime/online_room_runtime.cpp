@@ -1,5 +1,10 @@
 #include "online_room_runtime.h"
 #include "online_room_gameplay.h"
+#include "online_native_roster.h"
+#include "online_native_menu.h"
+#include "online_chat.h"
+#include "online_voice_probe.h"
+#include "online_voice_runtime.h"
 #include <rex/kernel/kernel_state.h>
 #include <rex/input/input_system.h>
 #include "online_world_random.h"
@@ -20,11 +25,16 @@
 #include <optional>
 #include <thread>
 
+REXCVAR_DECLARE(bool,em2_private_profile);
+REXCVAR_DEFINE_BOOL(em2_probe_room_leave_boundary,false,"Debug","Private native lobby QA only: read stopped-session native update completion eligibility for a future leave; no state restoration");
 REXCVAR_DECLARE(bool,em2_online_auto_continue);
+REXCVAR_DECLARE(bool,em2_online_clothing_bind);
+REXCVAR_DECLARE(bool,em2_room_native_buttons);
 namespace em2::net {
 namespace {
 using Clock=std::chrono::steady_clock;
 std::atomic<bool> retained_room_active{false};
+std::atomic<bool> loads_cancelled{false};
 struct Environment {unsigned csr=_mm_getcsr();DWORD error=GetLastError();~Environment(){_mm_setcsr(csr);SetLastError(error);}};
 struct Owner {
     std::unique_ptr<Room> room;
@@ -36,8 +46,13 @@ struct Owner {
     std::atomic<DWORD> thread{0};
     std::atomic<bool> loaded_waiting{false};
     std::atomic<bool> failure_trace_dumped{false};
+    std::mutex diagnostics_mutex;
+    bool diagnostics_closed=false;
+    std::string leave_boundary_note;
     unsigned device=0;
     bool profile_claimed=false,continue_claimed=false,world_reported=false;
+    bool menu_preparation=false;
+    uint64_t loaded_generation=0;
     std::optional<std::array<uint8_t,32>> loaded_world;
     RoomBootstrapGate::ReadinessProbe readiness=nullptr;
     std::optional<Clock::time_point> loading_poll;
@@ -47,9 +62,14 @@ struct Owner {
     NativeSessionStatus Status(){std::lock_guard lock(status_mutex);return status;}
     void Publish(NativeSessionState state,std::string error={},InputWait wait=InputWait::None){
         std::lock_guard lock(status_mutex);status.state=state;status.error=std::move(error);status.wait=wait;
-        if(state==NativeSessionState::None)status.continue_requested=status.profile_requested=status.save_notice_requested=false;
+        if(state==NativeSessionState::None){status.continue_requested=status.profile_requested=status.save_notice_requested=false;status.diagnostic_report.clear();}
     }
     void Fail(std::string error){
+        std::lock_guard diagnostics_lock(diagnostics_mutex);
+        if(diagnostics_closed)return;
+        PumpOnlineChat(nullptr);
+        PumpPrivateOnlineVoice(nullptr);
+        PumpOnlineVoice(nullptr);
         // The retained history is simulation-thread TLS. A prelaunch transport
         // worker must never inspect it or consume the eventual owner's dump.
         // This reads recorded values only, without a guest callback/context.
@@ -57,6 +77,18 @@ struct Owner {
            !failure_trace_dumped.exchange(true,std::memory_order_acq_rel)){
             Environment preserve_diagnostics;
             try{em2::DumpOnlineRandomTraceHistory();}catch(...){/* Keep the original failure authoritative. */}
+        }
+        // A later callback may arrive after a transport failure. Preserve its
+        // first error/report, while still allowing the native owner above to
+        // drain its TLS history if the failure began on the prelaunch worker.
+        if(Status().state==NativeSessionState::Failed)return;
+        if(room){
+            Environment preserve_report;
+            try{
+                auto report=FormatRoomDiagnosticSnapshot(room->diagnostic_snapshot());
+                REXLOG_ERROR("Native Room failure context: {}",report);
+                std::lock_guard lock(status_mutex);status.diagnostic_report=std::move(report);
+            }catch(...){/* Report failure must not replace the authoritative session failure. */}
         }
         initialization.Fail();loaded_waiting.store(false,std::memory_order_release);
         if(room)room->Disconnect();
@@ -103,6 +135,9 @@ std::optional<std::array<uint8_t,32>> LoadedWorldToken(const Room& room){
 bool PollOwned(Owner& owner,Clock::time_point now){
     if(!owner.room || owner.Status().state==NativeSessionState::Failed)return false;
     owner.room->Poll(now);
+    PumpPrivateOnlineVoice(owner.room.get());
+    PumpOnlineVoice(owner.room.get());
+    PumpOnlineChat(owner.room.get());
     const auto state=owner.room->state();
     if(state!=RoomState::Loading && state!=RoomState::Bootstrapping && state!=RoomState::Running){
         owner.Fail(owner.room->error().empty()?"The Room disconnected during native startup.":owner.room->error());return false;
@@ -116,17 +151,29 @@ bool AdoptNativeRoom(std::unique_ptr<Room>& room,unsigned device){
     if(!room || device>=2 || owner.room || NativeRoomActive() || LegacyNativeSessionActive() || RoomBootstrapActive() || !Frozen(*room))return false;
     if(!owner.initialization.Arm(room->identity()))return false;
     owner.room=std::move(room);owner.device=device;owner.thread.store(0,std::memory_order_release);owner.loaded_waiting.store(false,std::memory_order_release);
-    owner.profile_claimed=owner.continue_claimed=owner.world_reported=false;owner.loaded_world.reset();owner.readiness=nullptr;owner.loading_poll.reset();
+    owner.menu_preparation=false;owner.profile_claimed=owner.continue_claimed=owner.world_reported=false;owner.loaded_world.reset();owner.readiness=nullptr;owner.loading_poll.reset();
+    owner.loaded_generation=0;loads_cancelled.store(false,std::memory_order_release);
+    {std::lock_guard lock(owner.diagnostics_mutex);owner.diagnostics_closed=false;}
     owner.prelaunch_polls.store(0,std::memory_order_release);owner.failure_trace_dumped.store(false,std::memory_order_release);
     owner.Publish(NativeSessionState::WaitingForWorld);retained_room_active.store(true,std::memory_order_release);em2::CancelQueuedGameLua();return true;
 }
 bool NativeRoomActive()noexcept{return retained_room_active.load(std::memory_order_acquire);}
+void CancelNativeRoomLoads()noexcept{loads_cancelled.store(true,std::memory_order_release);}
+bool NativeRoomLoadsCancelled()noexcept{return loads_cancelled.load(std::memory_order_acquire);}
+std::optional<std::array<uint8_t,32>> NativeRoomLoadedWorldToken(){auto& owner=Runtime();return owner.room && Bound(owner)?LoadedWorldToken(*owner.room):std::nullopt;}
+void CloseNativeRoomDiagnostics(){
+    auto& owner=Runtime();
+    std::lock_guard lock(owner.diagnostics_mutex);
+    owner.diagnostics_closed=true;
+}
 NativeSessionStatus NativeRoomStatus(){return Runtime().Status();}
 NativeSessionTiming NativeRoomTiming(){
     if(!NativeRoomActive())return {};
     auto& owner=Runtime();return {true,owner.Status().state==NativeSessionState::Failed || owner.loaded_waiting.load(std::memory_order_acquire) || RoomBootstrapHalted() || NativeRoomGameplayHalted()};
 }
 bool BindNativeRoomThread(){auto& owner=Runtime();return owner.room && ClaimThread(owner);}
+std::optional<unsigned> NativeRoomDisplaySlot(){auto& owner=Runtime();if(!NativeRoomActive() || !Bound(owner) || !owner.room)return {};
+    for(const auto& player:owner.room->lobby().players)if(player.peer==owner.room->local_peer())return player.character==LobbyCharacter::Mickey?0u:1u;return {};}
 bool StartNativeRoomPrelaunchPolling(){
     auto& owner=Runtime();if(!owner.room || owner.thread.load(std::memory_order_acquire) || owner.prelaunch.joinable() || owner.Status().state!=NativeSessionState::WaitingForWorld)return false;
     try{owner.prelaunch=std::jthread([&owner](std::stop_token stop){
@@ -154,7 +201,8 @@ bool UpdateNativeRoomSession(uint8_t* base,bool advance){
     }
     if(!advance || !base)return true;
     if(!owner.world_reported){
-        if(!base || !owner.Status().continue_requested || (!em2::NativeOnlineJoinAllowed(base) && !em2::NativeCoopReady(base)))return true;
+        const bool loaded=owner.loaded_generation && owner.loaded_generation==em2::CurrentNativeLoadGeneration();
+        if(!base || !owner.Status().continue_requested || (!loaded && !em2::NativeOnlineJoinAllowed(base) && !em2::NativeCoopReady(base)))return true;
         const auto token=LoadedWorldToken(*owner.room);if(!token)return true;
         if(!owner.room->BootstrapWorldReady(*token)){owner.Fail("Could not agree on the loaded native Room world.");return true;}
         owner.world_reported=true;owner.loaded_world=token;
@@ -163,7 +211,8 @@ bool UpdateNativeRoomSession(uint8_t* base,bool advance){
     owner.loaded_waiting.store(false,std::memory_order_release);
     if(owner.room->state()!=RoomState::Bootstrapping){owner.Fail("Native Room activated before its raw startup gate was attached.");return true;}
     const auto current=LoadedWorldToken(*owner.room);
-    if(!current || current!=owner.loaded_world || (!em2::NativeOnlineJoinAllowed(base) && !em2::NativeCoopReady(base))){
+    if(!current || current!=owner.loaded_world ||
+       (!(owner.loaded_generation && owner.loaded_generation==em2::CurrentNativeLoadGeneration()) && !em2::NativeOnlineJoinAllowed(base) && !em2::NativeCoopReady(base))){
         owner.Fail("The loaded native world changed before Room bootstrap admission.");return true;
     }
     // This boundary belongs after the preceding native post-update. Do not
@@ -174,12 +223,38 @@ bool UpdateNativeRoomSession(uint8_t* base,bool advance){
     owner.gate.SetJoining(!base || !em2::NativeCoopReady(base));
     owner.Publish(NativeSessionState::Joining,{},InputWait::Peer);return true;
 }
+void NotifyNativeRoomLevelLoaded(std::string_view destination){
+    auto& owner=Runtime();
+    if(!owner.room || !Bound(owner) || owner.gate.active() ||
+       owner.Status().state!=NativeSessionState::WaitingForWorld || destination.empty() || destination.starts_with("mainmenu."))return;
+    owner.loaded_generation=em2::CurrentNativeLoadGeneration();
+    REXLOG_INFO("Native Room startup loaded boundary: '{}' generation {}; world barrier pending",destination,owner.loaded_generation);
+}
+void ProbeNativeRoomLeaveBoundary(PPCContext& ctx,uint8_t* base,bool completed){
+    Environment environment;
+    if(!REXCVAR_GET(em2_probe_room_leave_boundary) || !REXCVAR_GET(em2_private_profile) || !NativeOnlineMenuQaActive())return;
+    auto& owner=Runtime();if(!owner.room || !Bound(owner) || owner.Status().state!=NativeSessionState::Failed)return;
+    const auto blocker=completed?owner.gameplay.LeaveBoundaryBlocker(base):"outer native finish is still pending";
+    const std::string note=blocker?blocker:"completed native update";
+    if(note==owner.leave_boundary_note)return;owner.leave_boundary_note=note;
+    const auto physical=owner.gameplay.last_native_completed_tick();
+    REXLOG_INFO("Native Room leave boundary: update eligible {} reason '{}' committed {} physical {} pending {} caller {:08X}; no teardown or restoration attempted",
+        blocker==nullptr,note,owner.gameplay.committed_tick(),physical?std::to_string(*physical):"none",owner.gameplay.completion_pending(),uint32_t(ctx.lr));
+}
+std::unique_ptr<NativeRoomActors> TakeNativeRoomActorsForTitleLeave(PPCContext& ctx,uint8_t* base){
+    auto& owner=Runtime();
+    if(!owner.room || !Bound(owner) || owner.Status().state!=NativeSessionState::Failed || NativeRoomLoadsCancelled())return {};
+    return owner.gameplay.PrepareTitleUnload(ctx,base);
+}
 void ReleaseNativeRoomSession(){
     Environment environment;auto& owner=Runtime();if(!owner.room && !NativeRoomActive())return;
     owner.StopPrelaunch();owner.gameplay.Detach();const bool gate_owned=owner.gate.active();owner.gate.Detach();if(!gate_owned)em2::EndNativeOnlineRandom();em2::SetOnlineJoinControls(false);
-    if(owner.room)owner.room->Disconnect();owner.room.reset();owner.initialization.Release();
-    owner.thread.store(0,std::memory_order_release);owner.loaded_waiting.store(false,std::memory_order_release);owner.loading_poll.reset();
-    owner.profile_claimed=owner.continue_claimed=owner.world_reported=false;owner.loaded_world.reset();owner.readiness=nullptr;owner.Publish(NativeSessionState::None);retained_room_active.store(false,std::memory_order_release);
+    PumpOnlineChat(nullptr);
+    PumpPrivateOnlineVoice(nullptr);
+    PumpOnlineVoice(nullptr);
+    if(owner.room){ForgetPrivateNativeMenuRoom(owner.room.get());owner.room->Disconnect();}owner.room.reset();owner.initialization.Release();
+    owner.leave_boundary_note.clear();owner.thread.store(0,std::memory_order_release);owner.loaded_waiting.store(false,std::memory_order_release);owner.loading_poll.reset();
+    owner.menu_preparation=false;owner.profile_claimed=owner.continue_claimed=owner.world_reported=false;owner.loaded_generation=0;owner.loaded_world.reset();owner.readiness=nullptr;owner.Publish(NativeSessionState::None);retained_room_active.store(false,std::memory_order_release);
 }
 bool RoomPrepareWorldRandom(std::string_view destination){
     Environment environment;auto& owner=Runtime();if(!NativeRoomActive())return false;
@@ -193,7 +268,7 @@ bool RoomPreparePlayerRandom(uint32_t slot,uint32_t mode){
 }
 bool RoomClaimProfile(unsigned& device){
     auto& owner=Runtime();if(!NativeRoomActive() || !Bound(owner))return false;
-    std::lock_guard lock(owner.status_mutex);if(owner.status.state!=NativeSessionState::WaitingForWorld || owner.profile_claimed)return false;
+    std::lock_guard lock(owner.status_mutex);if(owner.status.state!=NativeSessionState::WaitingForWorld || owner.profile_claimed || owner.menu_preparation)return false;
     owner.profile_claimed=true;device=owner.device;return true;
 }
 void RoomFinishProfile(bool accepted){
@@ -202,7 +277,7 @@ void RoomFinishProfile(bool accepted){
 }
 bool RoomClaimContinue(){
     auto& owner=Runtime();if(!NativeRoomActive() || !Bound(owner))return false;
-    std::lock_guard lock(owner.status_mutex);if(owner.status.state!=NativeSessionState::WaitingForWorld || owner.continue_claimed)return false;
+    std::lock_guard lock(owner.status_mutex);if(owner.status.state!=NativeSessionState::WaitingForWorld || owner.continue_claimed || owner.menu_preparation)return false;
     owner.continue_claimed=true;return true;
 }
 void RoomFinishContinue(bool accepted){
@@ -226,6 +301,33 @@ bool EnableNativeRoomGameplay(unsigned physical){
     if(!input || !owner.gameplay.Configure(*owner.room,owner.gate,*input,physical))return false;
     owner.readiness=NativeRoomGameplayReadiness;
     return true;
+}
+bool BeginNativeRoomMenuPreparation(std::unique_ptr<Room>& room){
+    if(!AdoptNativeRoom(room))return false;
+    auto& owner=Runtime();
+    if(!BindNativeRoomThread()){owner.Fail("The native menu could not claim Room ownership.");return false;}
+    owner.menu_preparation=true;
+    REXCVAR_SET(em2_online_clothing_bind,true);
+    REXCVAR_SET(em2_room_native_buttons,true);
+    if(!EnableNativeRoomGameplay(0)){owner.Fail("The native menu could not configure Room gameplay.");return false;}
+    return true;
+}
+bool FinishNativeRoomMenuPreparation(){
+    auto& owner=Runtime();
+    if(!owner.menu_preparation || !Bound(owner) || owner.gate.active() ||
+       owner.Status().state!=NativeSessionState::WaitingForWorld)return false;
+    {std::lock_guard lock(owner.status_mutex);owner.profile_claimed=owner.continue_claimed=true;owner.status.profile_requested=true;}
+    owner.menu_preparation=false;RoomFinishContinue(true);return true;
+}
+void FailNativeRoomMenuPreparation(const std::string& error){
+    auto& owner=Runtime();if(owner.menu_preparation && Bound(owner))owner.Fail(error);
+}
+HostCampaignRecord RecordNativeRoomHostCampaign(const std::filesystem::path& normal,const std::filesystem::path& session){
+    auto& owner=Runtime();
+    if(!owner.menu_preparation || !Bound(owner) || !owner.room || owner.gate.active() || owner.Status().state!=NativeSessionState::WaitingForWorld)
+        return {{},"The native Room owner is not ready to register its campaign."};
+    if(owner.room->local_peer()!=1)return {};
+    return RecordValidatedNativeHostCampaign(normal,session,*owner.room);
 }
 bool TestNativeRoomSession(){
     bool ok=true;unsigned checks=0;auto check=[&](bool value,const char* why){++checks;if(!value){REXLOG_ERROR("Native Room owner: {}",why);ok=false;}return value;};
@@ -290,9 +392,17 @@ bool TestNativeRoomSession(){
     const auto lost=Clock::now()+std::chrono::seconds(3);while(NativeRoomStatus().state!=NativeSessionState::Failed && Clock::now()<lost){UpdateNativeRoomSession(nullptr);std::this_thread::sleep_for(std::chrono::milliseconds(1));}
     check(NativeRoomActive() && NativeRoomStatus().state==NativeSessionState::Failed && NativeRoomTiming().fixed_step && NativeRoomTiming().halted &&
         !RoomPrepareWorldRandom("failed") && !RoomPreparePlayerRandom(0,0),"lost retained socket holds failed fixed startup owner and rejects later seeding until shutdown");
+    const auto first_failure=NativeRoomStatus().error;
+    const auto failure_report=NativeRoomStatus().diagnostic_report;
+    check(failure_report.starts_with("Beetleworx online failure context v1\n") && failure_report.size()<2048 &&
+        failure_report.find("World restoration: not attempted")!=std::string::npos,
+        "held native failure publishes a bounded immutable support report before transport teardown");
+    Runtime().Fail("secondary failure fixture must not replace the transport cause");
+    check(NativeRoomStatus().error==first_failure && NativeRoomStatus().diagnostic_report==failure_report,
+        "secondary native failures preserve the original error and support context");
     ReleaseNativeRoomSession();
     check(!NativeRoomActive() && !RoomBootstrapActive() && !NativeRoomTiming().fixed_step && NativeRoomStatus().state==NativeSessionState::None &&
-        !RoomClaimContinue() && !RoomPrepareWorldRandom("released"),"release clears only Room owner, startup claims, initialization and its parked controls");
+        !RoomClaimContinue() && !RoomPrepareWorldRandom("released") && NativeRoomStatus().diagnostic_report.empty(),"release clears only Room owner, startup claims, initialization and its parked controls");
     // A no-op Room release must never tear down the independent legacy owner.
     auto legacy=std::make_unique<Session>();Session peer;auto legacy_id=id;legacy_id.startup_policy=StartupPolicy::Prelaunch;
     if(!check(legacy->Host(legacy_id,"127.0.0.1",0) && peer.Join(legacy_id,"127.0.0.1",legacy->port()),"legacy coexistence rejection fixture connects"))return false;

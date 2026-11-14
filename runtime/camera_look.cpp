@@ -1,5 +1,6 @@
 #include "camera_look.h"
 #include "controls.h"
+#include "online_room_gameplay.h"
 #include "guest_read_batch.h"
 #include "ppc_context.h"
 #include <rex/cvar.h>
@@ -16,12 +17,16 @@
 #include <windows.h>
 
 PPC_EXTERN_FUNC(__imp__sub_827C5990);
+PPC_EXTERN_FUNC(__imp__sub_82A5D278);
 PPC_EXTERN_FUNC(__imp__sub_82769490);
 PPC_EXTERN_FUNC(sub_827C5990);
 PPC_EXTERN_FUNC(__imp__sub_827C56F8);
 PPC_EXTERN_FUNC(__imp__sub_830ACF88);
 PPC_EXTERN_FUNC(__imp__sub_830A7C10);
 PPC_EXTERN_FUNC(__imp__sub_830A7C70);
+PPC_EXTERN_FUNC(__imp__sub_827C3D78);
+PPC_EXTERN_FUNC(__imp__sub_8276A1F8);
+PPC_EXTERN_FUNC(__imp__sub_822F1C10);
 REXCVAR_DECLARE(bool,em2_present_camera);
 namespace {
 using Binding=em2::NativeCameraLookBinding;
@@ -32,20 +37,24 @@ struct ContextScope {PPCContext& ctx;PPCContext saved;Environment environment;ex
 struct Observation {uint32_t manager=0,action=0;bool enabled=false;uint64_t sequence=0;};
 thread_local std::array<Observation,16> observations{};
 thread_local std::array<Binding,32> bindings{};
+thread_local std::array<Binding,16> owned_bindings{};
 thread_local uint64_t sequence=0;
 thread_local bool test_observation=false;
 struct AxisQuery {uint32_t manager=0,user=0;std::array<float,2> axes{};unsigned hits=0;};
 thread_local AxisQuery* query=nullptr;
+thread_local const Binding* owned_dispatch=nullptr;
 class QueryScope {AxisQuery* saved=query;public:explicit QueryScope(AxisQuery& next){query=&next;}~QueryScope(){query=saved;}};
 bool Fingerprint(Binding& result,uint8_t* base){
     em2::GuestReadBatch reads;
     const auto manager=result.manager,action=result.action;
-    if(!Readable(manager,76,base) || !Readable(action,436,base) || PPC_LOAD_U32(action+80)!=4 || PPC_LOAD_U32(action+408)!=2)return false;
-    const auto user=PPC_LOAD_U32(action+88),input=PPC_LOAD_U32(manager+72);
-    if(user>1 || !Readable(input,88,base) || PPC_LOAD_U32(action+120)!=user ||
-        PPC_LOAD_U32(action+92)!=0x02400019 || PPC_LOAD_U32(action+124)!=0x02400020 ||
-        PPC_LOAD_U32(action+96)!=0 || PPC_LOAD_U32(action+128)!=3 ||
-        PPC_LOAD_U8(action+104)>1 || PPC_LOAD_U8(action+136)>1 || PPC_LOAD_U32(action+432)>2)return false;
+    if(!Readable(manager,76,base) || !Readable(action,436,base) || PPC_LOAD_U32(action+80)!=4)return false;
+    if(PPC_LOAD_U32(action+408)!=2)return false;
+    const auto pad=action+88;
+    const auto user=PPC_LOAD_U32(pad),input=PPC_LOAD_U32(manager+72);
+    if(user>1 || !Readable(input,88,base) || PPC_LOAD_U32(pad+32)!=user ||
+        PPC_LOAD_U32(pad+4)!=0x02400019 || PPC_LOAD_U32(pad+36)!=0x02400020 ||
+        PPC_LOAD_U32(pad+8)!=0 || PPC_LOAD_U32(pad+40)!=3 ||
+        PPC_LOAD_U8(pad+16)>1 || PPC_LOAD_U8(pad+48)>1 || PPC_LOAD_U32(action+432)>2)return false;
     const auto device=PPC_LOAD_U32(input+72+user*4);
     if(!Readable(device,72,base) || PPC_LOAD_U32(device+56)<4)return false;
     const auto history=PPC_LOAD_U32(device+60);
@@ -62,7 +71,7 @@ bool Fingerprint(Binding& result,uint8_t* base){
     unsigned n=0;auto add=[&](uint32_t value){result.fingerprint[n++]=value;};
     add(PPC_LOAD_U32(manager));add(PPC_LOAD_U32(input));add(PPC_LOAD_U32(device));add(PPC_LOAD_U32(device+56));add(PPC_LOAD_U32(device+68));
     add(PPC_LOAD_U32(action));add(PPC_LOAD_U32(action+80));add(PPC_LOAD_U32(action+408));
-    for(unsigned offset=88;offset<152;offset+=4)add(PPC_LOAD_U32(action+offset));
+    for(unsigned offset=0;offset<64;offset+=4)add(PPC_LOAD_U32(pad+offset));
     for(unsigned offset=416;offset<=432;offset+=4)add(PPC_LOAD_U32(action+offset));
     for(unsigned axis:{2u,3u})for(unsigned offset=16;offset<=28;offset+=4)add(PPC_LOAD_U32(history+axis*32+offset));
     return n==result.fingerprint.size();
@@ -101,6 +110,50 @@ bool ValidateSelectedInput(const Binding& binding,uint8_t* base){
     __imp__sub_82769490(selected,base);
     return Readable(selected.r3.u32,4,base) && PPC_LOAD_U32(selected.r3.u32)==PPC_LOAD_U32(binding.action);
 }
+struct DiscoveryScratch {
+    ContextScope preserve;uint8_t* base;uint32_t stack=0,low=0;std::array<uint8_t,8192> saved{};
+    DiscoveryScratch(PPCContext& ctx,uint8_t* memory):preserve(ctx),base(memory){const auto top=ctx.r1.u32&~15u;
+        if(top>=12288 && Readable(top-8192,saved.size(),base)){low=top-8192;stack=top-4096;std::memcpy(saved.data(),base+low,saved.size());ctx.r1.u64=stack;}}
+    ~DiscoveryScratch(){if(stack)std::memcpy(base+low,saved.data(),saved.size());}
+};
+bool ValidateOwnedSelectedInput(const Binding& binding,PPCContext& ctx,uint8_t* base){
+    if(!em2::net::NativeRoomOwnsCameraMode(binding.mode,base) || binding.user>1 ||
+        !Readable(binding.controller,20,base) || PPC_LOAD_U32(binding.controller+16)!=binding.user)return false;
+    const auto manager=PPC_LOAD_U32(0x833DAB60);if(!Readable(manager,712,base))return false;
+    DiscoveryScratch scratch(ctx,base);if(!scratch.stack)return false;
+    // Native sentinel selects the analog rotation family without mutating
+    // either retail player's input scheme or indexing a room peer as a player.
+    ctx.r3.u64=manager;ctx.r4.s64=-1;__imp__sub_82769490(ctx,base);
+    if(!Readable(ctx.r3.u32,4,base))return false;const auto selected=PPC_LOAD_U32(ctx.r3.u32);
+    if(!binding.user)return selected==PPC_LOAD_U32(binding.action);
+    // Original82A5D278 maps the secondary action name before comparing it
+    // with the selected Look family. Use that exact native map, not suffix
+    // stripping or comparing Look2 with the primary Look UID.
+    const auto name=scratch.stack+512;PPC_STORE_U32(name,0);
+    ctx.r3.u64=name;ctx.r4.u64=manager;ctx.r5.u64=binding.action;__imp__sub_8276A1F8(ctx,base);
+    const auto mapped=PPC_LOAD_U32(name);
+    ctx.r3.u64=name;__imp__sub_822F1C10(ctx,base);
+    return mapped && selected==mapped;
+}
+bool OwnedContext(const Binding& binding,PPCContext& ctx,uint8_t* base){
+    if(!Readable(0x833DBAD8,4,base) || PPC_LOAD_U32(0x833DBAD8)!=binding.manager ||
+        !Readable(binding.manager,76,base) || !Readable(binding.event,24,base))return false;
+    DiscoveryScratch scratch(ctx,base);if(!scratch.stack)return false;
+    ctx.r3.u64=binding.manager;ctx.r4.u64=binding.manager+16;__imp__sub_827C3D78(ctx,base);
+    if(binding.event!=binding.manager+24 && binding.event!=ctx.r3.u32)return false;
+    const auto actions=PPC_LOAD_U32(binding.event+16),count=PPC_LOAD_U32(binding.event+20);
+    if(count>256 || (count && !Readable(actions,size_t(count)*4,base)))return false;
+    unsigned found=0;for(unsigned i=0;i<count;++i)found+=PPC_LOAD_U32(actions+i*4)==binding.action;
+    return found==1;
+}
+bool ValidateOwned(const Binding& binding,PPCContext& ctx,uint8_t* base){
+    if(!binding.registry || !Readable(binding.mode,24,base) || !Readable(binding.controller,28,base) ||
+        PPC_LOAD_U32(binding.mode)!=0x82126C98 || PPC_LOAD_U32(binding.mode+20)!=binding.controller ||
+        PPC_LOAD_U32(binding.controller)!=0x82112778 || PPC_LOAD_U32(binding.controller+24)!=binding.mode ||
+        PPC_LOAD_U32(0x833DA7E4)!=binding.registry)return false;
+    auto current=binding;
+    return Fingerprint(current,base) && current==binding && ValidateOwnedSelectedInput(binding,ctx,base) && OwnedContext(binding,ctx,base);
+}
 bool AxisOverride(PPCContext& ctx){
     if(!query || ctx.lr!=0x827C5A0C || ctx.r3.u32!=query->manager || ctx.r5.u32!=query->user || ctx.r6.u32!=0)return false;
     const unsigned axis=ctx.r4.u32==0x02400019?0:ctx.r4.u32==0x02400020?1:2;
@@ -119,7 +172,7 @@ bool RunMath(const Binding& binding,const std::array<float,2>& axes,PPCContext& 
     struct RestoreStack {uint8_t* destination;const std::array<uint8_t,8192>& saved;~RestoreStack(){std::memcpy(destination,saved.data(),saved.size());}}restore_stack{base+top-8192,saved};
     const auto stack=top-4096,x=stack+512,y=stack+516;
     PPC_STORE_U32(x,0);PPC_STORE_U32(y,0);
-    AxisQuery injected{binding.manager,binding.user,axes};QueryScope scoped(injected);
+    AxisQuery injected{binding.manager,binding.user,axes,0};QueryScope scoped(injected);
     ctx.r1.u64=stack;ctx.r3.u64=binding.manager;ctx.r4.u64=binding.action;ctx.r5.u64=1;ctx.r6.u64=x;ctx.r7.u64=y;
     action_math(ctx,base);
     const float result_x=ReadFloat(x,base),result_y=ReadFloat(y,base);
@@ -127,7 +180,7 @@ bool RunMath(const Binding& binding,const std::array<float,2>& axes,PPCContext& 
     output={result_x,result_y,binding.event,binding.action};return true;
 }
 }
-void em2::ResetNativeCameraLookBindings(){observations={};bindings={};sequence=0;}
+void em2::ResetNativeCameraLookBindings(){observations={};bindings={};owned_bindings={};sequence=0;}
 void em2::ObserveNativeCameraLookBinding(uint32_t mode,uint32_t event,uint32_t action,uint8_t* base) noexcept {
     Environment preserve;
     if(!test_observation && !REXCVAR_GET(em2_present_camera))return;
@@ -160,6 +213,73 @@ bool em2::ReplayNativeCameraLookAction(const Binding& binding,const LiveLookInpu
     std::array<float,2> axes;
     if(!ConvertNativeDeviceLook(input,ReadFloat(0x833B65FC,base),axes))return false;
     return RunMath(binding,axes,ctx,base,output);
+}
+bool em2::NativeOwnedCameraLookBindingFor(uint32_t mode,PPCContext& ctx,uint8_t* base,Binding& output,unsigned user){
+    Environment preserve;output={};
+    for(const auto& binding:owned_bindings)if(binding.mode==mode && binding.user==user && ValidateOwned(binding,ctx,base)){output=binding;return true;}
+    if(user>1 || !em2::net::NativeRoomOwnsCameraMode(mode,base) || !Readable(mode,24,base))return false;
+    const auto manager=PPC_LOAD_U32(0x833DBAD8);if(!Readable(manager,76,base))return false;
+    DiscoveryScratch scratch(ctx,base);if(!scratch.stack)return false;
+    ctx.r3.u64=manager;ctx.r4.u64=manager+16;__imp__sub_827C3D78(ctx,base);const auto active=ctx.r3.u32;
+    Binding selected;unsigned matches=0;
+    const std::array<uint32_t,2> events{manager+24,active};
+    for(unsigned e=0;e<events.size();++e){const auto event=events[e];if(e && event==events[0])continue;
+        if(!Readable(event,24,base))return false;const auto list=PPC_LOAD_U32(event+16),count=PPC_LOAD_U32(event+20);
+        if(count>256 || (count && !Readable(list,size_t(count)*4,base)))return false;
+        for(unsigned i=0;i<count;++i){Binding candidate;candidate.mode=mode;candidate.controller=PPC_LOAD_U32(mode+20);candidate.registry=PPC_LOAD_U32(0x833DA7E4);
+            candidate.manager=manager;candidate.event=event;candidate.action=PPC_LOAD_U32(list+i*4);
+            if(!Fingerprint(candidate,base) || candidate.user!=user || !ValidateOwned(candidate,ctx,base))continue;
+            selected=candidate;++matches;
+        }
+    }
+    if(matches!=1)return false;
+    auto slot=std::find_if(owned_bindings.begin(),owned_bindings.end(),[&](const auto& value){return value.mode==mode;});
+    if(slot==owned_bindings.end())slot=std::find_if(owned_bindings.begin(),owned_bindings.end(),[&](const auto& value){return !value.mode || !em2::net::NativeRoomOwnsCameraMode(value.mode,base);});
+    if(slot==owned_bindings.end())return false;*slot=selected;output=selected;return true;
+}
+bool em2::ReplayNativeOwnedCameraLookAction(const Binding& binding,const LiveLookInput& input,PPCContext& ctx,uint8_t* base,NativeCameraLookResult& output){
+    Environment preserve;output={};if(!ValidateOwned(binding,ctx,base))return false;
+    std::array<float,2> axes;if(!ConvertNativeDeviceLook(input,ReadFloat(0x833B65FC,base),axes))return false;
+    return RunMath(binding,axes,ctx,base,output);
+}
+bool em2::DispatchNativeOwnedCameraLook(const Binding& binding,const NativeCameraLookResult& result,PPCContext& ctx,uint8_t* base){
+    if(owned_dispatch || result.event!=binding.event || result.action!=binding.action ||
+        !std::isfinite(result.x) || !std::isfinite(result.y) || !ValidateOwned(binding,ctx,base))return false;
+    ContextScope preserve(ctx);
+    struct Permit {explicit Permit(const Binding& b){owned_dispatch=&b;}~Permit(){owned_dispatch=nullptr;}}permit(binding);
+    ctx.r3.u64=binding.mode;ctx.r4.u64=result.event;ctx.r5.u64=result.action;ctx.f1.f64=result.x;ctx.f2.f64=result.y;
+    __imp__sub_82A5D278(ctx,base);
+    return true;
+}
+// Only the base normal-mode OnLook reached by the authoritative owned-camera
+// dispatch uses the native analog selector. Ordinary retail dispatch, other
+// modes and all calls outside this scope retain the original selection.
+PPC_FUNC_IMPL(sub_82769490){
+    if(owned_dispatch && ctx.lr==0x8299E844 && ctx.r31.u32==owned_dispatch->mode &&
+        ctx.r3.u32==PPC_LOAD_U32(0x833DAB60) && ctx.r4.u32==owned_dispatch->user &&
+        em2::net::NativeRoomOwnsCameraMode(owned_dispatch->mode,base)){
+        const auto profile=ctx.r4;ctx.r4.s64=-1;__imp__sub_82769490(ctx,base);ctx.r4=profile;return;
+    }
+    __imp__sub_82769490(ctx,base);
+}
+void em2::TraceNativeOwnedLookDefinitions(uint32_t mode,PPCContext& ctx,uint8_t* base,unsigned user){
+    Environment preserve;DiscoveryScratch scratch(ctx,base);if(!scratch.stack || user>1 || !net::NativeRoomOwnsCameraMode(mode,base))return;
+    const auto manager=PPC_LOAD_U32(0x833DBAD8),players=PPC_LOAD_U32(0x833DAB60);
+    if(!Readable(manager,76,base) || !Readable(players,712,base))return;
+    ctx.r3.u64=players;ctx.r4.s64=-1;__imp__sub_82769490(ctx,base);const auto selected=Readable(ctx.r3.u32,4,base)?PPC_LOAD_U32(ctx.r3.u32):0;
+    ctx.r3.u64=manager;ctx.r4.u64=manager+16;__imp__sub_827C3D78(ctx,base);const auto active=ctx.r3.u32;
+    REXLOG_WARN("Owned look definition scan: mode {:08X} user {} manager {:08X} active {:08X} selected UID {:08X}",mode,user,manager,active,selected);
+    for(auto event:{manager+24,active}){if(!Readable(event,24,base))continue;const auto list=PPC_LOAD_U32(event+16),count=PPC_LOAD_U32(event+20);
+        if(count>256 || (count && !Readable(list,size_t(count)*4,base)))continue;
+        for(unsigned i=0;i<count;++i){const auto action=PPC_LOAD_U32(list+i*4);if(!Readable(action,436,base) || PPC_LOAD_U32(action+80)!=4)continue;
+            Binding candidate;candidate.mode=mode;candidate.controller=PPC_LOAD_U32(mode+20);candidate.manager=manager;candidate.event=event;candidate.action=action;candidate.registry=PPC_LOAD_U32(0x833DA7E4);
+            const bool shape=Fingerprint(candidate,base);
+            const auto name=scratch.stack+512;PPC_STORE_U32(name,0);ctx.r3.u64=name;ctx.r4.u64=players;ctx.r5.u64=action;__imp__sub_8276A1F8(ctx,base);const auto mapped=PPC_LOAD_U32(name);ctx.r3.u64=name;__imp__sub_822F1C10(ctx,base);
+            REXLOG_WARN("Owned analog definition: event {:08X} action {:08X} UID {:08X} mapped {:08X} count {} binding {}/{:08X}/{}/{} and {}/{:08X}/{}/{} shape {} selected {}",event,action,PPC_LOAD_U32(action),mapped,PPC_LOAD_U32(action+408),
+                PPC_LOAD_U32(action+88),PPC_LOAD_U32(action+92),PPC_LOAD_U32(action+96),unsigned(PPC_LOAD_U8(action+104)),PPC_LOAD_U32(action+120),PPC_LOAD_U32(action+124),PPC_LOAD_U32(action+128),unsigned(PPC_LOAD_U8(action+136)),shape,mapped==selected);
+            if(PPC_LOAD_U32(action+408)==4)REXLOG_WARN("Owned analog remaining bindings: action {:08X} {}/{:08X}/{}/{} and {}/{:08X}/{}/{}",action,PPC_LOAD_U32(action+152),PPC_LOAD_U32(action+156),PPC_LOAD_U32(action+160),unsigned(PPC_LOAD_U8(action+168)),PPC_LOAD_U32(action+184),PPC_LOAD_U32(action+188),PPC_LOAD_U32(action+192),unsigned(PPC_LOAD_U8(action+200)));
+        }
+    }
 }
 PPC_FUNC_IMPL(sub_827C5990){
     if(!query && (test_observation || REXCVAR_GET(em2_present_camera))){

@@ -124,6 +124,7 @@ void OnlineRoomBoot::Poll(){
 void OnlineRoomBoot::Cancel(){auto& p=*impl_;if(p.Taken() || p.status.state==BootState::Cancelled || p.status.state==BootState::Failed)return;p.Fail({});}
 BootStatus OnlineRoomBoot::status()const{auto s=impl_->status;s.preparation=impl_->step->load();return s;}
 RoomState OnlineRoomBoot::room_state()const{return impl_->room?impl_->room->state():RoomState::Idle;}
+uint64_t OnlineRoomBoot::local_peer()const{return impl_->room?impl_->room->local_peer():0;}
 LobbySnapshot OnlineRoomBoot::lobby()const{return impl_->room?impl_->room->lobby():LobbySnapshot{};}
 std::vector<RoomCheckpointPeer> OnlineRoomBoot::checkpoint_progress()const{return impl_->room?impl_->room->checkpoint_peers():std::vector<RoomCheckpointPeer>{};}
 LobbyResult OnlineRoomBoot::last_lobby_result()const{return impl_->room?impl_->room->last_lobby_result():LobbyResult::Ok;}
@@ -284,6 +285,30 @@ bool TestOnlineRoomBoot(const fs::path& root){
             !boots[1]->TakeStarted(),"installation-phase cancellation drains worker and releases lobby slot without native startup");
         boots.clear();
         {OnlineRoomBoot abandoned;check(abandoned.Host(paths("destructor-cancel"),base/"frozen","127.0.0.1","127.0.0.1",3,"Host"),"destructor cancellation fixture starts immutable worker");}
+        auto versioned=[&](std::string_view directory,std::string_view version,std::string_view bytes){
+            const auto root=base/std::string(directory);write(root/"beetleworx.exe",bytes);
+            const std::string digest(64,'0');
+            write(root/"release-manifest.json","{\"format\":2,\"product\":\"Beetleworx\",\"executable\":\"beetleworx.exe\",\"version\":\""+std::string(version)+"\",\"tag\":\"v"+std::string(version)+"\",\"exe_sha256\":\""+digest+"\",\"files\":[{\"path\":\"beetleworx.exe\",\"bytes\":3,\"sha256\":\""+digest+"\"}]}");
+            return root/"beetleworx.exe";
+        };
+        auto release_host=paths("version-host-save");release_host.executable=versioned("version-host","0.1.0-demo.3","host executable");
+        auto release_guest=paths("version-guest-save");release_guest.executable=versioned("version-guest","0.1.0-demo.3","different guest executable");
+        boots.push_back(std::make_unique<OnlineRoomBoot>());
+        if(!check(boots[0]->Host(release_host,base/"frozen","127.0.0.1","127.0.0.1",3,"Host") &&
+            pump([&]{return !boots[0]->status().invitation.empty();}),"versioned host prepares shared checkpoint"))return false;
+        boots.push_back(std::make_unique<OnlineRoomBoot>());
+        if(!check(boots[1]->Join(release_guest,boots[0]->status().invitation,"Same version") &&
+            pump([&]{return boots[1]->status().state==BootState::Ready;}) && fs::is_regular_file(release_guest.new_user_data/"42560816"/"save.dat"),
+            "matching version with different executable bytes passes real handshake and checkpoint installation"))return false;
+        boots.clear();boots.push_back(std::make_unique<OnlineRoomBoot>());release_host.new_user_data=base/"different-version-host-save";
+        if(!check(boots[0]->Host(release_host,base/"frozen","127.0.0.1","127.0.0.1",3,"Host") &&
+            pump([&]{return !boots[0]->status().invitation.empty();}),"different-version rejection fixture hosts"))return false;
+        auto different_version=paths("different-version-guest-save");different_version.executable=versioned("different-version","0.1.0-demo.4","host executable");
+        boots.push_back(std::make_unique<OnlineRoomBoot>());
+        if(!check(boots[1]->Join(different_version,boots[0]->status().invitation,"Other version") &&
+            pump([&]{return boots[1]->status().state==BootState::Failed;}) && !fs::exists(different_version.new_user_data/"42560816") &&
+            boots[0]->room_state()==RoomState::Listening,"identical executable bytes with different version rejected before checkpoint installation"))return false;
+        boots.clear();
         const auto after=PackCheckpoint(base/"frozen"),normal_after=PackCheckpoint(base/"normal"/"42560816");
         check(after.value && after.value->bytes==original.value->bytes && normal_after.value && normal_after.value->bytes==normal.value->bytes,"host source and normal campaign remain unchanged through success/failure/cancel/destruction");
     }catch(const std::exception& error){check(false,error.what());}

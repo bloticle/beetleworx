@@ -1,8 +1,10 @@
 #include "online_native_handoff.h"
 #include "online_native_menu.h"
 #include "online_runtime.h"
+#include "online_room_runtime.h"
 #include "online_content_root.h"
 #include "guest_read_batch.h"
+#include "allocation_trace.h"
 #include "ppc_context.h"
 #include <rex/runtime.h>
 #include <rex/kernel/kernel_state.h>
@@ -12,9 +14,11 @@
 #include <chrono>
 #include <cstring>
 #include <optional>
+#include <filesystem>
 #include <windows.h>
 
 PPC_EXTERN_FUNC(__imp__sub_82768A40);
+PPC_EXTERN_FUNC(__imp__sub_82765DE0);
 PPC_EXTERN_FUNC(__imp__sub_827685C8);
 PPC_EXTERN_FUNC(__imp__sub_827680D0);
 PPC_EXTERN_FUNC(__imp__sub_827659D0);
@@ -33,17 +37,25 @@ struct Watch {
     // 0 pending, 1 original full-load callback succeeded, 2 rejected/no save.
     std::atomic<unsigned> result{0};
     std::atomic<unsigned> decoded{0};
+    std::atomic<bool> empty_archive{false};
 } watch;
 enum class Phase {Idle,WaitingForIdle,Reloading,WaitingForCompletion,Finished,Failed};
 struct Handoff {
     Phase phase=Phase::Idle;
-    std::optional<BootResult> prepared;
+    std::optional<NativeMenuReady> prepared;
     std::unique_ptr<HostCampaignLease> campaign_lease;
-    uint32_t owner=0,manager=0,backend=0;
+    uint32_t owner=0,manager=0,backend=0;DWORD thread=0;uint64_t native_load=0;
     uint64_t generation=0;
     bool routed=false,adopted=false;
+    bool room=false;
     Clock::time_point deadline{};
 } handoff;
+struct TitleRestore {
+    NativeTitleRestoreState status=NativeTitleRestoreState::Idle;
+    bool refreshing=false,expected_campaign=false;uint32_t manager=0,backend=0,owner=0;
+    DWORD thread=0;uint64_t native_load=0;
+    Clock::time_point deadline{};
+} title_restore;
 struct NativeSave {
     uint32_t manager=0,backend=0,state=0;
     bool disabled=false;
@@ -84,7 +96,7 @@ void Fail(std::string reason){
         // Routing remains private. Never resume against a half-loaded save or
         // switch back while native asynchronous IO may still be in progress.
         reason+=" Close and reopen the game before trying again. Your normal save was not replaced.";
-        if(handoff.adopted)FailNativeOnlineMenuPreparation(reason);
+        if(handoff.adopted){if(handoff.room)FailNativeRoomMenuPreparation(reason);else FailNativeOnlineMenuPreparation(reason);}
         SetNativeOnlineMenuHandoffAvailable(false);
     }
     handoff.prepared.reset();
@@ -108,34 +120,36 @@ bool Resume(PPCContext& ctx,uint8_t* base,uint32_t owner){
     __imp__sub_82A41A80(ctx,base);
     return PPC_LOAD_U32(owner+12)==1;
 }
-bool RefreshedCampaignPresent(PPCContext& ctx,uint8_t* base){
+std::optional<bool> RefreshedCampaignSummary(PPCContext& ctx,uint8_t* base){
     Preserve restore(ctx);
-    if(ctx.r1.u32<512)return false;
+    if(ctx.r1.u32<512)return {};
     const auto stack=ctx.r1.u32-256,arguments=stack+96,result=stack+128;
-    if(!Readable(base,stack,160))return false;
+    if(!Readable(base,stack,160))return {};
     PPC_STORE_U32(stack,ctx.r1.u32);std::memset(PPC_RAW_ADDR(arguments),0,48);
     PPC_STORE_U32(arguments+8,result);ctx.r1.u64=stack;ctx.r3.u64=arguments;
     // Use the original game's query, not a fabricated save-summary status.
     // FrontMenu82A42018 otherwise accepts Resume and silently chooses New Game
     // when this summary remains invalid after a failed/mismatched refresh.
     __imp__sub_82B1B1B0(ctx,base);
-    return PPC_LOAD_U32(result+4)==2 && PPC_LOAD_U8(result+8)!=0;
+    if(PPC_LOAD_U32(result+4)!=2)return {};
+    return PPC_LOAD_U8(result+8)!=0;
 }
-void PublishCompletion(uint64_t generation,uint32_t manager,bool full_load,bool accepted,bool save_exists,uint32_t result,uint32_t archive_state){
+bool RefreshedCampaignPresent(PPCContext& ctx,uint8_t* base){return RefreshedCampaignSummary(ctx,base).value_or(false);}
+void PublishCompletion(uint64_t generation,uint32_t manager,bool full_load,bool accepted,bool reload_headers,uint32_t result,uint32_t archive_state){
     if(!generation || watch.generation.load(std::memory_order_acquire)!=generation ||
         watch.manager.load(std::memory_order_relaxed)!=manager)return;
     if(full_load)watch.result.store(accepted && result==11 && archive_state==6?1:2,std::memory_order_release);
-    else if(!accepted || !save_exists)watch.result.store(2,std::memory_order_release);
+    else if(!accepted || !reload_headers)watch.result.store(2,std::memory_order_release);
 }
 void ObserveCompletion(PPCContext& ctx,uint8_t* base,PPCFunc* original,bool full_load){
     const auto generation=watch.generation.load(std::memory_order_acquire);
     const bool accepted=ctx.r3.u32!=0;
-    NativeSave before;bool inspected=false,save_exists=false;uint32_t result_code=0,archive_state=0,buffer=0;
+    NativeSave before;bool inspected=false,reload_headers=false;uint32_t result_code=0,archive_state=0,buffer=0;
     if(generation){
         Preserve restore(ctx);
         try{
             inspected=ReadNativeSave(base,before);
-            if(inspected){save_exists=PPC_LOAD_U8(before.backend+103)!=0;result_code=PPC_LOAD_U32(before.backend+620);archive_state=PPC_LOAD_U32(before.manager+28);buffer=PPC_LOAD_U32(before.manager+36);}
+            if(inspected){reload_headers=PPC_LOAD_U8(before.backend+103)!=0;result_code=PPC_LOAD_U32(before.backend+620);archive_state=PPC_LOAD_U32(before.manager+28);buffer=PPC_LOAD_U32(before.manager+36);}
         }catch(...){}
     }
     original(ctx,base);
@@ -147,7 +161,7 @@ void ObserveCompletion(PPCContext& ctx,uint8_t* base,PPCFunc* original,bool full
         NativeSave save;
         if(!inspected || !ReadNativeSave(base,save) || save.manager!=before.manager || save.backend!=before.backend)return;
         // Refresh can synchronously queue the next load and replace its status
-        // buffer. Its save-exists/result values belong to callback entry.
+        // buffer. Its header-reload/result values belong to callback entry.
         const bool decoded=watch.decoded.load(std::memory_order_acquire)==1;
         const bool retained=PPC_LOAD_U32(save.manager+36)==buffer && Readable(base,buffer,4);
         const bool completed=!PPC_LOAD_U8(save.backend+100) && !PPC_LOAD_U8(save.manager+303);
@@ -156,9 +170,12 @@ void ObserveCompletion(PPCContext& ctx,uint8_t* base,PPCFunc* original,bool full
         // restores state6 at82768224. The retained manager buffer is consumed
         // later by authored Resume. A real successful decode at82768180 is the
         // evidence that distinguishes that lifecycle from a stale state word.
-        PublishCompletion(generation,save.manager,full_load,accepted && (!full_load || (decoded && retained && completed)),save_exists,result_code,PPC_LOAD_U32(save.manager+28));
-        REXLOG_INFO("Native lobby {} completion: accepted {}, save exists {}, result {}, archive state {}->{}, decoded {}, retained {}, completed {}",
-            full_load?"load":"refresh",accepted,save_exists,result_code,archive_state,PPC_LOAD_U32(save.manager+28),decoded,retained,completed);
+        if(full_load && watch.generation.load(std::memory_order_acquire)==generation)
+            watch.empty_archive.store(accepted && result_code==11 && decoded && retained && completed &&
+                PPC_LOAD_U32(save.manager+28)==3,std::memory_order_relaxed);
+        PublishCompletion(generation,save.manager,full_load,accepted && (!full_load || (decoded && retained && completed)),reload_headers,result_code,PPC_LOAD_U32(save.manager+28));
+        REXLOG_INFO("Native lobby {} completion: accepted {}, reload headers {}, result {}, archive state {}->{}, decoded {}, retained {}, completed {}",
+            full_load?"load":"refresh",accepted,reload_headers,result_code,archive_state,PPC_LOAD_U32(save.manager+28),decoded,retained,completed);
     }catch(...){}
 }
 void ObserveArchiveRead(PPCContext& ctx,uint8_t* base,PPCFunc* original){
@@ -177,10 +194,111 @@ void RegisterNativeOnlineHandoff(bool available){
     registered.store(available,std::memory_order_release);
     SetNativeOnlineMenuHandoffAvailable(available && REXCVAR_GET(em2_native_online_handoff) && REXCVAR_GET(em2_online_world_random));
 }
+bool BeginNativeOnlineTitleRestore(){
+    if(SynchronizedSessionActive() || handoff.phase!=Phase::Finished || !handoff.routed ||
+       (title_restore.status!=NativeTitleRestoreState::Idle && title_restore.status!=NativeTitleRestoreState::Ready))return false;
+    title_restore=TitleRestore{};
+    title_restore.status=NativeTitleRestoreState::Pending;
+    title_restore.thread=GetCurrentThreadId();title_restore.native_load=em2::CurrentNativeLoadGeneration();
+    title_restore.deadline=Clock::now()+std::chrono::seconds(45);
+    SetNativeOnlineMenuHandoffAvailable(false);return true;
+}
+NativeTitleRestoreState NativeOnlineTitleRestoreStatus(){return title_restore.status;}
+namespace {
+bool TitleRestoreEvidenceValid(bool expected,std::optional<bool> present,unsigned result,bool empty_archive){
+    if(!present || *present!=expected)return false;
+    return *present?result==1:result==2 && empty_archive;
+}
+std::optional<bool> OriginalCampaignFilePresent(uint8_t* base,const NativeSave& save,rex::Runtime& runtime){
+    auto filename=[&](uint32_t address)->std::string{
+        if(!Readable(base,address,32))return {};
+        const auto* chars=reinterpret_cast<const char*>(base+address);
+        const auto length=strnlen(chars,32);
+        if(!length || length==32)return {};
+        std::string name(chars,length);
+        if(name=="." || name==".." || name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")!=std::string::npos)return {};
+        return name;
+    };
+    // Original 82823CA8 initializes this package and its primary archive name.
+    // Check existence before the normal query can create an empty package.
+    const auto package=filename(save.backend+1024),archive=filename(save.backend+1056);
+    if(package.empty() || archive.empty())return {};
+    auto* kernel=runtime.kernel_state();if(!kernel)return {};
+    const auto root=NativeContentRoot(kernel->content_manager(),runtime.user_data_root());
+    const auto path=root/fmt::format("{:08X}",kernel->title_id())/"00000001"/package/archive;
+    std::error_code error;const auto status=std::filesystem::status(path,error);
+    if(error==std::errc::no_such_file_or_directory)return false;
+    if(error)return {};
+    if(!std::filesystem::exists(status))return false;
+    if(!std::filesystem::is_regular_file(status))return {};
+    return true;
+}
+void RestoreTitle(PPCContext& ctx,uint8_t* base){
+    auto fail=[](const char* reason){
+        title_restore.status=NativeTitleRestoreState::Failed;watch.generation.store(0,std::memory_order_release);
+        REXLOG_ERROR("Native online title restore failed: {}",reason);
+    };
+    if(Clock::now()>=title_restore.deadline){fail("original save refresh deadline exceeded");return;}
+    const auto owner=ctx.r3.u32;if(!LiveMenu(base,owner))return;
+    NativeSave save;if(!ReadNativeSave(base,save)){fail("native save manager unavailable");return;}
+    if(!title_restore.refreshing){
+        if(save.state!=0)return;
+        if(save.disabled){fail("original save loading is disabled");return;}
+        auto* runtime=rex::Runtime::instance();auto* kernel=runtime?runtime->kernel_state():nullptr;
+        if(!kernel || !kernel->user_profile()){fail("native profile unavailable");return;}
+        std::string error;
+        if(!RestoreNativeContentRoot(kernel->content_manager(),error,kernel->user_profile())){
+            if(error=="Waiting for the game to finish using its current save.")return;
+            fail("could not restore original content root");return;
+        }
+        const auto present=OriginalCampaignFilePresent(base,save,*runtime);
+        if(!present){fail("could not inspect the original campaign archive");return;}
+        title_restore.expected_campaign=*present;
+        watch.empty_archive.store(false,std::memory_order_relaxed);
+        if(handoff.generation==UINT64_MAX){fail("save refresh generation exhausted");return;}
+        ++handoff.generation;title_restore.manager=save.manager;title_restore.backend=save.backend;title_restore.owner=owner;
+        watch.result.store(0,std::memory_order_relaxed);watch.decoded.store(0,std::memory_order_relaxed);
+        watch.manager.store(save.manager,std::memory_order_relaxed);watch.generation.store(handoff.generation,std::memory_order_release);
+        title_restore.refreshing=true;handoff.routed=false;
+        REXLOG_INFO("Native online title restore: original content root selected; original SaveManager refresh requested");
+        // Original local-profile reset (also called at 8282751C). It retires
+        // the old archive/slot metadata and re-arms the header decode consumed
+        // by 827685C8. A root change alone leaves the online summary cached.
+        {
+            Preserve restore(ctx);ctx.r3.u64=save.manager;ctx.r4.u64=0;
+            __imp__sub_82765DE0(ctx,base);
+        }
+        QueueRefresh(ctx,base,save.manager);return;
+    }
+    if(save.manager!=title_restore.manager || save.backend!=title_restore.backend || owner!=title_restore.owner){fail("native save/menu owner changed during refresh");return;}
+    const auto result=watch.result.load(std::memory_order_acquire);if(!result || save.state!=0)return;
+    const auto present=RefreshedCampaignSummary(ctx,base);
+    if(!TitleRestoreEvidenceValid(title_restore.expected_campaign,present,result,watch.empty_archive.load(std::memory_order_acquire))){
+        REXLOG_ERROR("Native online title restore validation: summary valid {} present {} callback {} reload headers {} decoded {} archive {}",
+            present.has_value(),present.value_or(false),result,PPC_LOAD_U8(save.backend+103),watch.decoded.load(),PPC_LOAD_U32(save.manager+28));
+        fail("original campaign summary or refresh is invalid");return;
+    }
+    watch.generation.store(0,std::memory_order_release);
+    // Native IO is idle and the original summary has been refreshed. Drop the
+    // old campaign lease, retaining monotonically increasing callback epochs.
+    const auto generation=handoff.generation;handoff=Handoff{};handoff.generation=generation;
+    CancelNativeOnlineMenu();
+    SetNativeOnlineMenuHandoffAvailable(registered.load(std::memory_order_acquire) && REXCVAR_GET(em2_native_online_handoff) && REXCVAR_GET(em2_online_world_random));
+    title_restore.status=NativeTitleRestoreState::Ready;
+    REXLOG_INFO("Native online title restore complete: saved campaign {}; original root refreshed and menu available",*present);
+}
+}
 void UpdateNativeOnlineHandoff(PPCContext& ctx,uint8_t* base){
     // The registered native page capability authorizes Start once. A console
     // preference change must not abandon an already accepted reload midway.
+    if(title_restore.status==NativeTitleRestoreState::Ready && LiveMenu(base,ctx.r3.u32)){
+        const auto snapshot=NativeOnlineMenuHandoffDiagnostic();
+        const auto key=(uint64_t(handoff.phase)<<32)|snapshot;
+        static uint64_t previous=UINT64_MAX;
+        if(key!=previous){previous=key;REXLOG_INFO("Native title re-entry handoff diagnostic: registered {} phase {} menu {:08X}",registered.load(),unsigned(handoff.phase),snapshot);}
+    }
     if(!registered.load(std::memory_order_acquire))return;
+    if(title_restore.status==NativeTitleRestoreState::Pending){Preserve restore(ctx);RestoreTitle(ctx,base);return;}
     if(handoff.phase==Phase::Finished || handoff.phase==Phase::Failed)return;
     Preserve restore(ctx);
     const auto owner=ctx.r3.u32;
@@ -190,11 +308,16 @@ void UpdateNativeOnlineHandoff(PPCContext& ctx,uint8_t* base){
     if(!LiveMenu(base,owner))return;
     if(handoff.phase==Phase::Idle){
         auto prepared=TakeNativeOnlineMenuReady();if(!prepared)return;
-        if(prepared->session->identity().startup_policy!=StartupPolicy::NativeMenu ||
-            prepared->session->identity().initialization_policy!=InitializationPolicy::SharedNativeV1){
+        if(prepared->identity().startup_policy!=StartupPolicy::NativeMenu ||
+            prepared->identity().initialization_policy!=InitializationPolicy::SharedNativeV1){
             FailNativeOnlineMenuHandoff("This session was prepared with different native initialization settings. Enable deterministic online initialization, cancel, and host or join again.");return;
         }
-        handoff.prepared=std::move(prepared);handoff.owner=owner;
+        if(title_restore.status==NativeTitleRestoreState::Ready){
+            RecordNativeOnlineMenuReentry();title_restore=TitleRestore{};
+            REXLOG_INFO("Native online title restore: fresh lobby accepted after original offline save refresh");
+        }
+        handoff.room=bool(prepared->room);handoff.prepared=std::move(prepared);handoff.owner=owner;
+        handoff.thread=GetCurrentThreadId();handoff.native_load=em2::CurrentNativeLoadGeneration();
         handoff.routed=handoff.adopted=false;
         handoff.deadline=Clock::now()+std::chrono::seconds(45);
         handoff.phase=Phase::WaitingForIdle;
@@ -202,8 +325,8 @@ void UpdateNativeOnlineHandoff(PPCContext& ctx,uint8_t* base){
     if(!LiveMenu(base,owner) || owner!=handoff.owner){Fail("The title menu changed while preparing online play.");return;}
     if(Clock::now()>=handoff.deadline){Fail("The native save loader did not finish preparing the shared save.");return;}
     if(!handoff.adopted){
-        handoff.prepared->session->Poll();
-        if(handoff.prepared->session->state()!=State::Ready){Fail("The other player disconnected while preparing the shared game.");return;}
+        if(handoff.room)handoff.prepared->room->Poll();else handoff.prepared->session->Poll();
+        if(handoff.room?handoff.prepared->room->state()!=RoomState::Loading:handoff.prepared->session->state()!=State::Ready){Fail("A player disconnected while preparing the shared game.");return;}
     }else if(NativeOnlineStatus().state==NativeSessionState::Failed){Fail("The online connection was lost while preparing the shared game.");return;}
     NativeSave save;
     if(!ReadNativeSave(base,save)){Fail("The native save manager is unavailable at this menu.");return;}
@@ -220,7 +343,7 @@ void UpdateNativeOnlineHandoff(PPCContext& ctx,uint8_t* base){
             Fail("Could not select the shared online save: "+error);return;
         }
         handoff.routed=true;
-        if(!BeginNativeOnlineMenuPreparation(handoff.prepared->session)){
+        if(!(handoff.room?BeginNativeRoomMenuPreparation(handoff.prepared->room):BeginNativeOnlineMenuPreparation(handoff.prepared->session))){
             Fail("Could not transfer the ready connection to the native game.");return;
         }
         handoff.adopted=true;handoff.manager=save.manager;handoff.backend=save.backend;
@@ -243,12 +366,12 @@ void UpdateNativeOnlineHandoff(PPCContext& ctx,uint8_t* base){
         REXLOG_INFO("Native lobby verified refreshed campaign through original IsSavedGamePresent");
         auto* runtime=rex::Runtime::instance();
         if(!runtime){Fail("The native runtime is unavailable while retaining the online campaign.");return;}
-        auto campaign=RecordNativeOnlineHostCampaign(runtime->user_data_root(),handoff.prepared->user_data);
+        auto campaign=handoff.room?RecordNativeRoomHostCampaign(runtime->user_data_root(),handoff.prepared->user_data):RecordNativeOnlineHostCampaign(runtime->user_data_root(),handoff.prepared->user_data);
         if(!campaign.error.empty()){Fail("Could not retain the host's online campaign: "+campaign.error);return;}
         handoff.campaign_lease=std::move(campaign.lease);
         if(handoff.campaign_lease)REXLOG_INFO("Native lobby retained validated host campaign with an exclusive active-session lease");
         if(!Resume(ctx,base,owner)){Fail("The native menu did not accept Continue for the shared save.");return;}
-        if(!FinishNativeOnlineMenuPreparation()){Fail("The prepared native online session could not enter gameplay.");return;}
+        if(!(handoff.room?FinishNativeRoomMenuPreparation():FinishNativeOnlineMenuPreparation())){Fail("The prepared native online session could not enter gameplay.");return;}
         CompleteNativeOnlineMenuHandoff();
         watch.generation.store(0,std::memory_order_release);
         handoff.phase=Phase::Finished;handoff.prepared.reset();handoff.owner=0;
@@ -258,7 +381,50 @@ void UpdateNativeOnlineHandoff(PPCContext& ctx,uint8_t* base){
         REXLOG_INFO("Native lobby completed authored save reload and accepted native Continue");
     }
 }
+void TickNativeOnlineTitleMenuHandoff(PPCContext& ctx,uint8_t* base,bool completed){
+    if(!completed || !registered.load(std::memory_order_acquire) || ctx.lr!=0x83075AD4)return;
+    const auto level=em2::CurrentNativeLoadLevel();
+    if(!std::string_view(level.data()).starts_with("mainmenu."))return;
+    uint32_t owner=0;DWORD thread=0;uint64_t generation=0;
+    if(title_restore.status==NativeTitleRestoreState::Ready && handoff.phase==Phase::Idle){
+        owner=title_restore.owner;thread=title_restore.thread;generation=title_restore.native_load;
+    }else if(handoff.phase==Phase::WaitingForIdle || handoff.phase==Phase::Reloading || handoff.phase==Phase::WaitingForCompletion){
+        owner=handoff.owner;thread=handoff.thread;generation=handoff.native_load;
+    }
+    if(!owner || thread!=GetCurrentThreadId() || generation!=em2::CurrentNativeLoadGeneration() ||
+       !Readable(base,0x833EFA38,4) || ctx.r3.u32!=PPC_LOAD_U32(0x833EFA38) || !LiveMenu(base,owner))return;
+    // The restored menu can keep polling GFx while its original state update
+    // no longer services the asynchronous handoff. Use its last live owner
+    // only within the exact loaded title generation and active native state.
+    // Original Resume retires that owner and Finished prevents further calls.
+    Preserve restore(ctx);ctx.r3.u64=owner;UpdateNativeOnlineHandoff(ctx,base);
+}
 bool TestNativeOnlineHandoff(){
+    {
+        const auto old=registered.exchange(true);
+        struct RestoreRegistration{bool value;~RestoreRegistration(){registered.store(value);}}restore_registration{old};
+        PPCContext blocked{};blocked.r3.u64=0x12345678;blocked.lr=0x83075AD4;blocked.fpscr.InitHost();
+        const auto expected=blocked;const auto csr=_mm_getcsr();const auto error=GetLastError();
+        TickNativeOnlineTitleMenuHandoff(blocked,nullptr,false);
+        if(std::memcmp(&blocked,&expected,sizeof(blocked)) || _mm_getcsr()!=csr || GetLastError()!=error)return false;
+        blocked.lr=1;const auto wrong_caller=blocked;
+        TickNativeOnlineTitleMenuHandoff(blocked,nullptr,true);
+        if(std::memcmp(&blocked,&wrong_caller,sizeof(blocked)) || _mm_getcsr()!=csr || GetLastError()!=error)return false;
+    }
+
+    // A corrupt/missing existing campaign must never become a fresh-game menu.
+    // Empty profiles require their own original, completed empty-archive proof.
+    if(!TitleRestoreEvidenceValid(true,true,1,false) ||
+       !TitleRestoreEvidenceValid(false,false,2,true) ||
+       TitleRestoreEvidenceValid(true,false,2,true) ||
+       TitleRestoreEvidenceValid(false,true,1,false) ||
+       TitleRestoreEvidenceValid(false,false,2,false) ||
+       TitleRestoreEvidenceValid(true,true,2,false) ||
+       TitleRestoreEvidenceValid(true,std::nullopt,1,false) ||
+       TitleRestoreEvidenceValid(false,std::nullopt,2,true))return false;
+    const auto old_empty=watch.empty_archive.load();
+    struct RestoreEmpty{bool value;~RestoreEmpty(){watch.empty_archive.store(value);}}restore_empty{old_empty};
+
     const auto old_generation=watch.generation.load();const auto old_manager=watch.manager.load();const auto old_result=watch.result.load();const auto old_decoded=watch.decoded.load();
     struct Restore{uint64_t generation;uint32_t manager;unsigned result,decoded;~Restore(){watch.manager.store(manager);watch.result.store(result);watch.decoded.store(decoded);watch.generation.store(generation);}}restore{old_generation,old_manager,old_result,old_decoded};
     watch.manager.store(123);watch.generation.store(7);watch.result.store(0);
@@ -320,6 +486,19 @@ bool TestNativeOnlineHandoff(){
     const auto decoder=+[](PPCContext& ctx,uint8_t*){ctx.r3.u64=1;};
     ObserveArchiveRead(actual,base,decoder);if(watch.decoded.load())return false;
     actual.r3.u64=manager;actual.lr=0x82768180;ObserveArchiveRead(actual,base,decoder);if(watch.decoded.load()!=1)return false;
+    // A successful empty native archive is distinguishable from a rejected
+    // callback; neither can satisfy a required saved-campaign full load.
+    const auto empty_decode=+[](PPCContext& ctx,uint8_t* base){
+        ctx.r3.u64=manager;ctx.lr=0x82768180;
+        const auto decoder=+[](PPCContext& ctx,uint8_t*){ctx.r3.u64=1;};
+        ObserveArchiveRead(ctx,base,decoder);
+        PPC_STORE_U32(manager+28,3);PPC_STORE_U8(backend+100,0);PPC_STORE_U8(manager+303,0);
+    };
+    actual={};actual.r3.u64=1;prepare();watch.empty_archive.store(false);
+    ObserveCompletion(actual,base,empty_decode,true);
+    if(watch.result.load()!=2 || !watch.empty_archive.load())return false;
+    actual={};actual.r3.u64=0;prepare();ObserveCompletion(actual,base,empty_decode,true);
+    if(watch.result.load()!=2 || watch.empty_archive.load())return false;
     // No observer registration means no speculative read of invalid memory.
     watch.generation.store(0);actual={};actual.r3.u64=1;ObserveCompletion(actual,base,original,true);
     if(actual.r31.u64!=0x1020304050607080ull || GetLastError()!=71)return false;

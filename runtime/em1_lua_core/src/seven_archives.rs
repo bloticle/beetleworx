@@ -1,28 +1,9 @@
 //! Streaming 7z decode bridge. No output names are passed to the filesystem.
-use std::{io::{self,BufReader,Read,Seek,SeekFrom},panic::{catch_unwind,AssertUnwindSafe}};
+use std::{io::BufReader,panic::{catch_unwind,AssertUnwindSafe},ffi::c_void};
 use sevenz_rust2::{ArchiveReader,Password,Error};
-use std::ffi::c_void;
-type ReadAt=unsafe extern "C" fn(*mut c_void,u64,*mut u8,usize)->i32;
-struct Source{context:*mut c_void,read:ReadAt,length:u64,position:u64}
-impl Read for Source{fn read(&mut self,out:&mut [u8])->io::Result<usize>{
- let count=out.len().min(self.length.saturating_sub(self.position) as usize);if count==0{return Ok(0);}
- if unsafe{(self.read)(self.context,self.position,out.as_mut_ptr(),count)}==0{return Err(io::Error::other("Cannot read 7z source bytes"));}self.position+=count as u64;Ok(count)
-}}
-impl Seek for Source{fn seek(&mut self,from:SeekFrom)->io::Result<u64>{let at=match from{SeekFrom::Start(n)=>n as i128,SeekFrom::End(n)=>self.length as i128+n as i128,SeekFrom::Current(n)=>self.position as i128+n as i128};
- if !(0..=u64::MAX as i128).contains(&at){return Err(io::Error::new(io::ErrorKind::InvalidInput,"Invalid 7z seek"));}self.position=at as u64;Ok(self.position)
-}}
-type Begin=unsafe extern "C" fn(*mut c_void,u64)->i32;
-type Entry=unsafe extern "C" fn(*mut c_void,*const u8,usize,u64,i32)->i32;
-type Data=unsafe extern "C" fn(*mut c_void,*const u8,usize)->i32;
+use super::archive_stream::*;
 fn decode_error(s:impl Into<std::borrow::Cow<'static,str>>)->Error{Error::Other(s.into())}
 fn require(ok:bool,text:&str)->Result<(),String>{if ok{Ok(())}else{Err(text.into())}}
-fn normalized(name:&str,directory:bool)->Result<String,String>{
- let name=name.replace('\\',"/");let name=if directory{name.trim_end_matches('/')}else{&name};
- require(!name.is_empty() && name.len()<=32768 && !name.starts_with('/') && !name.contains(':') && !name.chars().any(|c|c.is_control()),"Unsafe 7z entry path")?;
- let parts:Vec<_>=name.split('/').collect();require(parts.len()<=64 && parts.iter().all(|p|!p.is_empty() && *p!="." && *p!=".."),"Unsafe or excessively deep 7z entry path")?;
- Ok(name.to_owned())
-}
-unsafe fn message(out:*mut u8,n:usize,s:&str){if !out.is_null() && n>0{let data=s.as_bytes();let len=data.len().min(n-1);unsafe{std::ptr::copy_nonoverlapping(data.as_ptr(),out,len);*out.add(len)=0;}}}
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bw_seven_unpack(physical:u64,context:*mut c_void,read:ReadAt,begin:Begin,entry:Entry,data:Data,error:*mut u8,capacity:usize)->i32{
  let result=catch_unwind(AssertUnwindSafe(||->Result<(),String>{

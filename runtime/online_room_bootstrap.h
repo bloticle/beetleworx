@@ -17,6 +17,7 @@ public:
     RoomBootstrapGate(const RoomBootstrapGate&)=delete;
     RoomBootstrapGate& operator=(const RoomBootstrapGate&)=delete;
     bool Attach(Room&);
+    bool ReenterLoadedWorld();
     void Detach();
     bool SetJoining(bool);
     using ReadinessProbe=bool(*)(PPCContext&,uint8_t*);
@@ -44,7 +45,7 @@ private:
     Identity identity_{};
     uint32_t thread_=0;
     uint16_t roster_=0;
-    uint64_t generation_=0,committed_tick_=0;
+    uint64_t generation_=0,committed_tick_=0,initial_tick_=0;
     std::optional<uint64_t> completed_;
     std::optional<RoomBootstrapFrame> prepared_;
     std::optional<uint64_t> submitted_;

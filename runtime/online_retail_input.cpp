@@ -1,21 +1,27 @@
 #include "online_retail_input.h"
+#include "online_movement_target.h"
 #include "allocation_trace.h"
 #include "controls.h"
 #include "simulation.h"
 #include "online_room_bootstrap.h"
 #include "online_retail_jump.h"
 #include "online_retail_buttons.h"
+#include "online_actor_frames.h"
 #include "guest_read_batch.h"
 #include <windows.h>
 #include <immintrin.h>
 #include <bit>
+#include <cmath>
 #include <cstring>
 #include <limits>
+#include <vector>
 #include <filesystem>
 #include <fstream>
 #include <thread>
 #include <stdexcept>
 #include <rex/logging.h>
+#include <rex/cvar.h>
+REXCVAR_DECLARE(bool,em2_private_profile);
 PPC_EXTERN_FUNC(__imp__sub_82732A18);
 PPC_EXTERN_FUNC(__imp__sub_82A3C930);
 PPC_EXTERN_FUNC(__imp__sub_827B58D0);
@@ -54,6 +60,19 @@ thread_local uint8_t* fixture_base=nullptr;
 thread_local uint64_t fixture_tick=0;
 bool Clock(uint64_t& tick,uint8_t* base){if(fixture_base && fixture_base==base){tick=fixture_tick;return true;}return em2::CurrentAgreedSimulationTick(tick);}
 bool Owner(uint8_t* base){return state.thread==GetCurrentThreadId() && state.world && state.base==base;}
+void Fault(const char* reason,int slot,const PPCContext& ctx,uint8_t* base){
+    const bool first=!state.faulted;state.faulted=true;
+    if(!first || !REXCVAR_GET(em2_private_profile))return;
+    Environment environment;
+    try{
+        REXLOG_ERROR("Native retail first fault: '{}' tick {} slot {} lr {:08X} r1 {:08X} r3 {:08X} r6 {:08X} r27 {:08X}",reason,state.tick,slot,uint32_t(ctx.lr),ctx.r1.u32,ctx.r3.u32,ctx.r6.u32,ctx.r27.u32);
+        if(slot>=0 && slot<2){const auto& actor=state.actors[slot];const auto& stage=state.stages[slot];
+            REXLOG_INFO("Native retail stage at fault: prepared {} delivered {} consumed {} entity {:08X} controller {:08X} motion {:08X}",stage.prepared,stage.delivered,stage.consumed,actor.entity,actor.controller,actor.motion);
+            const auto component=actor.controller+24;
+            if(Readable(component,294,base))REXLOG_INFO("Native retail fault gates: flags44 {:02X} capture233 {} target284 {:08X} alternate289 {}",PPC_LOAD_U8(component+44),PPC_LOAD_U8(component+233),PPC_LOAD_U32(component+284),PPC_LOAD_U8(component+289));
+        }
+    }catch(...){/* Diagnostic failure must not replace the original receiver fault. */}
+}
 bool Guid(uint32_t entity,std::array<uint32_t,4>& out,uint8_t* base){if(!Readable(entity,96,base))return false;uint32_t any=0;
     for(unsigned i=0;i<4;++i){out[i]=PPC_LOAD_U32(entity+4+i*4);any|=out[i];}return any!=0;}
 bool Resolve(uint32_t registry,uint32_t handle,PPCContext& ctx,uint8_t* base,uint32_t& entity){
@@ -90,7 +109,7 @@ bool Inspect(RetailActorInput& a,PPCContext& ctx,uint8_t* base){
        PPC_LOAD_U32(a.controller+16)!=0x8211DE70 || Typed(a.entity,0x833DAE58,base)!=face)return false;
     const auto component=face;
     if((PPC_LOAD_U8(component+44)&0x80) || PPC_LOAD_U8(component+233) ||
-       PPC_LOAD_U32(component+284) || PPC_LOAD_U8(component+289))return false;
+       PPC_LOAD_U8(component+289) || !ValidateNativeMovementTarget(a.registry,PPC_LOAD_U32(component+284),ctx,base))return false;
     const auto motion_face=Typed(a.entity,0x833DAF54,base);
     if(motion_face<8 || !Readable(motion_face-8,896,base))return false;a.motion=motion_face-8;
     if(PPC_LOAD_U32(a.motion)!=0x8210B598 || PPC_LOAD_U32(0x8210B598+144)!=0x829F9BA0 ||
@@ -106,7 +125,27 @@ bool Inspect(RetailActorInput& a,PPCContext& ctx,uint8_t* base){
     return true;
 }
 bool Current(unsigned slot,PPCContext& ctx,uint8_t* base){if(!Owner(base) || slot>1 || !(state.mask&(1u<<slot)))return false;
-    auto a=state.actors[slot];return Inspect(a,ctx,base) && a==state.actors[slot];}
+    auto a=state.actors[slot];const bool inspected=Inspect(a,ctx,base);const bool same=inspected && a==state.actors[slot];
+    if(!same && REXCVAR_GET(em2_private_profile)){
+        Environment environment;
+        static thread_local uint64_t trace_serial=0;
+        static thread_local std::array<uint64_t,2> trace_tick{UINT64_MAX,UINT64_MAX};
+        if(trace_serial!=state.serial){trace_serial=state.serial;trace_tick={UINT64_MAX,UINT64_MAX};}
+        if(trace_tick[slot]!=state.tick){
+            trace_tick[slot]=state.tick;const auto& before=state.actors[slot];
+            REXLOG_INFO("Native retail lease mismatch: tick {} slot {} inspected {} entity {:08X}/{:08X} controller {:08X}/{:08X} motion {:08X}/{:08X} reference {:08X}/{:08X}",
+                state.tick,slot,inspected,before.entity,a.entity,before.controller,a.controller,before.motion,a.motion,before.reference,a.reference);
+            REXLOG_INFO("Native retail reference GUID: before {:08X}/{:08X}/{:08X}/{:08X} after {:08X}/{:08X}/{:08X}/{:08X}",
+                before.reference_guid[0],before.reference_guid[1],before.reference_guid[2],before.reference_guid[3],a.reference_guid[0],a.reference_guid[1],a.reference_guid[2],a.reference_guid[3]);
+            if(Readable(before.controller+24,294,base)){
+                const auto component=before.controller+24;
+                REXLOG_INFO("Native retail controller state: tick {} slot {} flags44 {:02X} flag233 {} target284 {:08X} flag289 {} reference72 {:08X}",
+                    state.tick,slot,PPC_LOAD_U8(component+44),PPC_LOAD_U8(component+233),PPC_LOAD_U32(component+284),PPC_LOAD_U8(component+289),PPC_LOAD_U32(component+72));
+            }
+        }
+    }
+    return same;
+}
 bool CurrentControllerOwner(unsigned slot,PPCContext& ctx,uint8_t* base){
     // Quarantine persists if the same actor enters pause/transition after a
     // partially delivered frame. It must not claim a replacement/load reuse.
@@ -281,17 +320,26 @@ void UpdateRetailBasisController(PPCContext& ctx,uint8_t* base,PPCFunc* next){
         if((state.mask&(1u<<i)) && ctx.r3.u32==state.actors[i].controller+24){selected=int(i);break;}}
     if(selected<0){const auto previous=update_slot;update_slot=-1;struct Restore{int prior;~Restore(){update_slot=prior;}}restore{previous};next(ctx,base);return;}
     auto& stage=state.stages[selected];
-    {Environment environment;if(update_slot!=-1 || !Current(selected,ctx,base) || !stage.prepared || !stage.delivered || stage.consumed){state.faulted=true;return;}}
+    {Environment environment;if(update_slot!=-1 || !Current(selected,ctx,base) || !stage.prepared || !stage.delivered || stage.consumed){Fault("controller preflight",selected,ctx,base);return;}}
     update_slot=selected;struct Reset{~Reset(){update_slot=-1;}}reset;
     try{next(ctx,base);}catch(...){state.faulted=true;throw;}
-    if(!stage.consumed)state.faulted=true;
+    if(!stage.consumed)Fault("original controller skipped the claimed Motion callback",selected,ctx,base);
 }
 bool ApplyRetailBasisMotion(PPCContext& ctx,uint8_t* base,PPCFunc* native){
     if(update_slot<0)return false;const auto slot=unsigned(update_slot);auto& stage=state.stages[slot];const auto& a=state.actors[slot];
     bool admitted=false;{Environment environment;admitted=Active(state.tick,base) && Current(slot,ctx,base) && stage.prepared && stage.delivered && !stage.consumed &&
         ctx.lr==0x827837E8 && ctx.r27.u32==a.controller+24 && ctx.r3.u32==a.motion && ctx.r31.u32==ctx.r1.u32 &&
         ctx.r6.u32==ctx.r1.u32+96 && Readable(ctx.r6.u32,16,base);}
-    if(!admitted){state.faulted=true;return true;} // Never fall through to a receiver-local basis inside a claimed retail update.
+    if(!admitted){Fault("Motion callback scope",int(slot),ctx,base);return true;} // Never fall through to a receiver-local basis inside a claimed retail update.
+    if(PPC_LOAD_U32(a.controller+24+284)){
+        // Original 827835A8 resolved the authored frame and normalized its
+        // full 3D forward vector at 82783710..827837DC. Keep that calculation;
+        // a sender's ordinary camera basis must not replace a scripted frame.
+        bool valid=true;
+        {Environment environment;double length=0;for(unsigned i=0;i<3;++i){const auto v=std::bit_cast<float>(PPC_LOAD_U32(ctx.r6.u32+i*4));valid&=std::isfinite(v);length+=double(v)*v;}valid&=std::isfinite(length) && length<=1.001;}
+        if(!valid){Fault("invalid authored direction vector",int(slot),ctx,base);return true;}
+        stage.consumed=true;native(ctx,base);return true;
+    }
     const auto argument=ctx.r6.u32;std::array<uint8_t,16> saved;std::memcpy(saved.data(),base+argument,16);
     struct Restore{uint8_t* destination;const std::array<uint8_t,16>& saved;~Restore(){std::memcpy(destination,saved.data(),16);}}restore{base+argument,saved};
     stage.consumed=true;
@@ -440,6 +488,46 @@ bool TestNativeRetailInput(){
            "ORIGINAL controller projection and Motion setter receive own sender basis, not local pitched camera"))return false;
     }
     if(!check(FinishRetailInputTick(10,ctx,base) && !FinishRetailInputTick(10,ctx,base),"full native Movement tick completes once"))return false;
+    // Original target-frame path: resolve an authored entity through the real
+    // registry and retain its full 3D transform direction, not sender camera yaw.
+    PPC_STORE_U32(0x9000,3);auto target_hash=context();target_hash.r3.u64=0x9000;__imp__sub_827B58D0(target_hash,base);
+    const auto target_bucket=buckets+(target_hash.r3.u32%4)*4;
+    PPC_STORE_U32(0x8600,3);PPC_STORE_U32(0x8604,references[0]);PPC_STORE_U32(0x8608,PPC_LOAD_U32(target_bucket));PPC_STORE_U32(target_bucket,0x8600);
+    if(!check(ValidateNativeMovementTarget(registry,3,ctx,base),"authored movement target resolves a real GUID-bearing entity with native Frame"))return false;
+    for(unsigned malformed=0;malformed<5;++malformed){
+        const auto saved_count=PPC_LOAD_U32(references[0]+44),saved_list=PPC_LOAD_U32(references[0]+36),saved_guid=PPC_LOAD_U32(references[0]+4);
+        if(malformed==0)PPC_STORE_U32(references[0]+44,257);
+        if(malformed==1)PPC_STORE_U32(references[0]+36,0xDEAD0000);
+        if(malformed==2)PPC_STORE_U32(references[0]+4,0);
+        if(malformed==3)PPC_STORE_U32(references[0]+528,0);
+        const auto saved_ctx=ctx;const auto saved_fp=_mm_getcsr();const auto saved_error=GetLastError();
+        const auto valid=ValidateNativeMovementTarget(registry,malformed==4?0xDEADu:3u,ctx,base);
+        const bool preserved=!std::memcmp(&saved_ctx,&ctx,sizeof(ctx)) && saved_fp==_mm_getcsr() && saved_error==GetLastError();
+        PPC_STORE_U32(references[0]+44,saved_count);PPC_STORE_U32(references[0]+36,saved_list);PPC_STORE_U32(references[0]+4,saved_guid);PPC_STORE_U32(references[0]+528,0x82090340);
+        if(!check(!valid && preserved,"malformed/absent target rejects before native movement, preserving caller/FP/error"))return false;
+    }
+    PPC_STORE_U32(controllers[0]+24+284,3);
+    RoomFrame targeted=frame;targeted.tick=11;targeted.players[0].forward_x=0;targeted.players[0].forward_z=-1;
+    raw.tick=11;fixture_tick=11;
+    if(!check(ValidateRetailMovementFrame(targeted,ctx,base)==Result::Applied && em2::PublishSynchronizedControls(raw) && BeginRetailBasisTick(registry,11,ctx,base),"authored target supports the next canonical native tick without replacing receiver leases"))return false;
+    for(unsigned i=0;i<2;++i){
+        const auto& command=targeted.players[i];
+        if(!check(PrepareRetailMovement(i,command,11,ctx,base)==Result::Applied && ReplayRetailMovement(i,{event,0xA000u+i*512,command.x,command.y},11,ctx,base)==Result::Applied,"authored-frame input still executes original Movement callbacks"))return false;
+        auto call=context();call.r3.u64=controllers[i]+24;
+        if(i==0){
+            const auto input_fp=_mm_getcsr();auto original=call;
+            const auto original_memory=std::vector<uint8_t>(base,base+0x60000);
+            FixtureBoundedController(original,base);const auto original_fp=_mm_getcsr();
+            const auto expected_memory=std::vector<uint8_t>(base,base+0x60000);
+            std::memcpy(base,original_memory.data(),original_memory.size());_mm_setcsr(input_fp);
+            UpdateRetailBasisController(call,base,FixtureBoundedController);
+            if(!check(!std::memcmp(&call,&original,sizeof(call)) && !std::memcmp(base,expected_memory.data(),expected_memory.size()) && _mm_getcsr()==original_fp,
+                "authored-frame adapter matches original full guest context, fixture memory and FP status"))return false;
+        }else UpdateRetailBasisController(call,base,FixtureBoundedController);
+    }
+    const auto nx=std::bit_cast<float>(PPC_LOAD_U32(motions[0]+176)),ny=std::bit_cast<float>(PPC_LOAD_U32(motions[0]+180)),nz=std::bit_cast<float>(PPC_LOAD_U32(motions[0]+184));
+    if(!check(state.stages[0].consumed && std::abs(nx-3.f/13.f)<1e-6f && std::abs(ny+12.f/13.f)<1e-6f && std::abs(nz-4.f/13.f)<1e-6f && FinishRetailInputTick(11,ctx,base),"ORIGINAL authored-frame normalization and full XYZ reach original Motion; opposite sender camera basis is not substituted"))return false;
+    PPC_STORE_U32(controllers[0]+24+284,0);
     auto ordinary=context();ordinary.r3.u64=a.listener;ordinary.r5.u64=0xA000;
     if(!check(SuppressRetailMovement(ordinary,base),"ordinary input remains quarantined between completed gameplay ticks"))return false;
     RetailActorInput retained;
@@ -453,17 +541,23 @@ bool TestNativeRetailInput(){
     if(!em2::BeginSynchronizedControls(10))return false;
     restore.controls=em2::SynchronizedControlsGeneration();DisarmRetailInput();
     if(!ArmRetailInput(77,registry,restore.controls,3,{101,102},10,ctx,base))return false;
+    std::array<uint64_t,kOnlineRoomCapacity> frame_epochs{};frame_epochs[0]=101;frame_epochs[1]=102;
+    OwnedMovementFrames button_frames;
+    if(!check(button_frames.Configure(3,3,frame_epochs,10,registry,ValidateRetailMovementFrame),
+        "shared actor transaction requires actual armed native retail admission"))return false;
     auto button_drive=[&](const RoomFrame& input){
-        if(ValidateRetailMovementFrame(input,ctx,base)!=Result::Applied || ValidateRetailButtonFrame(input,ctx,base)!=Result::Applied)return false;
+        if(button_frames.Preflight(input,ctx,base)!=OwnedFrameResult::Ready || ValidateRetailButtonFrame(input,ctx,base)!=Result::Applied)return false;
         Frame pads;pads.tick=input.tick;for(unsigned i=0;i<2;++i)pads.players[i]=input.players[i].pad;
         fixture_tick=input.tick;
-        if(!em2::PublishSynchronizedControls(pads) || !BeginRetailBasisTick(registry,input.tick,ctx,base))return false;
+        if(!em2::PublishSynchronizedControls(pads) || button_frames.Deliver(input,ctx,base)!=OwnedFrameResult::Ready ||
+            !BeginRetailBasisTick(registry,input.tick,ctx,base))return false;
         for(unsigned i=0;i<2;++i)if(PrepareRetailMovement(i,input.players[i],input.tick,ctx,base)!=Result::Applied)return false;
         for(unsigned i=0;i<2;++i)if(ReplayRetailMovement(i,{event,0xA000u+i*512,input.players[i].x,input.players[i].y},input.tick,ctx,base)!=Result::Applied)return false;
         for(unsigned i=0;i<2;++i)if(ReplayRetailButtonBatch(i,input,ctx,base)!=Result::Applied ||
             ReplayRetailButtonBatch(i,input,ctx,base)==Result::Applied)return false;
         for(unsigned i=0;i<2;++i){auto call=context();call.r3.u64=controllers[i]+24;UpdateRetailBasisController(call,base,FixtureBoundedController);}
-        return FinishRetailButtonTick(input.tick,ctx,base)==Result::Applied && FinishRetailInputTick(input.tick,ctx,base);
+        return FinishRetailButtonTick(input.tick,ctx,base)==Result::Applied && FinishRetailInputTick(input.tick,ctx,base) &&
+            button_frames.Finish(input.tick,base)==OwnedFrameResult::Ready;
     };
     if(!check(TestRetailButtonReceivers(ctx,base,button_drive),"native buttons consume complete staged frames through original character handlers"))return false;
     // Independent lifecycle for the native Jump fixture. Never reset a live
@@ -474,11 +568,15 @@ bool TestNativeRetailInput(){
     if(!check(!RetailInputQuarantineFor(0,ctx,base,retained),"replacement controls generation cannot inherit old quarantine"))return false;
     DisarmRetailInput();
     if(!check(ArmRetailInput(77,registry,restore.controls,3,{101,102},10,ctx,base),"fresh Jump receiver leases"))return false;
+    OwnedMovementFrames jump_frames;
+    if(!check(jump_frames.Configure(3,3,frame_epochs,10,registry,ValidateRetailMovementFrame),
+        "shared actor transaction starts fresh with native Jump receiver lifecycle"))return false;
     auto drive=[&](const RoomFrame& input){
-        if(ValidateRetailMovementFrame(input,ctx,base)!=Result::Applied || ValidateRetailJumpFrame(input,ctx,base)!=Result::Applied)return false;
+        if(jump_frames.Preflight(input,ctx,base)!=OwnedFrameResult::Ready || ValidateRetailJumpFrame(input,ctx,base)!=Result::Applied)return false;
         Frame pads;pads.tick=input.tick;for(unsigned i=0;i<2;++i)pads.players[i]=input.players[i].pad;
         fixture_tick=input.tick;
-        if(!em2::PublishSynchronizedControls(pads) || !BeginRetailBasisTick(registry,input.tick,ctx,base))return false;
+        if(!em2::PublishSynchronizedControls(pads) || jump_frames.Deliver(input,ctx,base)!=OwnedFrameResult::Ready ||
+            !BeginRetailBasisTick(registry,input.tick,ctx,base))return false;
         for(unsigned i=0;i<2;++i){const auto action=0xA000u+i*512;
             NativeActorAction native{event,action,input.players[i].x,input.players[i].y};
             if(PrepareRetailMovement(i,input.players[i],input.tick,ctx,base)!=Result::Applied ||
@@ -492,7 +590,8 @@ bool TestNativeRetailInput(){
             struct RestoreFsm {uint8_t* base;uint32_t at,previous;~RestoreFsm(){PPC_STORE_U32(at,previous);}}restore_fsm{base,controllers[i]+104,previous};
             auto call=context();call.r3.u64=controllers[i]+24;UpdateRetailBasisController(call,base,FixtureBoundedController);
         }
-        return FinishRetailJumpTick(input.tick,ctx,base)==Result::Applied && FinishRetailInputTick(input.tick,ctx,base);
+        return FinishRetailJumpTick(input.tick,ctx,base)==Result::Applied && FinishRetailInputTick(input.tick,ctx,base) &&
+            jump_frames.Finish(input.tick,base)==OwnedFrameResult::Ready;
     };
     if(!check(TestRetailJumpReceiver(ctx,base,drive),"native Jump replay consumes complete agreed retail frames"))return false;
     // A partial native frame cannot release ordinary input when its clock

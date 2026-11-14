@@ -1,9 +1,10 @@
-   function _em2OnlineRead(id)
+   function _em2OnlineRead(id,offset)
    {
+      if(offset == undefined) offset = 0;
       var text = ""; var escaped = ""; var hex = "0123456789ABCDEF"; var i = 0;
       while(i < 400)
       {
-         var value = _level0.SetOption(id,i);
+         var value = _level0.SetOption(id,offset+i);
          if(value == undefined || value <= 0) break;
          text += String.fromCharCode(value);
          escaped += "%" + hex.charAt(value >> 4) + hex.charAt(value & 15);
@@ -19,9 +20,11 @@
    }
    function _em2OnlineOpen()
    {
-      if(_level0.SetOption(7203,-1) == 1) { this.b_5.disable(); this.b_5._visible = false; return; }
+      if(_level0.SetOption(2743,-1) != 1) { this.b_5.disable(); this.b_5._visible = false; return; }
       this._em2Online = true;
       this._em2OnlineHostPage = false;
+      this._em2OnlinePlayerPage = false;
+      this._em2OnlineRosterPage = false;
       _level0.SetOption(2700,0);
       if(this._em2OnlineHelp == undefined)
       {
@@ -43,6 +46,7 @@
    }
    function _em2OnlineClose()
    {
+      this._em2OnlineRestoreRosterColors();
       if(this._em2OnlineEditingName) this._em2OnlineEndName(false);
       _level0.SetOption(2700,6);
       this._em2Online = false;
@@ -52,16 +56,17 @@
       this._setText();
       var i = 0; while(i < this._items.length) { this._items[i].enable(); this._items[i]._visible = true; i++; }
       if(!_level0.IsSavedGamePresent()) { this.b_main.disable(); this.b_main._visible = false; }
-      if(_level0.SetOption(7203,-1) == 1) { this.b_5.disable(); this.b_5._visible = false; this._list.activate(0); }
+      if(_level0.SetOption(2743,-1) != 1) { this.b_5.disable(); this.b_5._visible = false; this._list.activate(0); }
       else this._list.activate(5);
    }
    function _em2OnlineRefresh()
    {
       if(!this._em2Online || this._em2OnlineEditingName) return;
-      if(_level0.SetOption(7203,-1) == 1) { this._em2OnlineClose(); return; }
+      if(_level0.SetOption(2743,-1) != 1) { this._em2OnlineClose(); return; }
       var state = _level0.SetOption(2701,-1);
       this._em2OnlineState = state;
       var idle = state == 0 || state == 9;
+      var internet = _level0.SetOption(2743,1) == 1;
       if(this._em2OnlineHostPage && !idle) this._em2OnlineHostPage = false;
       if(this._em2OnlineHostPage)
       {
@@ -70,7 +75,7 @@
          var scanning = _level0.SetOption(2714,-1) == 1;
          this._em2OnlineButton(0,"Host offline campaign",true);
          this._em2OnlineButton(1,archives > 0 ? "Resume online campaign " + (archive+1) + "/" + archives : "No online campaigns yet",!scanning && archives > 0);
-         this._em2OnlineButton(2,_level0.SetOption(2716,-1) == 1 ? "Visibility: Discoverable on LAN" : "Visibility: Invite only",true);
+         this._em2OnlineButton(2,internet ? "Invite only" : (_level0.SetOption(2716,-1) == 1 ? "Visibility: Discoverable on LAN" : "Visibility: Invite only"),!internet);
          this._em2OnlineButton(3,"Next campaign",!scanning && archives > 1);
          this._em2OnlineButton(4,scanning ? "Checking campaigns..." : "Refresh campaigns",!scanning);
          this._em2OnlineButton(5,"Back",true);
@@ -88,12 +93,59 @@
       {
          var editable = _level0.SetOption(2720,-1) == 1;
          var ready = _level0.SetOption(2721,-1) == 1;
+         var room = _level0.SetOption(2731,-1) == 1;
+         if(room && this._em2OnlineRosterPage)
+         {
+            var page = _level0.SetOption(2741,0);
+            var pages = _level0.SetOption(2741,1);
+            var row = 0;
+            while(row < 4)
+            {
+               var name = this._em2OnlineRead(2738,row*128);
+               this._em2OnlineButton(row,name,name != "");
+               this._items[row].t_label.textColor = _level0.SetOption(2739,row);
+               if(this._list.activeItem == this._items[row]) this._em2OnlineRosterSelected = row;
+               row++;
+            }
+            this._em2OnlineButton(4,"Next players (" + page + "/" + pages + ")",pages > 1);
+            this._em2OnlineButton(5,"Back",true);
+            this._em2OnlineHelp.textColor = 16777215;
+            this._em2OnlineHelp.text = this._em2OnlineRead(2740,this._em2OnlineRosterSelected*128);
+            this._em2OnlineRefreshTime = getTimer();
+            return;
+         }
+         if(room && this._em2OnlinePlayerPage)
+         {
+            this._em2OnlineButton(0,"Name: " + this._em2OnlineRead(2722),editable);
+            this._em2OnlineButton(1,"Character: " + (_level0.SetOption(2732,-1) == 0 ? "Mickey" : "Oswald"),_level0.SetOption(2737,-1) == 1);
+            this._em2OnlineButton(2,"Pants / name color: " + this._em2OnlineRead(2733),editable);
+            this._em2OnlineButton(3,"View players",true);
+            this._em2OnlineButton(4,"Back",true);
+            this._em2OnlineButton(5,"Leave lobby",true);
+            this._em2OnlineHelp.textColor = 16777215;
+            this._em2OnlineHelp.text = this._em2OnlineRead(2726);
+            this._em2OnlineRefreshTime = getTimer();
+            return;
+         }
+         if(room)
+         {
+            this._em2OnlineButton(0,isHost ? (canStart ? "Start online game" : "Waiting for players to be ready") : "Waiting for host",canStart);
+            this._em2OnlineButton(1,"Player options",true);
+            this._em2OnlineButton(2,isHost ? "Host" : (ready ? "Ready (select to cancel)" : "Not ready (select when ready)"),editable && !isHost);
+            this._em2OnlineButton(3,"Players: " + _level0.SetOption(2741,2) + "/" + _level0.SetOption(2736,-1),true);
+            this._em2OnlineButton(4,"Copy invite",isHost);
+            this._em2OnlineButton(5,"Leave lobby",true);
+            this._em2OnlineHelp.textColor = 16777215;
+            this._em2OnlineHelp.text = this._em2OnlineRead(2710);
+            this._em2OnlineRefreshTime = getTimer();
+            return;
+         }
          var roster = this._em2OnlineRead(2723);
          this._em2OnlineButton(0,isHost ? (canStart ? "Start online game" : "Waiting for guest readiness") : "Waiting for host",canStart);
          this._em2OnlineButton(1,"Name: " + this._em2OnlineRead(2722),editable);
          this._em2OnlineButton(2,isHost ? "Host" : (ready ? "Ready (select to cancel)" : "Not ready (select when ready)"),editable && !isHost);
-         this._em2OnlineButton(3,"Players connected: " + roster.split("\n").length,false);
-         this._em2OnlineButton(4,"Shared campaign",false);
+         this._em2OnlineButton(3,room ? ("Character: " + (_level0.SetOption(2732,-1) == 0 ? "Mickey" : "Oswald")) : ("Players connected: " + roster.split("\n").length),room && _level0.SetOption(2737,-1) == 1);
+         this._em2OnlineButton(4,room ? ("Pants / name color: " + this._em2OnlineRead(2733)) : "Shared campaign",room && editable);
          this._em2OnlineButton(5,"Leave lobby",true);
          var profileMessage = this._em2OnlineRead(2726);
          if(profileMessage == "") profileMessage = this._em2OnlineNameError;
@@ -103,14 +155,24 @@
          this._em2OnlineRefreshTime = getTimer();
          return;
       }
+      this._em2OnlineRestoreRosterColors();
+      this._em2OnlinePlayerPage = false;
+      this._em2OnlineRosterPage = false;
       var connectedLabel = isHost ? "Session connected" : "Waiting for host";
       this._em2OnlineButton(0,state == 6 ? (canStart ? "Start online game" : connectedLabel) : (state == 7 ? "Preparing game..." : "Host game"),idle || canStart);
-      this._em2OnlineButton(1,"Join copied invite",idle);
+      this._em2OnlineButton(1,internet ? "Join copied room code" : "Join copied invite",idle);
       this._em2OnlineButton(2,"Find LAN games",idle);
       this._em2OnlineButton(3,count > 0 ? "Join LAN game " + (selected+1) + "/" + count : "No LAN games found",idle && count > 0);
       var inviteLabel = _level0.SetOption(2715,1) == 1 ? "Copy Internet invite" : "Copy LAN invite";
       if(idle) inviteLabel = _level0.SetOption(2715,0) == 1 ? "Auto Internet port: On" : "Auto Internet port: Off";
       this._em2OnlineButton(4,inviteLabel,idle || canCopy);
+      if(internet)
+      {
+         this.b_2.disable(); this.b_2._visible = false;
+         this.b_3.disable(); this.b_3._visible = false;
+         this._em2OnlineButton(4,"Copy room code",canCopy);
+         if(idle) this.b_4._visible = false;
+      }
       this._em2OnlineButton(5,idle ? "Back" : "Cancel session",state != 7);
       var message = this._em2OnlineRead(2710);
       if(idle && count > 0) message += "\nLAN host: " + this._em2OnlineRead(2712) + ". Left / Right selects a host.";
@@ -120,16 +182,45 @@
    }
    function _em2OnlineSelect()
    {
-      if(_level0.SetOption(7203,-1) == 1) { this._em2OnlineClose(); return; }
+      if(_level0.SetOption(2743,-1) != 1) { this._em2OnlineClose(); return; }
       if(this._em2OnlineEditingName) { this._em2OnlineEndName(true); return; }
       if(this._em2OnlineEditEndedAt != undefined && getTimer() - this._em2OnlineEditEndedAt < 150) return;
       var item = this._list.activeItem; var state = this._em2OnlineState;
       if(state == 7) return;
       if(state == 6)
       {
+         if(_level0.SetOption(2731,-1) == 1)
+         {
+            if(this._em2OnlineRosterPage)
+            {
+               if(item == this.b_4) { _level0.SetOption(2742,0); this._em2OnlineRosterSelected = 0; }
+               else if(item == this.b_5) { this._em2OnlineBack(); return; }
+            }
+            else if(this._em2OnlinePlayerPage)
+            {
+               if(item == this.b_main) { this._em2OnlineBeginName(); return; }
+               else if(item == this.b_1) _level0.SetOption(2734,0);
+               else if(item == this.b_2) _level0.SetOption(2735,0);
+               else if(item == this.b_3) { this._em2OnlineShowRoster(true); return; }
+               else if(item == this.b_4) { this._em2OnlineBack(); return; }
+               else if(item == this.b_5) _level0.SetOption(2700,6);
+            }
+            else
+            {
+               if(item == this.b_main) _level0.SetOption(2700,7);
+               else if(item == this.b_1) { this._em2OnlinePlayerPage = true; this._em2OnlineRefresh(); this._list.activate(0); return; }
+               else if(item == this.b_2) _level0.SetOption(2725,0);
+               else if(item == this.b_3) { this._em2OnlineShowRoster(false); return; }
+               else if(item == this.b_4) _level0.SetOption(2700,5);
+               else if(item == this.b_5) _level0.SetOption(2700,6);
+            }
+            this._em2OnlineRefresh(); return;
+         }
          if(item == this.b_main) _level0.SetOption(2700,7);
          else if(item == this.b_1) { this._em2OnlineBeginName(); return; }
          else if(item == this.b_2) _level0.SetOption(2725,0);
+         else if(item == this.b_3) _level0.SetOption(2734,0);
+         else if(item == this.b_4) _level0.SetOption(2735,0);
          else if(item == this.b_5) _level0.SetOption(2700,6);
          this._em2OnlineRefresh(); return;
       }
@@ -162,7 +253,7 @@
    function _em2OnlineTick()
    {
       if(!this._em2Online) return;
-      if(_level0.SetOption(7203,-1) == 1) { this._em2OnlineClose(); return; }
+      if(_level0.SetOption(2743,-1) != 1) { this._em2OnlineClose(); return; }
       var state = _level0.SetOption(2701,-1);
       if(this._em2OnlineEditingName)
       {
@@ -241,7 +332,7 @@
       this._em2OnlineNameHint._visible = false;
       this._em2OnlineHelp._visible = true;
       Selection.setFocus(null);
-      this._list.activate(1);
+      this._list.activate(this._em2OnlinePlayerPage ? 0 : 1);
       this._em2OnlineRefresh();
    }
    function _em2OnlineKeyDown()
@@ -253,7 +344,41 @@
          else if(editKey == 27) this._em2OnlineEndName(false);
          return;
       }
-      if(!this._em2Online || !(this._em2OnlineState == 0 || this._em2OnlineState == 9)) return;
+      if(!this._em2Online) return;
       var key = Key.getCode();
+      if(this._em2OnlineState == 6 && this._em2OnlineRosterPage)
+      {
+         if(key == 37 || key == 39) { _level0.SetOption(2742,key == 39 ? 0 : 1); this._em2OnlineRosterSelected = 0; this._em2OnlineRefresh(); }
+         return;
+      }
+      if(!(this._em2OnlineState == 0 || this._em2OnlineState == 9)) return;
       if(key == 37 || key == 39) { _level0.SetOption(2700,this._em2OnlineHostPage ? (key == 39 ? 14 : 13) : (key == 39 ? 8 : 9)); this._em2OnlineRefresh(); }
+   }
+   function _em2OnlineShowRoster(fromPlayerPage)
+   {
+      var i = 0;
+      while(i < 4) { this._items[i]._em2OnlineSavedTextColor = this._items[i].t_label.textColor; i++; }
+      this._em2OnlineRosterReturnPlayer = fromPlayerPage;
+      this._em2OnlineRosterSelected = 0;
+      this._em2OnlineRosterPage = true;
+      _level0.SetOption(2742,2);
+      this._em2OnlineRefresh(); this._list.activate(0);
+   }
+   function _em2OnlineBack()
+   {
+      if(this._em2OnlineEditingName) { this._em2OnlineEndName(false); return; }
+      if(this._em2OnlineRosterPage) { this._em2OnlineRestoreRosterColors(); this._em2OnlineRosterPage = false; this._em2OnlinePlayerPage = this._em2OnlineRosterReturnPlayer; this._em2OnlineRefresh(); this._list.activate(3); return; }
+      if(this._em2OnlinePlayerPage) { this._em2OnlinePlayerPage = false; this._em2OnlineRefresh(); this._list.activate(1); return; }
+      if(this._em2OnlineHostPage) { this._em2OnlineHostPage = false; this._em2OnlineRefresh(); return; }
+      if(this._em2OnlineState != 7) this._em2OnlineClose();
+   }
+   function _em2OnlineRestoreRosterColors()
+   {
+      var i = 0;
+      while(i < 4)
+      {
+         var button = this._items[i];
+         if(button._em2OnlineSavedTextColor != undefined) { button.t_label.textColor = button._em2OnlineSavedTextColor; delete button._em2OnlineSavedTextColor; }
+         i++;
+      }
    }

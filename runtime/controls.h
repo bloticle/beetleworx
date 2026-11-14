@@ -22,6 +22,7 @@ void ControlKey(unsigned key,bool down);
 void ControlWheel(int horizontal,int vertical);
 void ClearControlKeys();
 void SetExternalControlCapture(bool captured);
+void SetChatControlCapture(bool captured);
 // Simulation-thread online setup: a temporary native P2 Start controller.
 // Ends before canonical session input attaches; never alters saved bindings.
 void SetOnlineJoinControls(bool enabled,bool press_start=false);

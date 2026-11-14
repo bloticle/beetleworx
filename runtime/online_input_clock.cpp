@@ -1,4 +1,6 @@
 #include "online_input_clock.h"
+#include "online.h"
+#include "controls.h"
 #include "guest_read_batch.h"
 #include "ppc_context.h"
 #include <windows.h>
@@ -16,6 +18,7 @@ PPC_EXTERN_FUNC(__imp__sub_830A8C48);
 PPC_EXTERN_FUNC(__imp__sub_827C06A8);
 PPC_EXTERN_FUNC(__imp__sub_831C14E0);
 PPC_EXTERN_FUNC(__imp__sub_831C1558);
+PPC_EXTERN_FUNC(__imp__sub_826572B8);
 PPC_EXTERN_FUNC(sub_826C9F38);
 namespace em2::net {
 namespace {
@@ -61,6 +64,35 @@ void CanonicalQueryVolatiles(PPCContext& ctx,uint64_t counter){
     // Exact original826C9F38 mftb/rotlwi. effects. Its low-word-zero second
     // read sees the same source counter here; it never consumes another tick.
     ctx.r11.u64=counter;ctx.r10.u64=uint32_t(counter);ctx.cr0.compare<int32_t>(ctx.r10.s32,0,ctx.xer);
+}
+struct LiveClock {
+    PPCContext* context=nullptr;uint8_t* base=nullptr;uint32_t stack=0,caller=0;uint64_t counter=0;bool failed=false;
+};
+thread_local LiveClock* live_clock=nullptr;
+bool RunLiveClockHelper(PPCContext& ctx,uint8_t* base,PPCFunc* original,uint64_t tick){
+    // Normalize only the owned input helper's output/stamp. Never temporarily
+    // rewrite shared clock globals: streaming/audio workers can read them too.
+    constexpr uint64_t origin=100000000,frequency=30000000,step=1000000;
+    ClockFields saved;
+    if(active || live_clock || tick>(uint64_t(INT64_MAX)-origin)/step || !ReadFields(base,saved))return false;
+    const auto timer=ctx.r3.u32;const double delay=ctx.f1.f64;
+    if(original==__imp__sub_831C14E0 && (!std::isfinite(delay) || std::abs(delay)>3600))return false;
+    LiveClock clock{&ctx,base,ctx.r1.u32,uint32_t(ctx.lr),origin+tick*step};
+    struct Restore {LiveClock* previous;~Restore(){live_clock=previous;}}restore{live_clock};
+    live_clock=&clock;original(ctx,base);
+    if(clock.failed){GameplayInputGate().ObservationFailed();return true;}
+    Environment preserve_math;
+    if(original==__imp__sub_826572B8)ctx.f1.f64=double(float(double(tick)/30.));
+    else if(original==__imp__sub_831C14E0){
+        // Preserve the native float multiply/truncation and zero sentinel,
+        // expressed in the input-only counter units rather than host QPC units.
+        const auto offset=int64_t(float(float(frequency)*float(delay)));
+        auto stamp=clock.counter+uint64_t(offset);if(!stamp)stamp=1;PPC_STORE_U64(timer,stamp);
+    }else if(original==__imp__sub_831C1558){
+        const auto delta=int64_t(clock.counter-PPC_LOAD_U64(timer));
+        ctx.f1.f64=double(float(float(delta)*(1.f/float(frequency))));
+    }
+    return true;
 }
 }
 struct NativeInputClockState::Impl {
@@ -123,6 +155,15 @@ bool RunNativeInputClock(NativeInputClockState& clock,uint64_t epoch,uint64_t ti
     original=next;return true;
 }
 bool TryNativeInputClockQuery(PPCContext& ctx,uint8_t* base){
+    if(auto* live=live_clock;live && live->context==&ctx && live->base==base){
+        const bool owned=ctx.lr==0x826572F4 || ctx.lr==0x831C1504 || ctx.lr==0x831C1574;
+        if(!owned)return false;
+        if(uint64_t(ctx.r1.u32)+112!=live->stack || !Readable(ctx.r1.u32,112,base) ||
+           PPC_LOAD_U32(ctx.r1.u32+104)!=live->caller || ctx.r3.u32!=ctx.r1.u32+80){
+            live->failed=true;CanonicalQueryVolatiles(ctx,live->counter);ctx.r3.u64=0;return true;
+        }
+        PPC_STORE_U64(ctx.r3.u32,live->counter);CanonicalQueryVolatiles(ctx,live->counter);ctx.r3.u64=1;return true;
+    }
     if(!active || active->base!=base || active->context!=&ctx || active->thread!=GetCurrentThreadId())return false;
     auto& s=*active;
     const bool seconds=ctx.lr==0x826572F4,start=ctx.lr==0x831C1504,elapsed=ctx.lr==0x831C1574;
@@ -148,6 +189,17 @@ bool TryNativeInputClockQuery(PPCContext& ctx,uint8_t* base){
     // Only its private native stack output can be written on that error path.
     if(output_owned)PPC_STORE_U64(output,s.counter);
     ctx.r3.u64=owned && output_owned?1:0;return true;
+}
+bool RunAgreedNativeInputClockHelper(PPCContext& ctx,uint8_t* base,PPCFunc* original){
+    if(active || live_clock || !GameplayInputGate().active())return false;
+    const auto caller=uint32_t(ctx.lr);
+    const bool button=original==__imp__sub_826572B8 && (caller==0x830A8C90 || caller==0x827C06F8);
+    const bool start=original==__imp__sub_831C14E0 && caller==0x827C62BC;
+    const bool elapsed=original==__imp__sub_831C1558 && (caller==0x827C6054 || caller==0x827C628C);
+    if(!button && !start && !elapsed)return false;
+    uint64_t generation=0;Frame frame;
+    if(!em2::ReadPublishedSynchronizedControls(generation,frame) || !generation || !Readable(button?ctx.r31.u32:ctx.r3.u32,button?20:8,base))return false;
+    return RunLiveClockHelper(ctx,base,original,frame.tick);
 }
 namespace {
 struct ClockCase {
@@ -222,6 +274,30 @@ bool TestNativeInputClock(){
         PPC_STORE_U32(0x833D04E0,std::bit_cast<uint32_t>(float(1./double(frequency))));};
     auto context=[](){PPCContext ctx{};ctx.fpscr.InitHost();ctx.r1.u64=0x1F000;ctx.lr=0x12345678;ctx.r13.u64=0x76543210;return ctx;};
     auto ctx=context();unsigned checks=0;auto check=[&](bool value,const char* why){++checks;if(!value)REXLOG_ERROR("Native input clock: {}",why);return value;};
+    for(const uint64_t real_frequency:{1000000ull,50000001ull}){
+        configure(real_frequency*123+7,real_frequency);ClockFields expected;ReadFields(base,expected);
+        auto probe=+[](PPCContext& c,uint8_t* base){ClockFields during;
+            if(!ReadFields(base,during) || during.origin!=c.r5.u64 || during.frequency!=c.r6.u64 || during.repeat_frequency!=c.r6.u64)
+                throw std::runtime_error("Input helper exposed temporary clock values to other threads");};
+        auto observed=context();observed.r5.u64=expected.origin;observed.r6.u64=expected.frequency;
+        if(!check(RunLiveClockHelper(observed,base,probe,8),"shared clocks stay unchanged during the entire live helper invocation"))return false;
+        PPC_STORE_U64(0x2000,0);auto call=context();call.r3.u64=0x2000;call.lr=0x827C62BC;call.f1.f64=0;
+        if(!check(RunLiveClockHelper(call,base,__imp__sub_831C14E0,0) && PPC_LOAD_U64(0x2000)==100000000,
+            "live input timer starts from the common controller epoch"))return false;
+        for(const uint64_t tick:{0ull,7ull,8ull,15ull,30ull,3000ull}){
+            call=context();call.r3.u64=0x2000;call.lr=0x827C6054;
+            if(!check(RunLiveClockHelper(call,base,__imp__sub_831C1558,tick) &&
+                std::bit_cast<uint32_t>(float(call.f1.f64))==std::bit_cast<uint32_t>(float(float(tick*1000000)*float(1.f/30000000.f))),
+                "original repeat/held elapsed math uses identical input ticks across host frequencies"))return false;
+            call=context();call.r31.u64=0x2000;call.lr=0x830A8C90;
+            if(!check(RunLiveClockHelper(call,base,__imp__sub_826572B8,tick) &&
+                std::bit_cast<uint32_t>(float(call.f1.f64))==std::bit_cast<uint32_t>(float(double(tick)/30.)),
+                "original button clock uses controller time rather than wall time"))return false;
+            ClockFields after;
+            if(!check(ReadFields(base,after) && after==expected && !live_clock,
+                "input helper restores every local native clock field before callbacks or unrelated timers"))return false;
+        }
+    }
     constexpr uint64_t frequency=1000003;
     configure(100000000,frequency);NativeInputClockState first;
     if(!check(InitializeNativeInputClock(first,7,100,ctx,base),"initialized native clock snapshot establishes source epoch"))return false;
@@ -293,4 +369,11 @@ bool TestNativeInputClock(){
             "canonical query preserves original volatile registers/CR0 for zero, signed-negative and positive low words"))return false;}
     REXLOG_INFO("Native input clock: {} checks passed (original clock/button/timer routines; no live input admission)",checks);return true;
 }
+}
+
+PPC_FUNC_IMPL(sub_826572B8){
+    if(!em2::net::RunAgreedNativeInputClockHelper(ctx,base,__imp__sub_826572B8))__imp__sub_826572B8(ctx,base);
+}
+PPC_FUNC_IMPL(sub_831C14E0){
+    if(!em2::net::RunAgreedNativeInputClockHelper(ctx,base,__imp__sub_831C14E0))__imp__sub_831C14E0(ctx,base);
 }

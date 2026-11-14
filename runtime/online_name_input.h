@@ -6,6 +6,7 @@ namespace em2::net {
 // Window-owned UTF-16 events, native-menu-owned lifetime. Caller serializes access.
 class LobbyNameInput {
 public:
+    explicit LobbyNameInput(size_t scalars=24,size_t bytes=96):max_scalars_(scalars),max_bytes_(bytes){}
     bool Begin(std::string_view utf8);
     void End(){active_=false;high_=0;}
     bool active()const{return active_;}
@@ -21,6 +22,7 @@ private:
     size_t cursor_=0,anchor_=0;
     uint16_t high_=0;
     bool active_=false;
+    size_t max_scalars_=24,max_bytes_=96;
 };
 bool TestLobbyNameInput();
 }

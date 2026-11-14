@@ -2,6 +2,7 @@
 #include "players.h"
 #include "online.h"
 #include "online_runtime.h"
+#include "online_viewport.h"
 #include "native_random.h"
 #include "game_console.h"
 #include "controls.h"
@@ -99,7 +100,7 @@ bool InputGate::Attach(Session& session,rex::input::InputSystem& input,unsigned 
     if(id.first_tick>UINT64_MAX-id.input_delay || !BeginSynchronizedControls(id.first_tick)) return false;
     session_=&session;input_=&input;identity_=id;device_=device;tick_=id.first_tick;
     stopped_=prepared_=exhausted_=waiting_=false;error_.clear();
-    completion_pending_=false;native_join_pending_=false;
+    completion_pending_=false;native_join_pending_=false;local_pause_tick_.reset();local_pause_=false;
     load_sequence_=0;owner_thread_.store(GetCurrentThreadId(),std::memory_order_release);
     wait_reason_=InputWait::None;
     // Policy readers must also cover admission setup, before neutral seeding.
@@ -119,7 +120,7 @@ void InputGate::Detach() {
     HostInputMath math;
     if(session_) {EndSynchronizedControls();em2::EndNativeOnlineRandom();em2::ResetNativeSynchronizedJoinTiming();em2::ResetOnlineRandomTraceHistory();}
     session_=nullptr;input_=nullptr;stopped_=prepared_=exhausted_=waiting_=false;error_.clear();
-    completion_pending_=false;native_join_pending_=false;wait_reason_=InputWait::None;
+    completion_pending_=false;native_join_pending_=false;local_pause_tick_.reset();local_pause_=false;wait_reason_=InputWait::None;
     active_snapshot_.store(false,std::memory_order_release);
     owner_thread_.store(0,std::memory_order_release);load_sequence_=0;
     cancel_loads_.store(false,std::memory_order_release);
@@ -151,6 +152,11 @@ Admission InputGate::Prepare(Frame& frame) {
     if(unverified>=8) {waiting_=true;wait_reason_=InputWait::Verification;return Admission::Waiting;}
     Pad local;
     if(!SampleLocalControls(*input_,device_,tick_,local)) {waiting_=true;wait_reason_=InputWait::LocalController;return Admission::Waiting;}
+    ApplyPrivateOnlineInputSequence(tick_,session_->local_player(),native_join_pending_,local);
+    if(!local_pause_tick_ || *local_pause_tick_!=tick_){
+        local_pause_tick_=tick_;local_pause_=NativeOnlineLocalMenuPauseRequested();
+    }
+    local.menu_pause=local_pause_;
     if(native_join_pending_){
         // Initial/repeated native joining is a canonical input phase. Only P2
         // supplies Start; movement stays neutral until native co-op is ready.

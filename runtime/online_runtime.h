@@ -6,6 +6,8 @@ enum class NativeSessionState {None,WaitingForWorld,Joining,Attached,Failed};
 struct NativeSessionStatus {
     NativeSessionState state=NativeSessionState::None;std::string error;
     bool continue_requested=false,profile_requested=false,save_notice_requested=false;InputWait wait=InputWait::None;
+    // Immutable owner-thread failure context copied for support/UI readers.
+    std::string diagnostic_report;
 };
 struct NativeSessionTiming {bool fixed_step=false,halted=false;};
 // Startup-thread call before the guest starts, or through the guarded live
@@ -40,6 +42,9 @@ bool SynchronizedSessionActive() noexcept;
 // Retained legacy Session/InputGate ownership only; a Room bridge must not
 // accidentally acquire the same native controls or RNG lease.
 bool LegacyNativeSessionActive() noexcept;
+// Native owner thread only, including retained startup before input attachment.
+// This is display ownership, never the number of simulated human actors.
+std::optional<unsigned> NativeOnlineDisplaySlot();
 // Bind at the main guest entry, before its first synchronous asset load.
 bool BindNativeOnlineThread();
 // Startup thread only, before launching any guest threads. A temporary sole
@@ -49,6 +54,11 @@ bool StartNativeOnlinePrelaunchPolling();
 // Outer frames poll only. Advance world preparation only at the boundary
 // after the previous native update has been finalized.
 bool UpdateNativeOnlineSession(uint8_t* guest_base,bool advance_world=false);
+// Called only after the original level loader and asset/script commits succeed.
+// Startup can acquire the input timeline at the next completed update instead
+// of advancing scripts independently while waiting for a gameplay camera.
+void NotifyNativeOnlineLevelLoaded(std::string_view destination);
+bool NativeOnlineLocalMenuPauseRequested();
 // Nonblocking transport service from the native loading-frame callback. Only
 // the established main/simulation owner may poll.
 // Does not test world readiness, attach controls, or consume gameplay ticks.

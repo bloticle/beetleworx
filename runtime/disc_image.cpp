@@ -4,7 +4,7 @@
 #include "svod_image.h"
 #include "zar_image.h"
 #include "zip_image.h"
-#include "seven_image.h"
+#include "stream_archive_image.h"
 #include <windows.h>
 #include <winioctl.h>
 #include <bcrypt.h>
@@ -55,8 +55,8 @@ struct Image {
     uint64_t Position(size_t i)const{return uint64_t(index[i]&0x7FFFFFFF)<<shift;}
     void InitArchive(){size=archive->Size();archive_tree=true;}
     explicit Image(const fs::path& path,bool discover_parts=true,const DiscImportProgress& progress={},bool raw_part=false) {
-        if(discover_parts && SevenImage::IsSplitPath(path)){
-            std::string error;archive=SevenImage::Open(path,error,[&](uint64_t done,uint64_t total){return !progress || progress(L"Verifying multipart 7z archive",done,total);});Require(bool(archive),error.c_str());InitArchive();return;
+        if(discover_parts && StreamArchiveImage::IsSplitPath(path)){
+            std::string error;archive=StreamArchiveImage::Open(path,error,[&](uint64_t done,uint64_t total){return !progress || progress(L"Verifying multipart 7z archive",done,total);});Require(bool(archive),error.c_str());InitArchive();return;
         }
         if(discover_parts){
             // Support both Xbox-style name.1.iso and byte-split name.iso.0 /
@@ -98,10 +98,12 @@ struct Image {
         std::string archive_error;
         const bool zar_magic=BE32(trailer.data())==0x61bf3a01 && BE32(trailer.data()+4)==0x169f52d6;
         if(zar_magic){archive=ZarImage::Open(path,archive_error,archive_progress);Require(bool(archive),archive_error.c_str());}
-        else if(std::memcmp(header.data(),"7z\xbc\xaf\x27\x1c",6)==0){archive=SevenImage::Open(path,archive_error,archive_progress);Require(bool(archive),archive_error.c_str());}
+        else if(std::memcmp(header.data(),"7z\xbc\xaf\x27\x1c",6)==0){archive=StreamArchiveImage::Open(path,archive_error,archive_progress);Require(bool(archive),archive_error.c_str());}
+        else if(std::memcmp(header.data(),"Rar!\x1a\x07",6)==0){archive=StreamArchiveImage::Open(path,archive_error,archive_progress,StreamArchiveFormat::Rar);Require(bool(archive),archive_error.c_str());}
         else if(U32(header.data())==0x04034b50 || CompareStringOrdinal(path.extension().c_str(),-1,L".zip",-1,TRUE)==CSTR_EQUAL){archive=ZipImage::Open(path,archive_error,archive_progress);Require(bool(archive),archive_error.c_str());}
-        else if(CompareStringOrdinal(path.extension().c_str(),-1,L".7z",-1,TRUE)==CSTR_EQUAL){archive=SevenImage::Open(path,archive_error,archive_progress);Require(bool(archive),archive_error.c_str());}
+        else if(CompareStringOrdinal(path.extension().c_str(),-1,L".7z",-1,TRUE)==CSTR_EQUAL){archive=StreamArchiveImage::Open(path,archive_error,archive_progress);Require(bool(archive),archive_error.c_str());}
         else if(CompareStringOrdinal(path.extension().c_str(),-1,L".zar",-1,TRUE)==CSTR_EQUAL){archive=ZarImage::Open(path,archive_error,archive_progress);Require(bool(archive),archive_error.c_str());}
+        else if(CompareStringOrdinal(path.extension().c_str(),-1,L".rar",-1,TRUE)==CSTR_EQUAL){archive=StreamArchiveImage::Open(path,archive_error,archive_progress,StreamArchiveFormat::Rar);Require(bool(archive),archive_error.c_str());}
         if(archive){InitArchive();return;}
         if(std::equal(header.begin(),header.begin()+4,"LIVE") || std::equal(header.begin(),header.begin()+4,"PIRS") || std::equal(header.begin(),header.begin()+4,"CON ")){
             std::string error;svod=SvodImage::Open(path,error);Require(bool(svod),error.c_str());size=svod->Size();return;

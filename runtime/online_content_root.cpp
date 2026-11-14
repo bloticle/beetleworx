@@ -20,6 +20,12 @@ bool ValidSummarySettings(const SummarySettings& settings){
            settings[i]->type!=Profile::Setting::Type::BINARY)return false;
     return true;
 }
+bool ReadSummarySettings(Profile* profile,SummarySettings& summaries,std::string& error){
+    if(!profile)return true;
+    for(size_t i=0;i<summaries.size();++i)summaries[i]=profile->GetSetting(kSaveSummaryIds[i]);
+    if(ValidSummarySettings(summaries))return true;
+    error="The native profile save-summary cache is unavailable.";return false;
+}
 void InvalidateSummarySettings(const SummarySettings& settings){
     for(auto* setting:settings){
         // Reset both data and validity. LoadSetting leaves old bytes untouched
@@ -56,13 +62,24 @@ bool SwitchNativeContentRoot(const void* manager,const std::filesystem::path& ro
         error="Waiting for the game to finish using its current save.";return false;
     }
     SummarySettings summaries{};
-    if(profile){
-        for(size_t i=0;i<summaries.size();++i)summaries[i]=profile->GetSetting(kSaveSummaryIds[i]);
-        if(!ValidSummarySettings(summaries)){
-            error="The native profile save-summary cache is unavailable.";return false;
-        }
-    }
+    if(!ReadSummarySettings(profile,summaries,error))return false;
     it->second.destination=destination;
+    if(profile)InvalidateSummarySettings(summaries);
+    return true;
+}
+bool RestoreNativeContentRoot(const void* manager,std::string& error,Profile* profile){
+    error.clear();
+    auto lock=rex::thread::global_critical_region::AcquireDirect();
+    const auto it=Routes().find(manager);
+    if(it==Routes().end()){error="The native save manager is not registered.";return false;}
+    if(it->second.destination.empty())return true;
+    if(!it->second.packages_closed || !it->second.packages_closed()){
+        error="Waiting for the game to finish using its current save.";return false;
+    }
+    SummarySettings summaries{};
+    if(!ReadSummarySettings(profile,summaries,error))return false;
+    // Reuse the manager's original root; never infer, copy or replace a save.
+    it->second.destination.clear();
     if(profile)InvalidateSummarySettings(summaries);
     return true;
 }
@@ -103,9 +120,27 @@ bool TestNativeContentRoot(const std::filesystem::path& fixture) {
         if(entries.size()!=1 || entries.front().file_name()!="SESSION")return false;
         std::ifstream input(normal/"42560816"/"00000001"/"NORMAL"/"save.dat");std::string value;input>>value;
         if(value!="normal-save")return false;
+        int unregistered_manager=0;
+        if(RestoreNativeContentRoot(nullptr,error) || RestoreNativeContentRoot(&unregistered_manager,error) ||
+            !RestoreNativeContentRoot(&second,error) || second.ContentExists(data))return false;
+        closed=false;
+        if(RestoreNativeContentRoot(&first,error) || error!="Waiting for the game to finish using its current save." ||
+            !first.ContentExists(data) || second.ContentExists(data))return false;
+        closed=true;
+        if(!RestoreNativeContentRoot(&first,error) || !error.empty() || first.ContentExists(data) || second.ContentExists(data))return false;
+        data.set_file_name("NORMAL");
+        if(!first.ContentExists(data) || !second.ContentExists(data))return false;
+        const auto restored=first.ListContent(0,rex::kernel::XContentType::kSavedGame,0x42560816);
+        if(restored.size()!=1 || restored.front().file_name()!="NORMAL")return false;
+        closed=false; // Idempotent restoration does not mutate the route/cache.
+        if(!RestoreNativeContentRoot(&first,error) || NativeContentRoot(&first,normal)!=normal)return false;
+        closed=true;
+        if(!SwitchNativeContentRoot(&first,session,error) || !RestoreNativeContentRoot(&first,error))return false;
+        std::ifstream unchanged(normal/"42560816"/"00000001"/"NORMAL"/"save.dat");
+        unchanged>>value;if(value!="normal-save")return false;
         UnregisterNativeContentRoot(&first);
-        if(NativeContentRoot(&first,normal)!=normal)return false;
-        REXLOG_INFO("Native content routing passed: real ContentExists/ListContent relocation, per-manager isolation, invalid/open-package guard and untouched normal save; profile reload/guest IO quiescence still require handoff validation");return true;
+        if(RestoreNativeContentRoot(&first,error) || NativeContentRoot(&first,normal)!=normal)return false;
+        REXLOG_INFO("Native content routing passed: real ContentExists/ListContent round trips, repeated restore/re-entry, per-manager isolation, invalid/open-package guards and untouched normal save; profile reload/guest IO quiescence still require handoff validation");return true;
     }catch(const std::exception& e){REXLOG_ERROR("Native content route fixture: {}",e.what());return false;}
 }
 }

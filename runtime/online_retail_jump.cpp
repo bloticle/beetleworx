@@ -313,9 +313,9 @@ bool em2::net::TestRetailJumpReceiver(PPCContext& ctx,uint8_t* base,const std::f
     auto future=frame;future.tick=11;future.players[1].jump_events[0]={3,RoomJumpEdge::Pressed};
     if(!check(RetailJumpAllows(1,future.players[1],ctx,base) && ValidateRetailJumpFrame(future,ctx,base)!=Result::Applied &&
        observed.count==std::array<unsigned,2>{1,1},"future delayed source capability ignores receiver history; authoritative gap still rejects"))return false;
-    ++frame.tick;for(auto& c:frame.players){c.jump_count=0;c.jump_events={};}
+    ++frame.tick;for(unsigned i=0;i<2;++i){auto& c=frame.players[i];c.jump_count=0;c.jump_events={};}
     if(!check(drive(frame) && observed.count==std::array<unsigned,2>{1,1},"held native input has no repeated Jump starter"))return false;
-    ++frame.tick;for(auto& c:frame.players){c.pad.buttons=0;c.jump_count=1;c.jump_events[0]={2,RoomJumpEdge::Released};}
+    ++frame.tick;for(unsigned i=0;i<2;++i){auto& c=frame.players[i];c.pad.buttons=0;c.jump_count=1;c.jump_events[0]={2,RoomJumpEdge::Released};}
     if(!check(drive(frame) && observed.count==std::array<unsigned,2>{1,1} && !(PPC_LOAD_U32(tasks[0]+8)&16) && !(PPC_LOAD_U32(tasks[1]+8)&16),
        "original JumpRelease and JumpRelease2 stop only their own active native tasks"))return false;
     if(!check(observed.descriptors==std::array<unsigned,2>{2,2},"earlier native collection tasks receive complete actual Jump action bodies for each ordered edge"))return false;

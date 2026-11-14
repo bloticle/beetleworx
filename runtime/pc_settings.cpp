@@ -5,6 +5,8 @@
 #include "online_runtime.h"
 #include "online_continue.h"
 #include "online_native_menu.h"
+#include "online_chat.h"
+#include "online_voice_runtime.h"
 #include "controls.h"
 #include "engine_workbench.h"
 #include "gameplay_mods.h"
@@ -143,6 +145,7 @@ void LoadPCSettings(const std::filesystem::path& directory) {
     choices=defaults;
     std::filesystem::create_directories(directory);
     settings_file = directory / "pc-settings.ini";
+    em2::net::LoadOnlineVoiceSettings(directory);
     std::ifstream stream(settings_file);
     std::string line;
     while (std::getline(stream, line)) {
@@ -681,6 +684,18 @@ PPC_FUNC_IMPL(sub_82B0D118) {
         if(arguments && (PPC_LOAD_U32(arguments+4)&0x8F)==3 && (PPC_LOAD_U32(arguments+20)&0x8F)==3) {
             const auto raw_id=std::bit_cast<double>(uint64_t(PPC_LOAD_U64(arguments+8)));
             const auto raw_choice=std::bit_cast<double>(uint64_t(PPC_LOAD_U64(arguments+24)));
+            if(std::isfinite(raw_id) && raw_id>=2800 && raw_id<=2810 && std::floor(raw_id)==raw_id &&
+               std::isfinite(raw_choice) && raw_choice>=-1 && raw_choice<=1024 && std::floor(raw_choice)==raw_choice){
+                int result=0;if(em2::net::NativeOnlineVoiceOption(int(raw_id),int(raw_choice),result)){
+                    ctx.f1.f64=result;sub_8295FEA8(ctx,base);return;
+                }
+            }
+            if(std::isfinite(raw_id) && raw_id>=2750 && raw_id<=2763 && std::floor(raw_id)==raw_id &&
+               std::isfinite(raw_choice) && raw_choice>=-1 && raw_choice<=1024 && std::floor(raw_choice)==raw_choice){
+                int result=0;if(em2::net::NativeOnlineChatOption(int(raw_id),int(raw_choice),result)){
+                    ctx.f1.f64=result;sub_8295FEA8(ctx,base);return;
+                }
+            }
             if(std::isfinite(raw_id) && raw_id>=7300 && raw_id<=7314 && std::floor(raw_id)==raw_id &&
                (raw_choice==-1 || raw_choice==0 || raw_choice==1)) {
                 int result=0;em2::NativePCSupportOption(int(raw_id),int(raw_choice),result);
@@ -692,7 +707,7 @@ PPC_FUNC_IMPL(sub_82B0D118) {
                 }
             }
             if(raw_id==1989 && raw_choice==-1){ctx.f1.f64=em2::em1::OriginalInkPakMounted()?1:0;sub_8295FEA8(ctx,base);return;}
-            if(std::isfinite(raw_id) && raw_id>=2700 && raw_id<=2730 && std::floor(raw_id)==raw_id &&
+            if(std::isfinite(raw_id) && raw_id>=2700 && raw_id<=2744 && std::floor(raw_id)==raw_id &&
                std::isfinite(raw_choice) && raw_choice>=-3 && raw_choice<=1024 && std::floor(raw_choice)==raw_choice){
                 int result=0;if(em2::net::NativeOnlineMenuOption(int(raw_id),int(raw_choice),result)){
                     ctx.f1.f64=result;sub_8295FEA8(ctx,base);return;

@@ -5,6 +5,7 @@
 #include <stop_token>
 
 namespace em2::net {
+class Room;
 // Marker/lease files live outside 42560816 and never enter the campaign bundle.
 // Only native-verified HOST sessions are published by the lifecycle consumer.
 class HostCampaignLease {
@@ -34,6 +35,8 @@ struct HostCampaignCatalog {
 // succeeded, before releasing native Continue. This is not a native save parser.
 HostCampaignRecord RecordValidatedNativeHostCampaign(const std::filesystem::path& normal_user_data,
     const std::filesystem::path& private_user_data,const Session& ready);
+HostCampaignRecord RecordValidatedNativeHostCampaign(const std::filesystem::path& normal_user_data,
+    const std::filesystem::path& private_user_data,const Room& ready);
 // Worker-only: bounded discovery of marked, idle host campaigns. Rejects links,
 // active leases, unsupported/truncated headers and incomplete checkpoint trees.
 // Actual native decode/summary validation remains mandatory when resuming.

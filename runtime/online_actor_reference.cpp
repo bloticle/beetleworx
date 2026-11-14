@@ -78,6 +78,10 @@ ActorReferenceResult AttachOwnedActorMovementReference(uint64_t peer,uint32_t ca
     if(!SetReference(basic,camera,ctx,base))return ActorReferenceResult::NativeFailure;
     lease={actor.peer,actor.generation,actor.registry,actor.controller,camera,true};return ActorReferenceResult::Attached;
 }
+bool OwnedActorMovementReferenceReady(uint64_t peer,PPCContext& ctx,uint8_t* base){
+    Environment preserve;OwnedActorInput actor;uint32_t basic=0;
+    return OwnedActorInputFor(peer,ctx,base,actor) && BasicController(actor,base,basic) && GameplayCameraEntity(PPC_LOAD_U32(basic+80),base);
+}
 ActorReferenceResult ReleaseOwnedActorMovementReference(ActorMovementReference& lease,PPCContext& ctx,uint8_t* base){
     Environment environment;
     if(!lease.active)return ActorReferenceResult::Invalid;

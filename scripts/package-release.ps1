@@ -8,11 +8,21 @@ param(
     [string]$ExpectedExeSha256='',
     [string]$Version='0.1.0-demo.1',
     [string]$Tag='',
+    [string]$RelayOrigin='',
     [switch]$PlanOnly,
     [switch]$Demo,
     [switch]$Zip
 )
 $ErrorActionPreference='Stop'
+if($RelayOrigin){
+    [Uri]$relayUri=$null
+    if($RelayOrigin.Length -gt 512 -or $RelayOrigin -match '[^\x21-\x7E]' -or
+       ![Uri]::TryCreate($RelayOrigin,[UriKind]::Absolute,[ref]$relayUri) -or
+       $relayUri.Scheme -cne 'https' -or !$relayUri.Host -or $relayUri.UserInfo -or $relayUri.Query -or $relayUri.Fragment -or $relayUri.AbsolutePath -ne '/'){
+        throw 'RelayOrigin must be a plain HTTPS origin without credentials, query, fragment, or path.'
+    }
+    $RelayOrigin=$relayUri.GetLeftPart([UriPartial]::Authority)
+}
 $semver=[regex]::Match($Version,'\A(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?\z')
 if(!$semver.Success -or $Version.Length -ge 128){throw 'Version must be a valid SemVer 2 version shorter than 128 characters.'}
 foreach($index in 1..3){[uint64]$component=0;if(![uint64]::TryParse($semver.Groups[$index].Value,[ref]$component)){throw 'Version components must fit the native updater integer range.'}}
@@ -95,10 +105,18 @@ if($LASTEXITCODE -ne 0){throw 'Prepared shader bundle differs from its loose sou
 $bundleInfo=$bundleReport | ConvertFrom-Json
 if($bundleInfo.records -ne $records.Count -or $bundleInfo.format -ne 'EM2DXPK1'){throw 'Prepared shader bundle verification result is invalid.'}
 AddFile $bundle ('pc-assets/pc-shader-library/'+$RendererAbi+'/native-profile-v1/translated-dxbc-v1/library.em2dxbcpack')
-AddFile (Join-Path $workspace 'docs/QUICK_START.txt') 'START HERE.txt'
+if($RelayOrigin){
+    $serviceText=([ordered]@{format=1;relay_origin=$RelayOrigin} | ConvertTo-Json -Compress)+"`n"
+    $serviceBytes=[Text.Encoding]::UTF8.GetBytes($serviceText)
+    if(!$names.Add('online-service.json')){throw 'Duplicate internet service configuration.'}
+    $files.Add([pscustomobject]@{source=$null;path='online-service.json';bytes=$serviceBytes.Length;sha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($serviceBytes));text=$serviceText})
+}
+$quickStart=if($RelayOrigin){'docs/ONLINE_QUICK_START.txt'}else{'docs/QUICK_START.txt'}
+AddFile (Join-Path $workspace $quickStart) 'START HERE.txt'
 if($Demo){
     AddFile (Join-Path $workspace 'docs/demo-channel.txt') 'demo-channel.txt'
-    AddFile (Join-Path $workspace 'docs/DEMO_TESTING.txt') 'TESTING & KNOWN ISSUES.txt'
+    $testingNotes=if($RelayOrigin){'docs/ONLINE_DEMO_TESTING.txt'}else{'docs/DEMO_TESTING.txt'}
+    AddFile (Join-Path $workspace $testingNotes) 'TESTING & KNOWN ISSUES.txt'
 }
 $rustNotices=& python (Join-Path $PSScriptRoot 'prepare-rust-notices.py') --check
 if($LASTEXITCODE -ne 0){throw 'Rust/Lua dependency notices are stale or invalid. Run scripts/prepare-rust-notices.py before packaging.'}
@@ -106,16 +124,18 @@ AddFile (Join-Path $workspace 'docs/licenses/rust-dependencies.txt') 'licenses/r
 AddFile (Join-Path $workspace 'docs/licenses/xenia-bsd.txt') 'licenses/xenia-bsd.txt'
 AddFile (Join-Path $workspace 'runtime/em1_compat/zstd/LICENSE') 'licenses/zstd-bsd.txt'
 AddFile (Join-Path $workspace 'runtime/em1_compat/zlib/LICENSE') 'licenses/zlib.txt'
+AddFile (Join-Path $RuntimeDirectory 'licenses/opus.txt') 'licenses/opus.txt'
 if($RexSdk -and (Test-Path -LiteralPath (Join-Path $RexSdk 'licenses'))){foreach($notice in Get-ChildItem -LiteralPath (Join-Path $RexSdk 'licenses') -Recurse -File){AddFile $notice.FullName ('licenses/sdk/'+[IO.Path]::GetRelativePath((Join-Path $RexSdk 'licenses'),$notice.FullName))}}
 $summary=[ordered]@{format=2;product='Beetleworx';executable='beetleworx.exe';status='Experimental development package; release acceptance and license inventory remain open';exe_sha256=($files | Where-Object path -eq 'beetleworx.exe').sha256;shader_abi=$RendererAbi;shader_records=$records.Count;file_count=$files.Count;payload_bytes=($files | Measure-Object bytes -Sum).Sum;content_patch_format=$(if($patchManifest.archives[0].regional_patch_format -eq 'EM2RP01'){'EM2DP02'}else{'EM2DP01'});includes_full_modified_game_archives=$false;includes_full_original_game=$false;includes_personal_data=$false;includes_separate_launcher=$false;files=@($files | Sort-Object path | Select-Object path,bytes,sha256)}
 $summary.version=$Version;$summary.tag=$Tag
-if($Demo){$summary.status='Beetleworx public testing demo - EM2 and EM1 courtyard compatibility preview';$summary.demo=$true;$summary.online_multiplayer='hidden';$summary.expected_exe_sha256=$ExpectedExeSha256.ToUpperInvariant()}
+if($Demo){$summary.status='Beetleworx public testing demo - EM2 and EM1 courtyard compatibility preview';$summary.demo=$true;$summary.online_multiplayer=$(if($RelayOrigin){'experimental-internet-relay'}else{'hidden'});$summary.expected_exe_sha256=$ExpectedExeSha256.ToUpperInvariant()}
 if($PlanOnly){$summary | ConvertTo-Json -Depth 5;return}
 New-Item -ItemType Directory -Path $Destination | Out-Null
 foreach($entry in $files){
     $target=Join-Path $Destination $entry.path
     New-Item -ItemType Directory -Path (Split-Path $target -Parent) -Force | Out-Null
-    Copy-Item -LiteralPath $entry.source -Destination $target
+    if($entry.PSObject.Properties['text']){[IO.File]::WriteAllText($target,$entry.text,[Text.UTF8Encoding]::new($false))}
+    else{Copy-Item -LiteralPath $entry.source -Destination $target}
     if((FileHash $target) -ne $entry.sha256){throw "Release snapshot changed or copy failed: $($entry.path). Discard this incomplete output folder."}
 }
 if((FileHash (Join-Path $RuntimeDirectory 'beetleworx.exe')) -ne $summary.exe_sha256){throw 'The executable changed during packaging. Discard this incomplete output folder and retry after the build finishes.'}

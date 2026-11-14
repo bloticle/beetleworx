@@ -13,6 +13,8 @@
 #include <fstream>
 #include <thread>
 #include <rex/logging.h>
+#include <rex/cvar.h>
+REXCVAR_DECLARE(bool,em2_private_profile);
 PPC_EXTERN_FUNC(__imp__sub_830A8200);
 PPC_EXTERN_FUNC(__imp__sub_830A89B8);
 PPC_EXTERN_FUNC(__imp__sub_830ACA80);
@@ -175,6 +177,14 @@ bool DiscoverNativeTriggerBinding(const NativeLocalMovementBinding& parent,PPCCo
         for(unsigned i=0;i<snapshot.action_order.size();++i)if(PPC_LOAD_U32(snapshot.header[4]+i*4)!=snapshot.action_order[i])return false;
     }
     if(b.actions.empty() || !Parent(parent,ctx,base) || PPC_LOAD_U32(0x833B65F8)!=b.threshold)return false;
+    // Only this retail receiver's subscription belongs to binding identity.
+    // Authored cameras legitimately add/remove other native observers.
+    for(auto& snapshot:b.contexts){
+        const auto own=std::count(snapshot.listeners.begin(),snapshot.listeners.end(),parent.listener);
+        if(own>1)return false;
+        snapshot.listeners.clear();if(own)snapshot.listeners.push_back(parent.listener);
+        snapshot.header[1]=0;snapshot.header[2]=uint32_t(own);snapshot.header[3]=0;
+    }
     out=std::move(b);return true;
 }
 bool ArmNativeTriggers(NativeTriggerSource& source,const NativeTriggerBinding& binding,uint64_t epoch,uint64_t first,PPCContext& ctx,uint8_t* base){
@@ -207,21 +217,36 @@ bool ValidateNativeButtonDefinitionSnapshot(const NativeTriggerBinding& b,uint8_
     const std::array<uint32_t,2> events{b.parent.manager+24,b.parent.active_event};
     if(b.contexts.size()!=(events[0]==events[1]?1u:2u))return false;
     for(unsigned c=0;c<b.contexts.size();++c){const auto& snapshot=b.contexts[c];
-        if(snapshot.event!=events[c] || !Readable(snapshot.event,24,base) || snapshot.listeners.size()>128 || snapshot.action_order.size()>256)return false;
-        for(unsigned i=0;i<6;++i)if(PPC_LOAD_U32(snapshot.event+i*4)!=snapshot.header[i])return false;
-        if(snapshot.header[2]!=snapshot.listeners.size() || snapshot.header[5]!=snapshot.action_order.size() ||
-           (!snapshot.listeners.empty() && !Readable(snapshot.header[1],snapshot.listeners.size()*4,base)) ||
+        const unsigned expected=snapshot.retail_listener?1u:0u;
+        if(snapshot.event!=events[c] || !Readable(snapshot.event,24,base) || snapshot.listeners.size()!=expected ||
+           snapshot.header[1] || snapshot.header[2]!=expected || snapshot.header[3] || snapshot.action_order.size()>256 ||
+           (expected && snapshot.listeners[0]!=b.parent.listener))return false;
+        for(unsigned i:{0u,4u,5u})if(PPC_LOAD_U32(snapshot.event+i*4)!=snapshot.header[i]){
+            if(REXCVAR_GET(em2_private_profile))REXLOG_ERROR("Native button context header changed: context {} word {} expected {:08X} actual {:08X}",c,i,snapshot.header[i],PPC_LOAD_U32(snapshot.event+i*4));
+            return false;
+        }
+        const auto listeners=PPC_LOAD_U32(snapshot.event+4),count=PPC_LOAD_U32(snapshot.event+8);
+        if(count>128 || (count && !Readable(listeners,size_t(count)*4,base)))return false;
+        unsigned own=0;for(unsigned i=0;i<count;++i){const auto listener=PPC_LOAD_U32(listeners+i*4);if(!Readable(listener,4,base))return false;own+=listener==b.parent.listener;}
+        if(own!=expected)return false;
+        if(snapshot.header[5]!=snapshot.action_order.size() ||
            (!snapshot.action_order.empty() && !Readable(snapshot.header[4],snapshot.action_order.size()*4,base)))return false;
-        for(unsigned i=0;i<snapshot.listeners.size();++i)if(PPC_LOAD_U32(snapshot.header[1]+i*4)!=snapshot.listeners[i])return false;
-        for(unsigned i=0;i<snapshot.action_order.size();++i)if(PPC_LOAD_U32(snapshot.header[4]+i*4)!=snapshot.action_order[i])return false;
-        if(snapshot.retail_listener!=(std::count(snapshot.listeners.begin(),snapshot.listeners.end(),b.parent.listener)==1))return false;
+        for(unsigned i=0;i<snapshot.action_order.size();++i)if(PPC_LOAD_U32(snapshot.header[4]+i*4)!=snapshot.action_order[i]){
+            if(REXCVAR_GET(em2_private_profile))REXLOG_ERROR("Native button action order changed: context {} index {}",c,i);
+            return false;
+        }
     }
     for(const auto& a:b.actions){
         if(a.context>=b.contexts.size() || a.event!=events[a.context] || a.ordinal>=b.contexts[a.context].action_order.size() ||
            b.contexts[a.context].action_order[a.ordinal]!=a.action || !Readable(a.action,436,base))return false;
         std::array<uint8_t,436> shape;std::memcpy(shape.data(),base+a.action,shape.size());
         if(PPC_LOAD_U32(a.action+408)!=1 || PPC_LOAD_U32(a.action)!=a.uid || !Name(a.uid,base,name) || name!=a.name)return false;
-        Normalize(shape,1);if(shape!=a.shape)return false;
+        Normalize(shape,1);if(shape!=a.shape){
+            if(REXCVAR_GET(em2_private_profile))for(unsigned i=0;i<shape.size();++i)if(shape[i]!=a.shape[i]){
+                REXLOG_ERROR("Native button action shape changed: '{}' offset {} expected {:02X} actual {:02X}",a.name,i,a.shape[i],shape[i]);break;
+            }
+            return false;
+        }
     }
     return true;
 }
@@ -298,6 +323,26 @@ bool TestNativeTriggers(){
         "original profile resolves logical0 to actual native device1"))return false;
     NativeTriggerBinding binding;if(!check(DiscoverNativeTriggerBinding(parent,ctx,base,binding) && binding.actions.size()==8 && binding.excluded.size()==1,
         "all eligible trigger alternatives retained in authored order, vehicle kind4 explicitly excluded"))return false;
+    {
+        NativeTriggerSource subscriptions;
+        if(!check(ArmNativeTriggers(subscriptions,binding,0x73,0,ctx,base),"observer-lifetime source arms with exact actor subscription"))return false;
+        const std::array<uint32_t,3> saved{PPC_LOAD_U32(event+4),PPC_LOAD_U32(event+8),PPC_LOAD_U32(event+12)};
+        const auto observer_list=listeners+256,observer=listeners+384;
+        PPC_STORE_U32(observer,0x82126C98);PPC_STORE_U32(observer_list,controller+80);PPC_STORE_U32(observer_list+4,observer);
+        PPC_STORE_U32(event+4,observer_list);PPC_STORE_U32(event+8,2);PPC_STORE_U32(event+12,2);
+        NativeTriggerBinding changed;NativeTriggerBatch sample;
+        if(!check(ValidateNativeButtonDefinitionSnapshot(binding,base) && DiscoverNativeTriggerBinding(parent,ctx,base,changed) && changed==binding &&
+           ProduceNativeTriggers(subscriptions,binding,{},1,0x73,0,ctx,base,sample),"unrelated observer insertion/list reallocation preserves source, schema and original native button math"))return false;
+        PPC_STORE_U32(event+8,1);
+        if(!check(ValidateNativeButtonDefinitionSnapshot(binding,base) && ProduceNativeTriggers(subscriptions,binding,{},1,0x73,1,ctx,base,sample),"unrelated camera observer removal preserves native source history"))return false;
+        PPC_STORE_U32(observer_list,observer);
+        if(!check(!ValidateNativeButtonDefinitionSnapshot(binding,base),"removing intended actor listener still invalidates receiver"))return false;
+        PPC_STORE_U32(observer_list,controller+80);PPC_STORE_U32(observer_list+4,controller+80);PPC_STORE_U32(event+8,2);
+        if(!check(!ValidateNativeButtonDefinitionSnapshot(binding,base),"duplicate actor subscription cannot pass as an unrelated observer change"))return false;
+        PPC_STORE_U32(event+4,0xDEAD0000);
+        if(!check(!ValidateNativeButtonDefinitionSnapshot(binding,base),"unreadable listener storage rejects before dispatch"))return false;
+        PPC_STORE_U32(event+4,saved[0]);PPC_STORE_U32(event+8,saved[1]);PPC_STORE_U32(event+12,saved[2]);
+    }
     std::array<uint8_t,96> live_device;std::memcpy(live_device.data(),base+device,96);
     std::array<uint8_t,320> live_buttons;std::memcpy(live_buttons.data(),base+buttons,320);
     std::array<uint8_t,8192> live_stack;std::memcpy(live_stack.data(),base+ctx.r1.u32-8192,8192);

@@ -1,4 +1,5 @@
-#include "seven_image.h"
+#include "online_event_order.h"
+#include "stream_archive_image.h"
 #include "em1_ink_restoration.h"
 #include "em1_single_gsa_pak.h"
 #include "em1_material_effect_vfs.h"
@@ -42,6 +43,7 @@
 #include "native_sampler.h"
 #include "video_blocks.h"
 #include "property_lookup.h"
+#include "native_turn_rate_defaults.h"
 #include "pack_reads.h"
 #include "em1_vfs.h"
 #include "em1_native_properties.h"
@@ -99,6 +101,12 @@
 
 #include "online_name_input.h"
 #include "online_native_menu.h"
+#include "online_discord.h"
+#include "online_chat.h"
+#include "online_voice_runtime.h"
+#include "online_voice_preferences.h"
+#include "online_voice_devices.h"
+#include "online_voice_audio.h"
 #include "online_room.h"
 #include "online_identity.h"
 #include "online_invite.h"
@@ -106,7 +114,11 @@
 #include "online_boot.h"
 #include "online_campaigns.h"
 #include "online_runtime.h"
+#include "online_viewport.h"
 #include "online_notice.h"
+#include "online_nametags.h"
+#include "online_clothing_texture.h"
+#include "online_clothing_draw.h"
 #include "content_setup.h"
 #include "content_patch.h"
 #include "disc_image.h"
@@ -170,6 +182,7 @@ REXCVAR_DECLARE(std::string,em2_room_probe_role);
 REXCVAR_DEFINE_BOOL(em2_online_menu,false,"Online","Show experimental direct-connect co-op Host/Join before starting the game");
 REXCVAR_DEFINE_BOOL(em2_test_pc_settings,false,"Debug","Run PC menu settings tests without opening the game");
 REXCVAR_DEFINE_BOOL(em2_test_online_input,false,"Debug","Run online room/native-slot and sealed local-source regressions headlessly in the canonical executable");
+REXCVAR_DEFINE_BOOL(em2_test_online_voice,false,"Debug","Test native voice codec/mixing; SDL dummy backend only for device tests, never real microphone hardware");
 REXCVAR_DEFINE_BOOL(em2_test_demo_support,false,"Debug","Run isolated report and update transaction regressions without starting the game");
 REXCVAR_DEFINE_STRING(em2_test_live_update_path,"","Debug","Explicit headless diagnostic: verify a live published demo update inside this new isolated directory");
 REXCVAR_DEFINE_BOOL(em2_test_update_swap,false,"Debug","Verify and restore the running canonical executable rename primitive without starting the game");
@@ -222,9 +235,13 @@ REXCVAR_DEFINE_STRING(em1_source_rvz,"","Compatibility","Optional original Epic 
 REXCVAR_DEFINE_STRING(em2_test_em1_disc,"","Debug","Compare multi-format Wii reader against the existing source adapter without starting gameplay");
 REXCVAR_DEFINE_STRING(em2_test_xbox_disc,"","Debug","Read-only comparison of an Xbox disc image against an extracted reference folder");
 REXCVAR_DEFINE_STRING(em2_test_xbox_reference,"","Debug","Extracted game folder for the read-only Xbox disc comparison");
+REXCVAR_DEFINE_BOOL(em2_test_rar_cancel,false,"Debug","Test cancellation during RAR decoding without extracting game files");
+REXCVAR_DEFINE_BOOL(em2_test_rar_contents,false,"Debug","Compare RAR fixture files without requiring game content");
 REXCVAR_DEFINE_BOOL(em2_test_seven_cancel,false,"Debug","Test cancellation during 7z decoding without extracting game files");
 REXCVAR_DEFINE_STRING(em2_test_xbox_destination,"","Debug","Optional new/owned extraction folder for the Xbox source diagnostic before comparison");
 REXCVAR_DEFINE_STRING(em2_user_data_directory,"","Debug","Override save/settings directory for isolated game testing");
+REXCVAR_DEFINE_STRING(em2_prepare_online_clothing_source,"","Debug","Explicit default diffuse NIF source folder for clothing preparation diagnostic; no native binding");
+REXCVAR_DEFINE_STRING(em2_prepare_online_clothing_destination,"","Debug","New destination for all default clothing color variants; never overwrites existing files");
 
 REXCVAR_DECLARE(bool,em2_online_auto_continue);
 REXCVAR_DECLARE(bool,em1_enter_courtyard);
@@ -242,7 +259,9 @@ public:
         : ImGuiDialog(imgui_drawer),capture_tick_(std::move(capture_tick)) {}
 protected:
     void OnDraw(ImGuiIO& io) override {
+        em2::net::TickDiscordIntegration();
         em2::DrawEngineWorkbench(io);
+        em2::net::DrawOnlineNameTags(io.DisplaySize.x,io.DisplaySize.y);
         const auto online=online_notice_.Update(em2::net::NativeOnlineStatus(),REXCVAR_GET(em2_online_auto_continue),std::chrono::steady_clock::now());
         em2::net::DrawOnlineNotice(online,io.DisplaySize.x,io.DisplaySize.y);
         ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
@@ -329,7 +348,7 @@ public:
             const std::filesystem::path report=REXCVAR_GET(em2_allocation_crash_output);
             if(!report.is_absolute() || std::filesystem::exists(report) || !std::filesystem::is_directory(report.parent_path()))ExitProcess(2);
             InstallCrashHandler(report);
-        } else if(REXCVAR_GET(em2_test_online_input) || REXCVAR_GET(em2_test_content_setup) || REXCVAR_GET(em2_test_mickey_ears) || REXCVAR_GET(em2_test_pc_settings) || REXCVAR_GET(em2_test_demo_support) || REXCVAR_GET(em2_test_update_swap) || REXCVAR_GET(em2_test_video_blocks) || REXCVAR_GET(em2_test_shader_storage) || REXCVAR_GET(em2_test_screen_upscale) || !REXCVAR_GET(em2_analyze_shadow_shader_path).empty() || !REXCVAR_GET(em2_analyze_bloom_shader_path).empty()) {
+        } else if(REXCVAR_GET(em2_test_online_voice) || REXCVAR_GET(em2_test_online_input) || REXCVAR_GET(em2_test_content_setup) || REXCVAR_GET(em2_test_mickey_ears) || REXCVAR_GET(em2_test_pc_settings) || REXCVAR_GET(em2_test_demo_support) || REXCVAR_GET(em2_test_update_swap) || REXCVAR_GET(em2_test_video_blocks) || REXCVAR_GET(em2_test_shader_storage) || REXCVAR_GET(em2_test_screen_upscale) || !REXCVAR_GET(em2_analyze_shadow_shader_path).empty() || !REXCVAR_GET(em2_analyze_bloom_shader_path).empty()) {
             const auto reports=exe_dir/"diagnostic-crashes"/(std::to_string(GetCurrentProcessId())+"-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
             if(!std::filesystem::create_directories(reports))ExitProcess(2);
             InstallCrashHandler(reports/"crash.log");
@@ -471,6 +490,8 @@ public:
         if(!REXCVAR_GET(em2_test_xbox_disc).empty()){
             const auto path=[](const std::string& s){return std::filesystem::path(std::u8string(s.begin(),s.end()));};
             std::string error;bool success=true;const auto source=path(REXCVAR_GET(em2_test_xbox_disc));
+            if(REXCVAR_GET(em2_test_rar_cancel)){success=em2::TestRarImageCancellation(source);REXLOG_INFO("RAR cancellation regression: {}",success?"PASS":"FAIL");spdlog::shutdown();ExitProcess(success?0:1);}
+            if(REXCVAR_GET(em2_test_rar_contents)){success=em2::TestRarArchiveContents(source,path(REXCVAR_GET(em2_test_xbox_reference)));spdlog::shutdown();ExitProcess(success?0:1);}
             if(REXCVAR_GET(em2_test_seven_cancel)){success=em2::TestSevenImageCancellation(source);REXLOG_INFO("7z cancellation regression: {}",success?"PASS":"FAIL");spdlog::shutdown();ExitProcess(success?0:1);}
             if(!REXCVAR_GET(em2_test_xbox_destination).empty()){const auto destination=path(REXCVAR_GET(em2_test_xbox_destination));success=em2::ImportXbox360Disc(source,destination,{},error);REXLOG_INFO("Diagnostic game extraction: {} {}",success,error);}
             if(success)success=em2::VerifyXbox360Disc(source,path(REXCVAR_GET(em2_test_xbox_reference)),error);
@@ -486,12 +507,25 @@ public:
             spdlog::shutdown();
             ExitProcess(success?0:1);
         }
+        if(!REXCVAR_GET(em2_prepare_online_clothing_source).empty()){
+            std::string error;
+            const auto& source=REXCVAR_GET(em2_prepare_online_clothing_source);
+            const auto& destination=REXCVAR_GET(em2_prepare_online_clothing_destination);
+            const bool success=!destination.empty() && em2::net::TestOnlineClothingTextures() && em2::net::WriteOnlineClothingVariants(std::filesystem::path(std::u8string(source.begin(),source.end())),std::filesystem::path(std::u8string(destination.begin(),destination.end())),error);
+            REXLOG_INFO("Online clothing preparation: {} {}",success?"PASS":"FAIL",error);
+            spdlog::shutdown();ExitProcess(success?0:1);
+        }
+        if(REXCVAR_GET(em2_test_online_voice)){
+            const auto voice_preferences_test=exe_dir/("online-voice-settings-test-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+            bool success=false;try{success=em2::net::TestOnlineVoiceAudio() && em2::net::TestOnlineVoiceTransport() && em2::net::TestOnlineRoomVoice() && em2::net::TestOnlineVoicePreferences(voice_preferences_test) && em2::net::TestOnlineVoiceSettings(voice_preferences_test) && em2::net::TestOnlineVoiceDevices() && em2::net::TestOnlineVoiceRuntime();}catch(const std::exception& e){REXLOG_ERROR("Voice regression threw: {}",e.what());}
+            spdlog::shutdown();ExitProcess(success?0:1);
+        }
         if (REXCVAR_GET(em2_test_online_input)) {
             const auto fixture=exe_dir/("online-input-test-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
             const bool created=CreateDirectoryW(fixture.c_str(),nullptr)!=0;
             if(created)em2::LoadControls(fixture/"controls");
             bool success=false;
-            try{success=created && TestStartupCallbackReports(fixture/"callback-reports") && em2::net::TestOnlineInvites() && em2::net::TestLANDiscovery() && em2::TestNativeLaunchDefaults() && em2::TestNativeCharacterPhysics() && em2::net::TestNativeInputClock() && em2::net::TestNativeTriggers() && em2::net::TestNativeButtonActions() && em2::net::TestOnlineRoom() && em2::net::TestOnlineRoomBoot(fixture/"boot") && em2::net::TestRoomBootstrapGate() && em2::net::TestNativeRoomSession() && em2::net::TestNativeWorldInitializationSeed() && em2::net::TestNativeLocalMovement() && em2::net::TestNativeLocalJump() && em2::net::TestNativeRetailInput() && em2::net::TestNativeGenericBasicInput() && em2::net::TestOwnedActorInput() && em2::TestCanonicalNativeJoin();}
+            try{success=created && em2::net::TestLobbyNameInput() && em2::net::TestOnlineChatControls() && em2::net::TestNativeOnlineMenu() && em2::net::TestNativeOnlineHandoff() && em2::net::TestOnlineMenuBoot(fixture/"menu-room") && em2::net::TestOnlineClothingArchive(fixture/"clothing-archive") && em2::net::TestOnlineClothingDrawOwnership() && em2::net::TestOnlineClothingTextures() && em2::net::TestOnlineNameTags() && em2::net::TestNativeEventOrder() && em2::TestNativeTurnRateDefaults() && TestStartupCallbackReports(fixture/"callback-reports") && em2::net::TestOnlineInvites() && em2::net::TestOnlineSession() && em2::net::TestOnlineBoot(fixture/"legacy-boot") && em2::net::TestOnlineGameplay() && em2::net::TestNativeOnlineViewport() && em2::TestSimulation() && em2::TestNativeRandom() && em2::net::TestLANDiscovery() && em2::TestNativeLaunchDefaults() && em2::TestNativeCharacterPhysics() && em2::net::TestNativeInputClock() && em2::net::TestNativeTriggers() && em2::net::TestNativeButtonActions() && em2::net::TestOnlineRoomChat() && em2::net::TestOnlineRoom() && em2::net::TestOnlineRoomBoot(fixture/"boot") && em2::net::TestRoomBootstrapGate() && em2::net::TestNativeRoomSession() && em2::net::TestNativeWorldInitializationSeed() && em2::net::TestNativeLocalMovement() && em2::net::TestNativeLocalJump() && em2::net::TestNativeRetailInput() && em2::net::TestNativeGenericBasicInput() && em2::net::TestOwnedActorInput() && em2::TestCanonicalNativeJoin();}
             catch(const std::exception& error){REXLOG_ERROR("Focused online regression threw: {}",error.what());}
             catch(...){REXLOG_ERROR("Focused online regression threw a non-standard exception");}
             if(created){std::error_code cleanup_error;std::filesystem::remove_all(fixture,cleanup_error);}
@@ -537,7 +571,7 @@ public:
             std::string em1_collision_error;
             const auto em1_collision_ok=em2::em1::TestLevelPartitionClassification(em1_collision_error) && em2::em1::TestKeyframeColorEvaluator(em1_collision_error) && em2::em1::TestNifContainerCompatibility(em1_collision_error) && em2::em1::TestEm1HavokCollision(em1_collision_error) && em2::em1::TestNifFixedPointUvPromotion(em1_collision_error) && em2::em1::TestPortableBcPixels(em1_collision_error) && em2::em1::TestPreviewDiffusePeState(em1_collision_error) && em2::em1::TestLevelOriginalScriptLibrary() && em2::em1::TestLevelOriginalAudioOwnership();
             if(!em1_collision_ok)REXLOG_ERROR("EM1 compatibility regression: {}",em1_collision_error);
-            const auto success=em1_collision_ok && TestStartupCallbackReports(test_dir/"callback-reports") && em2::TestNativeLaunchDefaults() && em2::TestNativeCharacterPhysics() && em2::net::TestNativeInputClock() && em2::net::TestNativeTriggers() && em2::net::TestNativeButtonActions() && em2::net::TestLobbyNameInput() && em2::net::TestOnlineSession() && em2::net::TestOnlineRoom() && em2::net::TestNativeLocalMovement() && em2::net::TestNativeLocalJump() && em2::net::TestNativeRetailInput() && em2::net::TestNativeGenericBasicInput() && em2::net::TestOwnedActorInput() && em2::net::TestOnlineGameplay() && em2::TestNativePlayerActions() && em2::TestCanonicalNativeJoin() && em2::TestNativePlayerSpawn() && em2::TestRenderOptions() && em2::TestRenderLogFilter() && em2::TestNativeRenderSampler(test_dir/"native-samples.tsv") && em2::TestNativePropertyLookup() && em2::TestNativeBindingCache() && em2::TestNativeVisibilityScan() && em2::TestNativeRegisterBank() && em2::TestNativeShaderUpload() && em2::TestNativeMemoryCopy() && em2::TestNativeVideoBlocks() && em2::TestNativeSkinning() && em2::TestNativeCameraTiming() && em2::TestNativeCameraProjection() && em2::TestSceneDrawInputs() && em2::TestSimulation() && em2::TestGpuCommandProfiling() && em2::TestTransferScissors() && em2::TestStencilZeroProof() && em2::TestFencedScratchCache() && settings_ok && controls_ok && lowering_ok;
+            const auto success=em1_collision_ok && TestStartupCallbackReports(test_dir/"callback-reports") && em2::TestNativeLaunchDefaults() && em2::TestNativeCharacterPhysics() && em2::net::TestNativeInputClock() && em2::net::TestNativeTriggers() && em2::net::TestNativeButtonActions() && em2::net::TestLobbyNameInput() && em2::net::TestOnlineSession() && em2::net::TestOnlineRoomChat() && em2::net::TestOnlineRoom() && em2::net::TestNativeLocalMovement() && em2::net::TestNativeLocalJump() && em2::net::TestNativeRetailInput() && em2::net::TestNativeGenericBasicInput() && em2::net::TestOwnedActorInput() && em2::net::TestOnlineGameplay() && em2::TestNativePlayerActions() && em2::TestCanonicalNativeJoin() && em2::TestNativePlayerSpawn() && em2::TestRenderOptions() && em2::TestRenderLogFilter() && em2::TestNativeRenderSampler(test_dir/"native-samples.tsv") && em2::TestNativePropertyLookup() && em2::TestNativeTurnRateDefaults() && em2::TestNativeBindingCache() && em2::TestNativeVisibilityScan() && em2::TestNativeRegisterBank() && em2::TestNativeShaderUpload() && em2::TestNativeMemoryCopy() && em2::TestNativeVideoBlocks() && em2::TestNativeSkinning() && em2::TestNativeCameraTiming() && em2::TestNativeCameraProjection() && em2::TestSceneDrawInputs() && em2::TestSimulation() && em2::TestGpuCommandProfiling() && em2::TestTransferScissors() && em2::TestStencilZeroProof() && em2::TestFencedScratchCache() && settings_ok && controls_ok && lowering_ok;
             spdlog::shutdown();
             ExitProcess(success?0:1);
         }
@@ -592,6 +626,7 @@ public:
             return false;
         }
         const bool exact_game_xex=rex::util::sha256_file(pc_assets/"default.xex")==kTranslatedGameXex;
+        em2::net::ConfigureOnlineClothingArchive(pc_assets/"packfiles"/"_Dynamic.pak");
         if(!shader_storage_test)em2::WriteGameConfigOverlay(game_dir / "ConfigFiles.ini", pc_assets / "ConfigFiles.ini");
 
         if(!shader_storage_test && !em2::net::PreparePrivateRoomProbe(exe_dir/"beetleworx.exe",pc_assets,user_data))return false;
@@ -965,16 +1000,16 @@ public:
         return true;
     }
 
-    void OnKeyDown(rex::ui::KeyEvent& e) override { if(em2::net::NativeOnlineNameKey(unsigned(e.virtual_key()),true,e.is_shift_pressed(),e.is_ctrl_pressed())){e.set_handled(true);return;} if(!em2::EngineWorkbenchKey(unsigned(e.virtual_key()),true))em2::ControlKey(unsigned(e.virtual_key()),true); }
-    void OnKeyChar(rex::ui::KeyEvent& e) override {if(em2::net::NativeOnlineNameCharacter(unsigned(e.virtual_key())))e.set_handled(true);}
-    void OnKeyUp(rex::ui::KeyEvent& e) override { if(em2::net::NativeOnlineNameKey(unsigned(e.virtual_key()),false,e.is_shift_pressed(),e.is_ctrl_pressed())){e.set_handled(true);return;} if(!em2::EngineWorkbenchKey(unsigned(e.virtual_key()),false))em2::ControlKey(unsigned(e.virtual_key()),false); }
+    void OnKeyDown(rex::ui::KeyEvent& e) override { if(em2::net::OnlineVoiceKey(unsigned(e.virtual_key()),true) || em2::net::NativeOnlineNameKey(unsigned(e.virtual_key()),true,e.is_shift_pressed(),e.is_ctrl_pressed()) || em2::net::OnlineChatKey(unsigned(e.virtual_key()),true,e.is_shift_pressed(),e.is_ctrl_pressed())){e.set_handled(true);return;} if(!em2::EngineWorkbenchKey(unsigned(e.virtual_key()),true))em2::ControlKey(unsigned(e.virtual_key()),true); }
+    void OnKeyChar(rex::ui::KeyEvent& e) override {if(em2::net::NativeOnlineNameCharacter(unsigned(e.virtual_key())) || em2::net::OnlineChatCharacter(unsigned(e.virtual_key())))e.set_handled(true);}
+    void OnKeyUp(rex::ui::KeyEvent& e) override { if(em2::net::OnlineVoiceKey(unsigned(e.virtual_key()),false) || em2::net::NativeOnlineNameKey(unsigned(e.virtual_key()),false,e.is_shift_pressed(),e.is_ctrl_pressed()) || em2::net::OnlineChatKey(unsigned(e.virtual_key()),false,e.is_shift_pressed(),e.is_ctrl_pressed())){e.set_handled(true);return;} if(!em2::EngineWorkbenchKey(unsigned(e.virtual_key()),false))em2::ControlKey(unsigned(e.virtual_key()),false); }
     void OnMouseDown(rex::ui::MouseEvent& e) override { MouseKey(e,true); }
     void OnMouseUp(rex::ui::MouseEvent& e) override { MouseKey(e,false); }
     void OnMouseWheel(rex::ui::MouseEvent& e) override {
         if(window_ && window_->HasFocus())em2::ControlWheel(e.scroll_x(),e.scroll_y());
     }
-    void OnGotFocus(rex::ui::UISetupEvent&) override {em2::net::RestoreNativeOnlineNameFocus();em2::SetEngineWorkbenchFocused(true);}
-    void OnLostFocus(rex::ui::UISetupEvent&) override { em2::net::CancelNativeOnlineNameInput();em2::ClearControlKeys();em2::SetEngineWorkbenchFocused(false); }
+    void OnGotFocus(rex::ui::UISetupEvent&) override {em2::net::SetOnlineVoiceFocused(true);em2::net::RestoreNativeOnlineNameFocus();em2::SetEngineWorkbenchFocused(true);}
+    void OnLostFocus(rex::ui::UISetupEvent&) override { em2::net::SetOnlineVoiceFocused(false);em2::net::CancelNativeOnlineNameInput();em2::net::CloseOnlineChat();em2::ClearControlKeys();em2::SetEngineWorkbenchFocused(false); }
     void MouseKey(rex::ui::MouseEvent& e,bool down) {
         using Button=rex::ui::MouseEvent::Button;
         const auto key=e.button()==Button::kLeft?VK_LBUTTON:e.button()==Button::kRight?VK_RBUTTON:
@@ -1034,20 +1069,31 @@ public:
 private:
     void StopGuestTitleOnce(){
         em2::net::GameplayInputGate().CancelNativeLoads();
+        em2::net::CancelNativeRoomLoads();
         if(!runtime_ || !runtime_->kernel_state()){em2::CloseGuestGPUInterrupts();return;}
         if(!title_stop_requested_.exchange(true,std::memory_order_acq_rel)){
             // An APU callback can wait on a guest audio job. Drain it while
             // title workers can still complete that job, before TerminateTitle
             // removes the workers and their wait objects.
             if(runtime_->audio_system()){
+                REXLOG_INFO("Title shutdown: draining host audio callbacks");
                 em2::QuiesceHostAudioCallbacks(*runtime_->audio_system());
+                REXLOG_INFO("Title shutdown: stopping audio worker");
                 runtime_->audio_system()->Shutdown();
             }
             // Audio jobs may still depend on ordinary title/GPU progress.
             // Drain interrupts only after those jobs have finished.
+            REXLOG_INFO("Title shutdown: draining GPU interrupts");
             em2::CloseGuestGPUInterrupts();
+            REXLOG_INFO("Title shutdown: terminating title workers");
+            // TerminateTitle can stop a guest inside synchronous logging,
+            // abandoning a host logger/heap lock. Drain the retained Room's
+            // potentially large failure history before stopping its owner.
+            em2::net::CloseNativeRoomDiagnostics();
             runtime_->kernel_state()->TerminateTitle();
+            REXLOG_INFO("Title shutdown: releasing stopped audio clients");
             if(runtime_->audio_system())em2::ReleaseStoppedAudioClients(*runtime_->audio_system());
+            REXLOG_INFO("Title shutdown: guest workers stopped");
         }
     }
     void RequestSceneLightingSetting(em2::PCSettingRequest request){

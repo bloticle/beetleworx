@@ -17,6 +17,7 @@
 #include <type_traits>
 #include <cstring>
 #include <bit>
+#include <algorithm>
 
 namespace em2::net {
 using rex::X_STATUS;
@@ -46,8 +47,12 @@ bool Current(const Room& room,PPCContext& ctx,uint8_t* base){
 bool ArmNativeLocalSource(const Room& room,unsigned physical,const NativeLocalMovementBinding& binding,PPCContext& ctx,uint8_t* base){
     Environment environment;
     if(sampling || physical>=2 || !room.lobby().locked ||
-        room.identity().initialization_policy!=InitializationPolicy::SharedNativeV1 || room.local_peer()<1 || room.local_peer()>2 ||
-        binding.retail_slot!=room.local_peer()-1 || issued==UINT64_MAX)return false;
+        room.identity().initialization_policy!=InitializationPolicy::SharedNativeV1 || room.local_peer()<1 || room.local_peer()>kOnlineRoomCapacity ||
+        issued==UINT64_MAX)return false;
+    const auto& players=room.lobby().players;
+    const auto local=std::find_if(players.begin(),players.end(),[&](const LobbyPlayer& player){return player.peer==room.local_peer();});
+    if(local==players.end() || (local->character!=LobbyCharacter::Mickey && local->character!=LobbyCharacter::Oswald) ||
+        binding.retail_slot!=(local->character==LobbyCharacter::Mickey?0u:1u))return false;
     const auto controls=em2::SynchronizedControlsGeneration();if(!controls || !BindingCurrent(binding,ctx,base))return false;
     if(room.state()==RoomState::Bootstrapping){
         auto* gate=CurrentRoomBootstrapGate();uint64_t generation=0;Frame published;
@@ -68,6 +73,7 @@ bool SampleNativeLocalSource(const Room& room,rex::input::InputSystem& input,uin
     Pad pad;if(!em2::SampleLocalControls(input,physical,tick,pad) || route.generation!=generation || !Current(room,ctx,base))return false;
     NativeRoutedPadSample sample;sample.pad_=pad;sample.route_generation_=generation;sample.controls_generation_=controls;
     sample.source_tick_=tick;sample.physical_user_=physical;sample.native_user_=route.binding.user;sample.retail_slot_=route.binding.retail_slot;
+    sample.room_peer_=route.peer;
     route.last=sample;output=sample;return true;
 }
 bool ValidateNativeLocalSource(const Room& room,const NativeRoutedPadSample& sample,const NativeLocalMovementBinding& binding,PPCContext& ctx,uint8_t* base){
@@ -212,6 +218,46 @@ bool TestNativeLocalSource(PPCContext& ctx,uint8_t* base,const NativeLocalMoveme
         !ValidateNativeLocalSource(*client,again,binding,ctx,base),"replacement synchronized-controls generation invalidates all source tokens");
     DisarmNativeLocalSource();check(ArmNativeLocalSource(*client,0,binding,ctx,base) && SampleNativeLocalSource(*client,input,1003,ctx,base,again),"new controls lease may establish a fresh validated route");
     client->Disconnect();check(!ValidateNativeLocalSource(*client,again,binding,ctx,base),"cached source token cannot survive Room disconnect");
+    DisarmNativeLocalSource();DisarmNativeLocalJump();em2::EndSynchronizedControls();
+    // Real sixteen-peer transport, one sealed physical producer at peer16.
+    // Other participants submit explicit fixture neutral; no sixteen-world claim.
+    Room cohort_host;std::array<std::unique_ptr<Room>,15> cohort;
+    auto cohort_identity=identity;cohort_identity.first_tick=2001;cohort_identity.session[1]=16;
+    if(!check(cohort_host.Host(cohort_identity,"127.0.0.1",0,16,"Host"),"sixteen-peer source fixture hosts"))return false;
+    for(unsigned i=0;i<cohort.size();++i){cohort[i]=std::make_unique<Room>();
+        if(!cohort[i]->Join(cohort_identity,"127.0.0.1",cohort_host.port(),"Peer"+std::to_string(i+2)))return false;}
+    auto cohort_pump=[&](auto ready){const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(5);do{
+        cohort_host.Poll();for(auto& peer:cohort)peer->Poll();if(ready())return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }while(std::chrono::steady_clock::now()<end);return false;};
+    if(!check(cohort_pump([&]{return cohort_host.lobby().players.size()==16 && std::all_of(cohort.begin(),cohort.end(),[](const auto& peer){return peer->lobby().players.size()==16;});}),
+        "all sixteen real TCP participants observe the full roster"))return false;
+    if(!cohort_host.SetReady(true))return false;for(auto& peer:cohort)if(!peer->SetReady(true))return false;
+    if(!cohort_pump([&]{return std::all_of(cohort_host.lobby().players.begin(),cohort_host.lobby().players.end(),[](const auto& player){return player.ready;}) &&
+        std::all_of(cohort.begin(),cohort.end(),[](const auto& peer){return !peer->profile_pending();});}) || !cohort_host.Start() ||
+       !cohort_pump([&]{return std::all_of(cohort.begin(),cohort.end(),[](const auto& peer){return peer->state()==RoomState::Loading;});}))return false;
+    std::array<uint8_t,32> cohort_ready{};cohort_ready[0]=16;
+    if(!cohort_host.WorldReady(cohort_ready))return false;for(auto& peer:cohort)if(!peer->WorldReady(cohort_ready))return false;
+    if(!cohort_pump([&]{return cohort_host.state()==RoomState::Running && std::all_of(cohort.begin(),cohort.end(),[](const auto& peer){return peer->state()==RoomState::Running;});}))return false;
+    auto final=std::find_if(cohort.begin(),cohort.end(),[](const auto& peer){return peer->local_peer()==16;});
+    if(!check(final!=cohort.end() && em2::BeginSynchronizedControls(2000),"peer16 uses a bounded native controls lease, not SDK user15"))return false;
+    hardware->pads[0]={};Pad cohort_baseline;
+    if(!em2::SampleLocalControls(input,0,2000,cohort_baseline))return false;
+    hardware->pads[0]=configured_pad;hardware->reads={};NativeRoutedPadSample final_sample;
+    if(!check(ArmNativeLocalSource(**final,0,binding,ctx,base) && SampleNativeLocalSource(**final,input,2001,ctx,base,final_sample) &&
+        final_sample.room_peer()==16 && final_sample.physical_user()==0 && final_sample.native_user()==1 && final_sample.retail_slot()==1 && hardware->reads[0]==1 && hardware->reads[1]==0,
+        "peer16 owns authentic physical0/nativeOswald1 provenance without inventing a sixteenth engine controller"))return false;
+    NativeLocalJumpEvents final_edges;RoomMovement final_movement;
+    if(!check(ArmNativeLocalJump(jump,1,2001,ctx,base) && ProduceNativeLocalRoomMovement(**final,binding,final_sample,1,ctx,base,final_movement) &&
+        ProduceNativeLocalJump(**final,jump,final_sample,1,ctx,base,final_edges),"peer16 source runs original native Movement and Jump interpretation with the frozen wire actor epoch"))return false;
+    final_movement.source=RoomMovementSource::NativeActionV2;final_movement.jump_button_mask=final_edges.button_mask;
+    final_movement.jump_count=final_edges.count;final_movement.jump_events=final_edges.events;
+    RoomMovement cohort_neutral;cohort_neutral.actor_epoch=1;cohort_neutral.source=RoomMovementSource::NativeActionV1;
+    if(!cohort_host.SubmitLocal(2001,cohort_neutral))return false;
+    for(auto& peer:cohort)if(!peer->SubmitLocal(2001,peer->local_peer()==16?final_movement:cohort_neutral))return false;
+    RoomFrame cohort_frame;
+    if(!check(cohort_pump([&]{return cohort_host.PeekFrame(cohort_frame);}) && cohort_frame.players_mask==0xFFFF && cohort_frame.players[15]==final_movement &&
+        !ValidateNativeLocalSource(cohort_host,final_sample,binding,ctx,base),"full authoritative sixteen-peer frame preserves the sealed peer16 commands and rejects host impersonation"))return false;
     if(ok)REXLOG_INFO("Native local source passed {} checks: actual hardware0/canonicalOswald1, raw-boundary arm without polling/vote, sealed tick/control/binding provenance, typed native Movement/Jump, strict API mismatch rejection, cache/reentrancy/thread/Room lifecycle",checks);
     return ok;
 }

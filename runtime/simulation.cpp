@@ -14,6 +14,7 @@
 #include "native_sampler.h"
 #include "native_random.h"
 #include "online_behavior_trace.h"
+#include "online_owned_probe.h"
 #include "online_input_clock.h"
 #include "skinning.h"
 #include "physics_timing.h"
@@ -21,13 +22,19 @@
 #include "gameplay_mods.h"
 #include "native_engine.h"
 #include "online.h"
+#include "online_room_leave.h"
+#include "online_native_handoff.h"
 #include "online_runtime.h"
+#include "online_viewport.h"
 #include "online_room_bootstrap.h"
 #include "online_room_runtime.h"
 #include "online_room_gameplay.h"
+#include "online_nametags.h"
 #include "world_observation.h"
 #include "native_entity_probe.h"
 #include "native_character_physics.h"
+#include "game_console.h"
+#include "guest_read_batch.h"
 #include <rex/cvar.h>
 REXCVAR_DEFINE_BOOL(em2_trace_online_random_owners,false,"Debug","Capture bounded owner registers and parent stacks for online CRT diagnostics; requires observation tracing");
 REXCVAR_DEFINE_BOOL(em2_trace_online_lua_owners,false,"Debug","Private bounded Lua random-source and early-wait capture without per-tick clock logging; requires observation tracing");
@@ -86,6 +93,8 @@ PPC_EXTERN_FUNC(__imp__sub_831BC328);
 PPC_EXTERN_FUNC(__imp__sub_831C1360);
 PPC_EXTERN_FUNC(__imp__sub_831C13F0);
 PPC_EXTERN_FUNC(__imp__sub_8273D880);
+PPC_EXTERN_FUNC(__imp__sub_82740210);
+PPC_EXTERN_FUNC(sub_82740210);
 PPC_EXTERN_FUNC(__imp__sub_82581840);
 PPC_EXTERN_FUNC(__imp__sub_82568C20);
 PPC_EXTERN_FUNC(__imp__sub_825532B0);
@@ -776,6 +785,16 @@ thread_local uint64_t tick_frequency=50000000;
 thread_local uint64_t counter_remainder=0;
 thread_local bool agreed_clock_tick=false;
 thread_local uint64_t clock_input_tick=0;
+struct NetworkPauseRestore {uint8_t* base=nullptr;uint8_t local=0;} ;
+thread_local NetworkPauseRestore network_pause;
+void RestoreNetworkPause(){
+    if(auto* base=network_pause.base){PPC_STORE_U8(0x833FCA86,network_pause.local);network_pause={};}
+}
+void BeginNetworkPause(uint8_t* base,const em2::net::Frame& frame){
+    RestoreNetworkPause();
+    network_pause={base,PPC_LOAD_U8(0x833FCA86)};
+    PPC_STORE_U8(0x833FCA86,frame.players[0].menu_pause || frame.players[1].menu_pause);
+}
 thread_local bool frame_active=false;
 thread_local bool frame_halted=false;
 thread_local unsigned frame_steps=0;
@@ -1292,6 +1311,10 @@ void CompleteNetworkObservation(PPCContext& ctx,uint8_t* base) {
     const bool gameplay_report=gameplay && gameplay->active() && gameplay->completion_pending();
     const bool room_report=room && room->active() && room->completion_pending();
     if(gameplay_report && room_report){gameplay->ObservationFailed();room->ObservationFailed();return;}
+    if(gameplay_report && gameplay->transition_pending()){
+        if(!gameplay->CompleteWorldTransition(ctx,base))gameplay->ObservationFailed();
+        return;
+    }
     if(room && room->active() && gate.active()){
         room->ObservationFailed();gate.ObservationFailed();return;
     }
@@ -1309,10 +1332,17 @@ void CompleteNetworkObservation(PPCContext& ctx,uint8_t* base) {
     auto& observations=state.players;
     // Probe the real admitted actor/producer contract before freezing the
     // observation and CRT counters for this same completed native update.
-    const bool room_ready=room_report?room->CheckGameplayReadiness(ctx,base):false;
+    // Extra humans are a synchronized world mutation, not a side effect of
+    // the read-only receiver-ready probe. All clients run this at the same
+    // completed bootstrap boundary before hashing and voting readiness.
+    const bool actors_ready=!room_report || !gameplay || gameplay->InitializeActors(ctx,base);
+    const bool room_ready=room_report && actors_ready?room->CheckGameplayReadiness(ctx,base):false;
     ctx=saved;_mm_setcsr(mxcsr);
     bool valid=em2::ReadNativeGameplayObservation(ctx,base,state);
-    if(valid && gameplay_report){
+    // Both online adapters must verify the contact world once the two native
+    // humans are admitted. Verifying only the two player positions lets NPC
+    // physics diverge unnoticed until a later AI decision changes the RNG.
+    if(valid && (gameplay_report || (room_report && gameplay && gameplay->extra_actor_mask()) || (legacy_report && em2::NativeCoopReady(base)))){
         valid=em2::ReadNativeCharacterPhysics(base,state.characters) && state.characters.size()>=2;
         state.includes_character_physics=valid;
     }
@@ -1320,6 +1350,7 @@ void CompleteNetworkObservation(PPCContext& ctx,uint8_t* base) {
     const auto observed_tick=gameplay_report?gameplay->committed_tick():(room_report?room->committed_tick():(legacy_report?gate.committed_tick():tick_number));
     if(report && valid && state.players[0].mode==0 && state.players[1].mode==0)em2::TraceNativeEntitySnapshot(base,observed_tick);
     const auto digest=valid?em2::net::HashGameplayObservation(observed_tick,state):std::nullopt;
+    if(legacy_report)em2::net::ObservePrivateOnlineView(ctx,base,observed_tick);
     if(report && valid && random_failure_history && random_failure_history->current && random_failure_history->current->tick==observed_tick){
         auto& frame=*random_failure_history->current;frame.character_coverage=state.includes_character_physics;
         if(frame.character_coverage)frame.characters=state.characters;
@@ -1469,6 +1500,7 @@ struct NativeTickAdmissionScope {
     bool legacy=false,completed=false;
     ~NativeTickAdmissionScope()noexcept{
         if(completed)return;
+        RestoreNetworkPause();
         const auto error=GetLastError();const auto csr=_mm_getcsr();
         recording_epoch.store(0,std::memory_order_release);
         in_tick=false;agreed_clock_tick=false;record_random=false;
@@ -1483,6 +1515,7 @@ struct NativeTickAdmissionScope {
 };
 
 void ResetSimulationHistory(PPCContext& ctx,uint8_t* base) {
+    RestoreNetworkPause();
     em2::ResetCameraPresentation();
     em2::ResetGameplayViewCameras();
     recording_epoch.store(0,std::memory_order_release);
@@ -1514,11 +1547,13 @@ void ResetSimulationHistory(PPCContext& ctx,uint8_t* base) {
 }
 
 void FinishTick(PPCContext& ctx,uint8_t* base) {
+    struct PauseScope {~PauseScope(){RestoreNetworkPause();}} pause_scope;
     CompleteNetworkObservation(ctx,base);
     recording_epoch.store(0,std::memory_order_release);
     in_tick=false;
     agreed_clock_tick=false;
     ProbePlayerPosition(ctx,base);
+    em2::net::AfterOwnedActorProbeTick(ctx,base);
     std::vector<uint32_t> expired;
     {
         std::lock_guard lock(history_mutex);
@@ -1688,6 +1723,12 @@ void BenchmarkSceneRenderEntries() {
 }
 
 namespace em2 {
+void PrepareSimulationWorldUnload(PPCContext& ctx,uint8_t* base){
+    const bool tick=in_tick,agreed=agreed_clock_tick;
+    const auto remainder=counter_remainder;
+    ResetSimulationHistory(ctx,base);
+    in_tick=tick;agreed_clock_tick=agreed;counter_remainder=remainder;
+}
 void ResetPlayerMotionHistory(PPCContext& ctx,uint8_t* base) {
     ResetSimulationHistory(ctx,base);
     scheduler.Reset();
@@ -1710,7 +1751,34 @@ bool em2::CurrentAgreedSimulationTick(uint64_t& tick){
     tick=clock_input_tick;return true;
 }
 
+namespace {
+bool RecheckRelocatedWait(const PPCContext& ctx,uint8_t* base){
+    if(!em2::InAgreedSimulationTick() || ctx.lr!=0x8273DACC)return false;
+    struct HostState{DWORD error=GetLastError();unsigned csr=_mm_getcsr();~HostState(){SetLastError(error);_mm_setcsr(csr);}}host;
+    // At this exact return, 8273D880 has already decremented its count and
+    // copies the last coroutine into the removed slot. The original loop then
+    // increments unconditionally, skipping that survivor. Do not reorder Lua
+    // records or alter reference counts: let its original assignment and
+    // destructor execute, then cancel that one subsequent index increment.
+    const auto manager=ctx.r29.u32,index=ctx.r28.u32;
+    if(!base || manager<4096 || uint64_t(manager)+80>0x100000000ull ||
+       ctx.r31.u32!=manager+72 || ctx.r30.u64!=uint64_t(index)*132)return false;
+    em2::GuestReadBatch reads;
+    if(!em2::GuestReadBatch::Readable(base+manager+72,8))return false;
+    const auto list=PPC_LOAD_U32(manager+72),count=PPC_LOAD_U32(manager+76);
+    if(!list || !count || count>65536 || index>=count || uint64_t(list)+uint64_t(count+1)*132>0x100000000ull)return false;
+    return ctx.r3.u64==uint64_t(list)+uint64_t(index)*132 &&
+        ctx.r4.u64==uint64_t(list)+uint64_t(count)*132;
+}
+}
+PPC_FUNC_IMPL(sub_82740210){
+    const bool recheck=RecheckRelocatedWait(ctx,base);
+    __imp__sub_82740210(ctx,base);
+    if(recheck){ctx.r28.s64-=1;ctx.r30.s64-=132;}
+}
+
 PPC_FUNC_IMPL(sub_8273D880) {
+    em2::TickPrivateNativeRestart(ctx,base);
     // The coroutine scheduler subtracts one of the native clock deltas from
     // each pending wait before it resumes Lua. Capture the inputs before the
     // original scheduler mutates or removes entries.
@@ -1873,10 +1941,13 @@ PPC_FUNC_IMPL(sub_829EC348) {
     em2::MaybeQueueNativeStartLevel();
     em2::em1::MaybeProbeRegisteredLevelEntry();
     em2::em1::TickArchitecturePreview(ctx,base);
+    em2::net::TickNativeRoomTitleLeave(ctx,base,!in_tick && !frame_finish_pending);
+    em2::net::TickNativeOnlineTitleMenuHandoff(ctx,base,!in_tick && !frame_finish_pending);
     if(em2::net::NativeRoomActive()){
         // Also reachable while this loaded copy is parked for slower peers.
         // Advancing startup here is safe only after the preceding native finish.
         em2::net::UpdateNativeOnlineSession(base,!in_tick && !frame_finish_pending);
+        em2::net::ProbeNativeRoomLeaveBoundary(ctx,base,!in_tick && !frame_finish_pending);
     }else if(!em2::net::RoomBootstrapActive() && !em2::net::UpdateNativeOnlineSession(base))em2::net::UpdateOnlineQASession(base);
     static thread_local auto previous=Clock::now();
     static thread_local bool was_enabled=false;
@@ -1968,11 +2039,13 @@ PPC_FUNC_IMPL(sub_829ED310) {
         }
         ctx=arguments;
         PPC_STORE_U32(arguments.r3.u32+76,std::bit_cast<uint32_t>(1.f/30.f));
+        if(network_tick)BeginNetworkPause(base,network_frame);
         StartTick(base,network_tick || room_tick || gameplay_tick,gameplay_tick?gameplay_frame.tick:(room_tick?room_frame.tick:network_frame.tick));
         NativeTickAdmissionScope admission_scope{gameplay_tick?gameplay:nullptr,room_tick?room:nullptr,network_tick};
         if(gameplay_tick && !gameplay->Deliver(ctx,base)){gameplay->ObservationFailed();return false;}
         if(room_tick)em2::RunNativeSynchronizedJoin(ctx,base,join);
         else if(network_tick)em2::RunNativeSynchronizedJoin(ctx,base,network_frame.players[1].buttons);
+        if(!em2::net::BeforeOwnedActorProbeTick(ctx,base))return false;
         const auto started=Clock::now();
         __imp__sub_829ED310(ctx,base);
         em2::em1::TickArchitectureScripts(ctx,base,std::bit_cast<float>(PPC_LOAD_U32(0x833FCA54)));
@@ -2017,16 +2090,21 @@ PPC_FUNC_IMPL(sub_829D95B8) {
 
 PPC_FUNC_IMPL(sub_829D8228) {
     em2::VisualRandomScope visual_random;
-    const bool interpolate=frame_active && tick_number && REXCVAR_GET(em2_interpolation);
+    // Continue native UI/presentation even after a Room stop; skipping the
+    // whole renderer also skips the title's present/quit processing. Only
+    // discard stale online interpolation and its unavailable target helper.
+    const bool interpolate=em2::net::NativeRoomRenderBindingsAvailable(base) && frame_active && tick_number && REXCVAR_GET(em2_interpolation);
     const auto started=Clock::now();
     RenderFrameScope profile(REXCVAR_GET(em2_profile_render),interpolate);
     if(!interpolate) {
+        em2::net::CaptureOnlineNameTags(ctx,base);
         {em2::NativeRenderSampleScope sample;__imp__sub_829D8228(ctx,base);}
         MeasureMaximum(em2::maximum_render_us,started);profile.End();return;
     }
     ApplySkinPoses(ctx,base);profile.Mark(0);
     WithRenderTransforms(ctx,base,[&] {
         em2::RenderPresentationCamera(ctx,base,RenderAlpha());
+        em2::net::CaptureOnlineNameTags(ctx,base);
         profile.Mark(1);
         {em2::NativeRenderSampleScope sample;__imp__sub_829D8228(ctx,base);}
         profile.Mark(2);
@@ -2034,7 +2112,13 @@ PPC_FUNC_IMPL(sub_829D8228) {
     MeasureMaximum(em2::maximum_render_us,started);profile.End();
 }
 
-PPC_FUNC_IMPL(sub_829A4220) { ProfileRenderHelper(ctx,base,0,__imp__sub_829A4220); }
+PPC_FUNC_IMPL(sub_829A4220) {
+    // Native void camera-target position update dereferences component+172
+    // unconditionally. After an invalidated Room world it may have no target.
+    // Keep the last value while the stopped session awaits lifecycle recovery.
+    if(!em2::net::NativeRoomRenderBindingsAvailable(base))return;
+    ProfileRenderHelper(ctx,base,0,__imp__sub_829A4220);
+}
 PPC_FUNC_IMPL(sub_829CDE48) { ProfileRenderHelper(ctx,base,1,__imp__sub_829CDE48); }
 PPC_FUNC_IMPL(sub_83241358) { ProfileRenderHelper(ctx,base,2,__imp__sub_83241358); }
 PPC_FUNC_IMPL(sub_82654850) { ProfileRenderHelper(ctx,base,3,__imp__sub_82654850); }
@@ -2266,6 +2350,14 @@ static bool TestNativeClockIntervals() {
     } restore{base};
     for(uint32_t address:{0u,0x82000000u,0x833C0000u,0x833D0000u,0x833F0000u})
         if(!VirtualAlloc(base+address,0x10000,MEM_COMMIT,PAGE_READWRITE))return false;
+    for(const bool local:{false,true})for(unsigned requests=0;requests<4;++requests){
+        PPC_STORE_U8(0x833FCA86,local);PPC_STORE_U32(0x833FCA88,17);
+        net::Frame frame;frame.players[0].menu_pause=(requests&1)!=0;frame.players[1].menu_pause=(requests&2)!=0;
+        BeginNetworkPause(base,frame);
+        if(PPC_LOAD_U8(0x833FCA86)!=(requests!=0) || PPC_LOAD_U32(0x833FCA88)!=17)return false;
+        RestoreNetworkPause();RestoreNetworkPause();
+        if(PPC_LOAD_U8(0x833FCA86)!=local || PPC_LOAD_U32(0x833FCA88)!=17)return false;
+    }
     PPC_STORE_U32(0x82002060,std::bit_cast<uint32_t>(0.f));
     PPC_STORE_U32(0x82003F48,std::bit_cast<uint32_t>(1.f));
     PPC_STORE_U64(0x833D04D8,1000000);
@@ -2386,12 +2478,51 @@ static bool TestNativeClockIntervals() {
     REXLOG_INFO("Agreed native clock: {} byte-exact output comparisons across local phases, counters, pauses, scales and tick exhaustion; local-phase control differs only as expected",comparisons);
     return true;
 }
+bool TestNativeWaitRelocation(){
+    auto* base=static_cast<uint8_t*>(VirtualAlloc(nullptr,0x100000000ull,MEM_RESERVE,PAGE_READWRITE));
+    if(!base)return false;
+    struct Restore{uint8_t* base;bool tick=in_tick,agreed=agreed_clock_tick;unsigned csr=_mm_getcsr();
+        ~Restore(){VirtualFree(base,0,MEM_RELEASE);in_tick=tick;agreed_clock_tick=agreed;_mm_setcsr(csr);}}restore{base};
+    if(!VirtualAlloc(base,65536,MEM_COMMIT,PAGE_READWRITE))return false;
+    std::vector<uint8_t> before(65536),expected_memory(65536);unsigned cases=0;
+    for(const bool agreed:{false,true})for(const bool exact:{false,true})for(const bool valid:{false,true})
+    for(uint32_t count=0;count<=3;++count)for(uint32_t index=0;index<=count;++index){
+        std::memset(base,0x69,65536);in_tick=true;agreed_clock_tick=agreed;
+        constexpr uint32_t manager=0x2000,list=0x3000;
+        PPC_STORE_U32(manager+72,list);PPC_STORE_U32(manager+76,count);
+        const auto destination=list+index*132,source=list+count*132;
+        PPC_STORE_U32(destination+108,0);PPC_STORE_U32(source+108,0);
+        PPC_STORE_U32(source+96,std::bit_cast<uint32_t>(.25f));
+        PPCContext input{};input.r1.u64=0xF000;input.lr=exact?0x8273DACC:0x8273DAC8;
+        input.r3.u64=destination;input.r4.u64=source;input.r28.u64=index;
+        input.r29.u64=manager;input.r30.u64=index*132+(valid?0:4);input.r31.u64=manager+72;input.fpscr.InitHost();
+        const auto input_csr=_mm_getcsr();SetLastError(0xA504);
+        std::memcpy(before.data(),base,65536);auto expected=input;
+        __imp__sub_82740210(expected,base);const auto csr=_mm_getcsr();const auto error=GetLastError();
+        std::memcpy(expected_memory.data(),base,65536);
+        if(agreed && exact && valid && index<count){expected.r28.s64-=1;expected.r30.s64-=132;}
+        std::memcpy(base,before.data(),65536);auto actual=input;_mm_setcsr(input_csr);SetLastError(0xA504);sub_82740210(actual,base);
+        if(std::memcmp(&actual,&expected,sizeof(actual)) || std::memcmp(base,expected_memory.data(),65536) || _mm_getcsr()!=csr || GetLastError()!=error){
+            REXLOG_ERROR("Native wait relocation differs: agreed {}, exact {}, valid {}, count {}, index {}",agreed,exact,valid,count,index);return false;
+        }
+        if(agreed && exact && valid && index<count){
+            // Original 8273DB68 advances both cursors after destroying the
+            // old tail. Slot zero deliberately wraps through -1/-132 here.
+            actual.r28.s64+=1;actual.r30.s64+=132;
+            if(actual.r28.u64!=index || actual.r30.u64!=index*132)return false;
+        }
+        ++cases;
+    }
+    REXLOG_INFO("Native Lua wait relocation passed {} original assignment/full-context/64KiB/FP checks: first/middle/last slots, empty list, exact caller, malformed cursor and offline passthrough",cases);
+    return true;
+}
 bool TestSimulation() {
     if(!TestCameraTargetHistory())return false;
     if(!TestCameraPresentation())return false;
     if(!TestNativeCameraLookAction())return false;
     if(!TestRandomFailureHistory())return false;
     if(!TestScriptRandomOwner())return false;
+    if(!TestNativeWaitRelocation())return false;
     if(!TestRenderProfiling() || !TestNativeClockIntervals() || !TestPreparedSkinInterpolation())return false;
     bool ok=true;
     auto check=[&](bool condition,const char* message) {

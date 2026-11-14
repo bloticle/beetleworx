@@ -1,4 +1,5 @@
 #include "online_perception.h"
+#include "online_input_clock.h"
 #include "online_selector.h"
 #include "online_runtime.h"
 #include "simulation.h"
@@ -49,7 +50,10 @@ void Elapsed(PPCContext& ctx,uint8_t* base,bool synchronized,PPCFunc* original){
 }
 PPC_FUNC_IMPL(sub_828D1408){StartupPerception(ctx,base,em2::net::SynchronizedSessionActive() && !em2::InAgreedSimulationTick(),__imp__sub_828D1408);}
 PPC_FUNC_IMPL(sub_829505C0){const bool shared=em2::net::SynchronizedSessionActive();if(shared && em2::InAgreedSimulationTick())em2::net::RunCanonicalPerception(ctx,base);else StartupSelector(ctx,base,shared,__imp__sub_829505C0);}
-PPC_FUNC_IMPL(sub_831C1558){Elapsed(ctx,base,em2::net::SynchronizedSessionActive(),__imp__sub_831C1558);}
+PPC_FUNC_IMPL(sub_831C1558){
+    if(em2::net::RunAgreedNativeInputClockHelper(ctx,base,__imp__sub_831C1558))return;
+    Elapsed(ctx,base,em2::net::SynchronizedSessionActive(),__imp__sub_831C1558);
+}
 
 bool em2::net::TestOnlinePerceptionBudget(){
     if(!TestCanonicalPerception())return false;

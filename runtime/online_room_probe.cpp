@@ -1,14 +1,19 @@
 #include "online_room_probe.h"
 #include "online_room_boot.h"
+#include "online_native_menu.h"
 #include "online_room_runtime.h"
 #include "online_invite.h"
 #include "online_local_movement.h"
 #include "online_local_jump.h"
+#include "online_actor_roster.h"
+#include "native_character_physics.h"
 #include "players.h"
 #include "guest_read_batch.h"
 #include "ppc_context.h"
 #include <rex/cvar.h>
 #include <rex/logging.h>
+#include <rex/input/input_system.h>
+#include <rex/input/input_driver.h>
 #include <windows.h>
 #include <immintrin.h>
 #include <array>
@@ -17,8 +22,12 @@
 #include <cstring>
 #include <stdexcept>
 #include <thread>
+#include <bit>
+#include <optional>
 
 REXCVAR_DECLARE(bool,em2_private_profile);
+REXCVAR_DECLARE(bool,em2_room_native_buttons);
+REXCVAR_DECLARE(bool,em2_probe_online_chat);
 REXCVAR_DECLARE(std::string,em2_user_data_directory);
 REXCVAR_DECLARE(bool,em2_online_menu);
 REXCVAR_DECLARE(bool,em2_online_qa_prelaunch);
@@ -32,13 +41,19 @@ REXCVAR_DEFINE_STRING(em2_room_probe_role,"","Debug","Private native Room loopba
 REXCVAR_DEFINE_STRING(em2_room_probe_invitation_file,"","Debug","Private native Room probe NEW absolute invitation path");
 REXCVAR_DEFINE_INT32(em2_room_probe_expected_players,2,"Debug","Private native Room probe transport participant count 2..16; not playable actor capacity");
 REXCVAR_DEFINE_BOOL(em2_room_probe_gameplay,false,"Debug","Explicit private two-retail-player native gameplay experiment; no public-menu enablement");
+REXCVAR_DEFINE_BOOL(em2_room_probe_scripted_input,false,"Debug","Isolated verified loopback Room only: synthetic SDK source for extra-human movement and jump; never normal gameplay input");
+REXCVAR_DEFINE_UINT32(em2_room_probe_input_warmup_ticks,0,"Debug","Private validated SDK input only: neutral native updates before the scripted program, maximum 600");
+REXCVAR_DEFINE_BOOL(em2_room_probe_mixed_characters,false,"Debug","Private Room startup: odd extra peers choose Mickey and even extra peers choose Oswald through normal lobby requests");
 REXCVAR_DEFINE_INT32(em2_room_probe_verification_window,1,"Debug","Private native Room completed-update credit 1..8; must match on all peers");
 REXCVAR_DEFINE_STRING(em2_room_probe_replay_invitation_file,"","Debug","Host-only private loopback replay: reuse a captured session nonce while freshly verifying build/content/save");
 namespace em2::net {
+using rex::X_STATUS;
+using rex::X_RESULT;
 namespace {
 namespace fs=std::filesystem;
 using Clock=std::chrono::steady_clock;
 std::atomic<bool> prepared{false};
+Room* prepared_room=nullptr;
 struct Environment {unsigned csr=_mm_getcsr();DWORD error=GetLastError();~Environment(){_mm_setcsr(csr);SetLastError(error);}};
 struct Handle {HANDLE value=INVALID_HANDLE_VALUE;~Handle(){if(value!=INVALID_HANDLE_VALUE)CloseHandle(value);}};
 void Require(bool value,const char* why){if(!value)throw std::runtime_error(why);}
@@ -147,7 +162,6 @@ bool PreparePrivateRoomProbe(const fs::path& executable,const fs::path& content,
         Require(!prepared.load() && (role=="host" || role=="guest"),"Private Room probe role must be host or guest and prepared once");
         const auto count=REXCVAR_GET(em2_room_probe_expected_players);
         Require(count>=2 && count<=16,"Private Room probe expects 2..16 transport participants");
-        Require(!REXCVAR_GET(em2_room_probe_gameplay) || count==2,"Private retail gameplay currently requires exactly two participants");
         Require(REXCVAR_GET(em2_private_profile) && !REXCVAR_GET(em2_user_data_directory).empty(),"Private Room probe requires private_profile and explicit isolated user root");
         const auto window=REXCVAR_GET(em2_room_probe_verification_window);
         Require(window>=1 && window<=8 && boot.SetGameplayVerificationWindow(uint8_t(window)),"Private Room verification window must be 1..8");
@@ -232,16 +246,31 @@ bool PreparePrivateRoomProbe(const fs::path& executable,const fs::path& content,
                 status.error.empty()?"Private Room preparation cancelled":status.error.c_str());
             if(role=="host" && !published && !status.invitation.empty()){StoreNewInvitation(invitation,status.invitation);published=true;
                 REXLOG_INFO("Private Room host published the exact verified encoded invitation to NEW {}",invitation.string());}
+            bool appearances_ready=true;
+            if(REXCVAR_GET(em2_room_probe_mixed_characters)){
+                const auto lobby=boot.lobby();const auto local=boot.local_peer();
+                for(const auto& player:lobby.players){
+                    const auto wanted=player.peer==1 || (player.peer>2 && (player.peer&1))?LobbyCharacter::Mickey:LobbyCharacter::Oswald;
+                    if(player.character==wanted)continue;
+                    appearances_ready=false;
+                    if(player.peer==local && status.state==BootState::Ready && !boot.profile_pending())
+                        Require(boot.SetAppearance(wanted,player.color),"Private Room native character choice rejected");
+                }
+            }
+            // Appearance edits invalidate ready votes too. All peers wait for
+            // the complete intended choices before voting through normal APIs.
             // A later roster Join invalidates every ready vote. Wait until the
             // exact requested roster is present before voting, including >2.
-            if(!ready && status.state==BootState::Ready && boot.room_state()==RoomState::Lobby &&
+            if(!ready && appearances_ready && status.state==BootState::Ready && boot.room_state()==RoomState::Lobby &&
                 boot.lobby().players.size()==size_t(count) && !boot.profile_pending()){
                 Require(boot.SetReady(true),"Private Room local installed checkpoint could not Ready");ready=true;}
             if(role=="host" && !started && boot.lobby().players.size()==size_t(count) && boot.CanStart()){
                 Require(boot.StartNativeBootstrap(),"Private Room host could not start native bootstrap");started=true;}
             if(auto result=boot.TakeStarted()){
                 Require(result->room && result->room->native_bootstrap() && result->room->lobby().players.size()==size_t(count),"Private Room frozen roster/mode does not match requested diagnostic");
+                auto* adopted=result->room.get();
                 Require(AdoptNativeRoom(result->room,0),"Private Room native runtime refused frozen session ownership");
+                prepared_room=adopted;
                 if(!StartNativeRoomPrelaunchPolling()){ReleaseNativeRoomSession();throw std::runtime_error("Private Room could not start retained prelaunch polling");}
                 user_data=result->user_data;prepared.store(true,std::memory_order_release);
                 REXLOG_INFO("Private Room probe {} adopted real frozen native bootstrap; private Runtime user root {}",role,user_data.string());return true;
@@ -265,5 +294,93 @@ bool InstallPrivateRoomProbe(){
     if(!prepared.load(std::memory_order_acquire) || !NativeRoomActive() || !SetNativeRoomReadinessProbe(ObserveReadiness)){
         REXLOG_ERROR("Private Room probe could not install completed-tick observer on its bound native owner");return false;}
     REXLOG_INFO("Private Room probe installed: completed-tick observation only; gameplay readiness is NEVER asserted");return true;
+}
+std::unique_ptr<rex::input::InputSystem> MakePrivateRoomInput(Room& room){
+    if(!REXCVAR_GET(em2_room_probe_scripted_input))return {};
+    const bool probe=prepared.load(std::memory_order_acquire) && prepared_room==&room && REXCVAR_GET(em2_room_probe_gameplay);
+    const bool menu=PrivateNativeMenuRoom()==&room;
+    Require((probe || menu) && NativeRoomActive() &&
+        REXCVAR_GET(em2_private_profile) && !REXCVAR_GET(em2_user_data_directory).empty() &&
+        room.native_bootstrap() && room.lobby().locked && room.lobby().players.size()>=2,
+        "Scripted Room input requires its exact prepared isolated loopback owner");
+    const auto warmup=REXCVAR_GET(em2_room_probe_input_warmup_ticks);
+    Require(warmup<=600,"Private SDK input warmup exceeds its bound");
+    class Driver final:public rex::input::InputDriver {
+        Room& room_;std::optional<uint64_t> first_,last_;unsigned reads_=0,warmup_=0;bool warming_=false;
+    public:
+        explicit Driver(Room& room,unsigned warmup):InputDriver(nullptr,0),room_(room),warmup_(warmup){}
+        rex::X_STATUS Setup()override{return X_STATUS_SUCCESS;}
+        rex::X_RESULT GetCapabilities(uint32_t,uint32_t,rex::input::X_INPUT_CAPABILITIES*)override{return X_ERROR_DEVICE_NOT_CONNECTED;}
+        rex::X_RESULT GetState(uint32_t user,rex::input::X_INPUT_STATE* state)override{
+            if(user || !state || room_.state()!=RoomState::Running)return X_ERROR_DEVICE_NOT_CONNECTED;
+            *state={};++reads_;const auto tick=room_.next_tick();
+            if(tick>=room_.identity().first_tick && tick-room_.identity().first_tick<warmup_){
+                if(!warming_){warming_=true;REXLOG_INFO("Private Room SDK neutral warmup: peer {} first tick {} duration {}",room_.local_peer(),tick,warmup_);}
+                return X_ERROR_SUCCESS;
+            }
+            if(!first_){first_=tick;if(warming_)REXLOG_INFO("Private Room SDK neutral warmup completed: peer {} program origin {}",room_.local_peer(),tick);}
+            const auto elapsed=tick-*first_;const char* phase="neutral";
+            const bool active=room_.lobby().players.size()>2?room_.local_peer()>=3:room_.local_peer()==2;
+            const int direction=room_.lobby().players.size()>2 && !(room_.local_peer()&1)?-1:1;
+            if(active){
+                if(elapsed>=60 && elapsed<72){state->gamepad.thumb_ly=int16_t(direction*16000);phase=direction>0?"forward":"backward";}
+                if(elapsed>=90 && elapsed<102){state->gamepad.thumb_ly=int16_t(-direction*16000);phase=direction>0?"backward":"forward";}
+                if(elapsed>=130 && elapsed<134){state->gamepad.buttons=0x1000;phase="jump";}
+                if(elapsed>=175 && elapsed<195){state->gamepad.thumb_rx=int16_t(direction*20000);phase=direction>0?"look right":"look left";}
+                if(elapsed>=240 && elapsed<252){state->gamepad.thumb_ly=int16_t(direction*16000);phase=direction>0?"forward after look":"backward after look";}
+                if(elapsed>=300 && elapsed<320){state->gamepad.thumb_rx=int16_t(-direction*20000);phase=direction>0?"look left":"look right";}
+                if(REXCVAR_GET(em2_probe_online_chat) && elapsed>=480 && elapsed<492){state->gamepad.thumb_ly=int16_t(direction*16000);phase="move after chat";}
+            }
+            if(REXCVAR_GET(em2_room_native_buttons) && active){
+                if(elapsed>=280 && elapsed<284){state->gamepad.buttons=0x4000;phase="tool button X";}
+                if(elapsed>=330 && elapsed<345){state->gamepad.right_trigger=200;phase="tool trigger RT";}
+            }
+            if((!last_ || *last_!=tick) && (elapsed==0 || elapsed==60 || elapsed==72 || elapsed==90 || elapsed==102 || elapsed==130 || elapsed==134 || elapsed==175 || elapsed==195 || elapsed==240 || elapsed==252 || elapsed==280 || elapsed==284 || elapsed==300 || elapsed==320 || elapsed==330 || elapsed==345 || elapsed==360 || (REXCVAR_GET(em2_probe_online_chat) && (elapsed==480 || elapsed==492))))
+                REXLOG_INFO("Private Room SDK input: peer {} tick {} elapsed {} phase '{}' reads {}; synthetic SDK driver, original native interpreters",room_.local_peer(),tick,elapsed,elapsed==360?"complete":phase,reads_);
+            last_=tick;return X_ERROR_SUCCESS;
+        }
+        rex::X_RESULT SetState(uint32_t,rex::input::X_INPUT_VIBRATION*)override{return X_ERROR_DEVICE_NOT_CONNECTED;}
+        rex::X_RESULT GetKeystroke(uint32_t,uint32_t,rex::input::X_INPUT_KEYSTROKE*)override{return X_ERROR_EMPTY;}
+    };
+    auto input=std::make_unique<rex::input::InputSystem>(nullptr);input->AddDriver(std::make_unique<Driver>(room,warmup));
+    REXLOG_INFO("Private Room synthetic SDK source installed: peer {}; real hardware and normal session untouched",room.local_peer());return input;
+}
+void ObservePrivateRoomActors(uint64_t tick,std::span<const OwnedRosterActor> actors,uint8_t* base){
+    if(!REXCVAR_GET(em2_room_probe_scripted_input) || !REXCVAR_GET(em2_private_profile) || !NativeRoomActive())return;
+    auto* room=prepared.load(std::memory_order_acquire)?prepared_room:PrivateNativeMenuRoom();
+    if(!room || room->state()!=RoomState::Running)return;
+    Environment environment;
+    for(const auto& entry:actors){GameplayObservation::CharacterPhysics sample;
+        if(!em2::ReadNativeActorPhysics(base,entry.actor.entity,sample)){
+            REXLOG_ERROR("Private Room actor trajectory unavailable: room peer {} tick {}",entry.room_peer,tick);continue;}
+        REXLOG_INFO("Private Room actor trajectory: room peer {} tick {} position {}/{}/{} velocity {}/{}/{} native state {} active {} consumed {}",entry.room_peer,tick,
+            std::bit_cast<float>(sample.position[0]),std::bit_cast<float>(sample.position[1]),std::bit_cast<float>(sample.position[2]),
+            std::bit_cast<float>(sample.velocity[0]),std::bit_cast<float>(sample.velocity[1]),std::bit_cast<float>(sample.velocity[2]),sample.state,sample.active,
+            OwnedActorBasisConsumed(entry.actor.peer,entry.actor.generation,tick));
+        const auto entity=entry.reference.reference;
+        if(Readable(entity,96,base) && PPC_LOAD_U32(entity)==0x8208D908 && PPC_LOAD_U32(entity+44)==2){
+            const auto list=PPC_LOAD_U32(entity+36);
+            const auto component=Readable(list,8,base)?PPC_LOAD_U32(list+4):0;
+            const auto node=Readable(component,84,base) && PPC_LOAD_U32(component)==0x820D8970?PPC_LOAD_U32(component+80):0;
+            if(Readable(node,368,base) && PPC_LOAD_U32(node)==0x8203E610){
+                REXLOG_INFO("Private Room owned camera pose: room peer {} tick {} node {:08X} position {}/{}/{}",entry.room_peer,tick,node,
+                    std::bit_cast<float>(PPC_LOAD_U32(node+192)),std::bit_cast<float>(PPC_LOAD_U32(node+196)),std::bit_cast<float>(PPC_LOAD_U32(node+200)));
+                REXLOG_INFO("Private Room owned camera basis: room peer {} tick {} node {:08X} forward {}/{}/{}",entry.room_peer,tick,node,
+                    std::bit_cast<float>(PPC_LOAD_U32(node+176)),std::bit_cast<float>(PPC_LOAD_U32(node+180)),std::bit_cast<float>(PPC_LOAD_U32(node+184)));
+            }
+        }
+    }
+    // Native scene-camera manager owns the two retail output NiEntities.
+    // Read their actual nodes to detect extra Look2 spilling into retail P2.
+    const auto scene=Readable(0x833DF47C,4,base)?PPC_LOAD_U32(0x833DF47C):0;
+    if(Readable(scene,12,base))for(unsigned slot=0;slot<2;++slot){
+        const auto root=PPC_LOAD_U32(scene+(slot+1)*4),entity=root?root+8:0;
+        if(!Readable(entity,96,base) || PPC_LOAD_U32(entity)!=0x8208D908 || PPC_LOAD_U32(entity+44)!=2)continue;
+        const auto list=PPC_LOAD_U32(entity+36),component=Readable(list,8,base)?PPC_LOAD_U32(list+4):0;
+        const auto node=Readable(component,84,base) && PPC_LOAD_U32(component)==0x820D8970?PPC_LOAD_U32(component+80):0;
+        if(Readable(node,368,base) && PPC_LOAD_U32(node)==0x8203E610)
+            REXLOG_INFO("Private Room retail camera basis: slot {} tick {} node {:08X} forward {}/{}/{}",slot,tick,node,
+                std::bit_cast<float>(PPC_LOAD_U32(node+176)),std::bit_cast<float>(PPC_LOAD_U32(node+180)),std::bit_cast<float>(PPC_LOAD_U32(node+184)));
+    }
 }
 }

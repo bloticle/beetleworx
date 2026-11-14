@@ -15,6 +15,7 @@ enum class ActorReferenceResult { Attached, Released, AlreadyReplaced, Invalid,
 ActorReferenceResult AttachOwnedActorMovementReference(uint64_t peer,uint32_t camera_handle,
     PPCContext&,uint8_t* base,ActorMovementReference&);
 ActorReferenceResult ReleaseOwnedActorMovementReference(ActorMovementReference&,PPCContext&,uint8_t* base);
+bool OwnedActorMovementReferenceReady(uint64_t peer,PPCContext&,uint8_t* base);
 // Called from the owned-input fixture after its two actors have been registered.
 bool TestOwnedActorMovementReferences(PPCContext&,uint8_t* base,uint64_t first_peer,uint64_t second_peer);
 }

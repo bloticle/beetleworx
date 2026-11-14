@@ -19,8 +19,13 @@ ActorInputResult ValidateOwnedActorJump(uint64_t peer,const NativeActorJump&,PPC
 ActorInputResult ValidateOwnedActorJumpBatch(uint64_t peer,std::span<const NativeActorJump>,PPCContext&,uint8_t* base);
 ActorInputResult ReplayOwnedActorJump(uint64_t peer,const NativeActorJump&,PPCContext&,uint8_t* base);
 // Only after native listener removal or world teardown; live ownership rejects.
+// Idempotent when this generation has no retained history.
 bool ForgetOwnedActorJump(uint64_t peer,uint64_t generation,PPCContext&,uint8_t* base);
-bool TestOwnedActorJumps(PPCContext&,uint8_t* base,uint64_t first_peer,uint64_t second_peer);
+// Read-only task activation snapshot for a native human entity, including retail.
+bool ReadNativeJumpTaskFlags(uint32_t entity,uint8_t* base,uint32_t& flags);
+// Private probe diagnostic; observes the authored task map without enabling tasks.
+void LogNativeActorTaskInventory(uint32_t entity,uint8_t* base);
+bool TestOwnedActorJumps(PPCContext&,uint8_t* base,uint64_t first_peer,uint64_t second_peer,void(*native_update)(PPCContext&,uint8_t*));
 namespace detail {
 // Input-module backend retains its private ReplayScope and current staged tick.
 // A private permit exists only during ReplayOwnedActorJump; direct use rejects.

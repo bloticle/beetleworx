@@ -1,0 +1,47 @@
+BEETLEWORX PUBLIC TESTING DEMO
+
+Extract the complete ZIP into a writable folder and run beetleworx.exe. Setup
+asks for your Epic Mickey 2 Xbox 360 disc image or extracted game folder.
+Original game files are not included and stay unchanged. Keep pc-assets,
+online-service.json and the supplied DLLs beside the executable.
+
+PLAY WITH FRIENDS
+
+Everyone needs the same Beetleworx release version and compatible game files.
+Start Epic Mickey 2 and open Online Multiplayer at the title menu.
+
+Host: select Host game and choose your campaign. If you have no save yet,
+start an offline game first and reach a save point, then return to the title.
+When the internet room is connected, select Copy room code and send it to your
+friends. The code has eight characters. There are no router settings to change.
+
+Guest: copy the host's room code and select Join copied room code. The host's
+save is transferred into a separate online session. Choose Ready in the lobby;
+the host selects Start online game when everyone is ready.
+
+DISCORD
+
+Run Beetleworx once to register game launching with Discord. Keep the Discord
+desktop app open. Hosting publishes a joinable party so you can invite friends
+through Discord. Accepting an invite enters the same native Join flow without
+copying a code. During gameplay, invites wait until you return to the title.
+Joining a session that has already started is not supported in this demo.
+
+SETTINGS AND SAVES
+
+Use the native Options menu for graphics, input bindings, mouse/cursor settings
+and movement tuning. Start at 30 FPS; higher frame rates still need work.
+Normal saves and preferences are in user_data. Online session saves are kept
+separate. Back up your saves before updating.
+
+The opening chooser also offers the original Epic Mickey courtyard preview.
+It needs your Wii game image or extracted files in addition to Epic Mickey 2.
+The preview is offline and the original campaign is not fully playable yet.
+
+Use Support & Updates to review/export a diagnostic report, open a GitHub issue
+draft, or check for updates. Reports are not uploaded automatically. Verified
+updates install on normal exit. Extract a fresh complete ZIP if an interrupted
+update leaves the game unable to start; keep your saves and original game data.
+
+Read TESTING & KNOWN ISSUES.txt before testing online.
+EMR movement animations: @llenarox on Discord.

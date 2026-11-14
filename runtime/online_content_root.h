@@ -14,5 +14,11 @@ std::filesystem::path NativeContentRoot(const void* manager,const std::filesyste
 // SaveManager still needs its authored load/retry path after this succeeds.
 bool SwitchNativeContentRoot(const void* manager,const std::filesystem::path& isolated_root,std::string& error,
                              rex::kernel::xam::UserProfile* profile=nullptr);
+// Restore the ContentManager's original root, without selecting a guessed
+// path or closing live packages. Lifecycle owner only, after guest save IO is
+// quiescent. The title must still perform its original SaveManager refresh.
+// Repeating an already restored route leaves current summary settings intact.
+bool RestoreNativeContentRoot(const void* manager,std::string& error,
+                              rex::kernel::xam::UserProfile* profile=nullptr);
 bool TestNativeContentRoot(const std::filesystem::path& fixture);
 }

@@ -49,7 +49,7 @@ bool RoomBootstrapGate::Attach(Room& room){
     if(!em2::BeginSynchronizedControls(room.bootstrap_tick()))return false;
     room_=&room;identity_=room.identity();thread_=GetCurrentThreadId();roster_=mask;generation_=em2::SynchronizedControlsGeneration();
     if(!generation_){em2::EndSynchronizedControls();room_=nullptr;return false;}
-    committed_tick_=0;completed_.reset();prepared_.reset();submitted_.reset();joining_=true;
+    initial_tick_=room.bootstrap_tick();committed_tick_=0;completed_.reset();prepared_.reset();submitted_.reset();joining_=true;
     completion_pending_=stopped_=sampling_rebased_=false;readiness_=nullptr;error_.clear();
     bootstrap_on_thread=this;bootstrap_halted.store(false,std::memory_order_release);
     active_.store(true,std::memory_order_release);bootstrap_active.store(true,std::memory_order_release);
@@ -64,6 +64,17 @@ void RoomBootstrapGate::Detach(){
     room_=nullptr;thread_=0;generation_=0;prepared_.reset();submitted_.reset();completed_.reset();
     completion_pending_=false;readiness_=nullptr;if(bootstrap_on_thread==this)bootstrap_on_thread=nullptr;
     active_.store(false,std::memory_order_release);bootstrap_active.store(false,std::memory_order_release);bootstrap_halted.store(false,std::memory_order_release);
+}
+bool RoomBootstrapGate::ReenterLoadedWorld(){
+    Environment environment;
+    if(!active() || !OnOwnerThread() || stopped_ || completion_pending_ || !room_ ||
+       room_->state()!=RoomState::Bootstrapping || !sampling_rebased_ || !room_->native_bootstrap())return false;
+    if(!em2::EndSynchronizedControls(generation_) || !em2::BeginSynchronizedControls(room_->bootstrap_tick()))return Stop("Could not replace the old world's controls lease");
+    generation_=em2::SynchronizedControlsGeneration();if(!generation_)return Stop("Reload controls lease is unavailable");
+    initial_tick_=room_->bootstrap_tick();committed_tick_=0;completed_.reset();prepared_.reset();submitted_.reset();
+    joining_=true;sampling_rebased_=false;
+    // Keep the deterministic world RNG seed established by the native loader.
+    em2::ResetNativeSynchronizedJoinTiming();return true;
 }
 bool RoomBootstrapGate::SetJoining(bool joining){
     if(!active() || !OnOwnerThread() || stopped_ || submitted_ || prepared_ || completion_pending_)return false;
@@ -111,7 +122,7 @@ BootstrapAdmission RoomBootstrapGate::Prepare(RoomBootstrapFrame& output){
     if(completed_){
         if(tick==*completed_)return BootstrapAdmission::Waiting;
         if(*completed_==UINT64_MAX || tick!=*completed_+1){Stop("Unexpected initialization round");return BootstrapAdmission::Stopped;}
-    }else if(tick!=identity_.first_tick){Stop("Initialization did not begin at the negotiated tick");return BootstrapAdmission::Stopped;}
+    }else if(tick!=initial_tick_){Stop("Initialization did not begin at the agreed world's first tick");return BootstrapAdmission::Stopped;}
     if(!submitted_){
         Pad pad;if(joining_ && room_->local_peer()==2)pad.buttons=0x10;
         if(!room_->SubmitBootstrapPad(tick,pad)){Stop("Could not submit canonical native join input");return BootstrapAdmission::Stopped;}

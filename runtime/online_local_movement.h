@@ -17,6 +17,7 @@ struct NativeLocalMovementBinding {
     uint32_t active_event=0,active_event_uid=0,profile=0,user_object=0;
     std::array<uint32_t,24> action_shape{};
     std::array<uint32_t,14> device_shape{};
+    // First two observer-list fields normalize to zero after live exact-one membership validation.
     std::array<uint32_t,4> event_shape{};
     uint32_t reference=0;
     // Native entity GUID and its exact camera component identities. Never wire data.

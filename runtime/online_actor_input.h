@@ -8,6 +8,9 @@ struct OwnedActorInput {
     uint64_t peer=0,generation=0;
     uint32_t registry=0,handle=0,entity=0,controller=0,listener=0;
     bool enabled=false;
+    // Native action names (Movement/Jump or Movement2/Jump2), never a retail
+    // PlayerManager record index. Many owned actors may use either profile.
+    unsigned action_user=0;
 };
 struct ActorLookBasis {
     uint64_t peer=0,generation=0,tick=0;
@@ -20,16 +23,24 @@ enum class ActorInputResult { Applied, Unregistered, Stale, Disabled, WrongThrea
     InvalidContext, ReferenceRequired, UnsupportedAction };
 // All mutations/replay belong to the initialized game thread. Resolve the
 // handle through the native registry and validate the actual typed controller.
-bool RegisterOwnedActorInput(uint64_t peer,uint32_t handle,PPCContext&,uint8_t* base,OwnedActorInput&);
+bool RegisterOwnedActorInput(uint64_t peer,uint32_t handle,PPCContext&,uint8_t* base,OwnedActorInput&,unsigned action_user=0);
 bool SetOwnedActorInputEnabled(uint64_t peer,bool enabled);
+bool SetOwnedActorInputEnabled(uint64_t peer,uint64_t generation,bool enabled);
 // Keep disabled/quarantined through deferred native destruction; unregister
 // only after native input listeners are removed. This does not destroy actors.
 void UnregisterOwnedActorInput(uint64_t peer);
+// Generation-pinned group cleanup; an absent peer is already retired, while a
+// newer generation must remain untouched.
+bool UnregisterOwnedActorInput(uint64_t peer,uint64_t generation);
 // Native world teardown only; not a substitute for deactivating live extras.
 void ResetOwnedActorInputs();
 bool OwnedActorInputFor(uint64_t peer,PPCContext&,uint8_t* base,OwnedActorInput&);
 // Exact registered EXTRA controller identity only; read-only, game-thread only.
 bool OwnedActorInputForController(uint32_t controller,PPCContext&,uint8_t* base,OwnedActorInput&);
+// After native admission, apply the existing native human permission policy
+// for this action profile to the owned collection. Never registers permissions
+// or changes the retail policy. Reapply when authored restrictions change.
+bool ApplyOwnedActorTaskPermissions(uint64_t peer,PPCContext&,uint8_t* base);
 // Staging only: the caller must begin each authoritative simulation tick once,
 // then stage immutable peer bases before the native controller update. These
 // APIs do not install references, dispatch input or advance physics. Unwired
@@ -45,11 +56,13 @@ ActorInputResult ValidateOwnedActorMovement(uint64_t peer,const NativeActorActio
 // Coordinator contract: EVERY admitted tick supplies one native Movement action,
 // including neutral, BEFORE the actor's native controller update. Missing peer
 // input means wait at the agreed world barrier, never advance with old caches.
-// Uses ORIGINAL Mickey handler and its native gates; Applied means delivered,
+// Uses the ORIGINAL shared human handler and its native gates; Applied means delivered,
 // not that a native state accepted movement. Duplicate delivery is rejected.
 // Before disabling/unregistering a live actor, deliver native neutral in an
 // admitted tick, then deactivate/remove listeners through native lifecycle.
 ActorInputResult ReplayOwnedActorMovement(uint64_t peer,const NativeActorAction&,uint64_t tick,PPCContext&,uint8_t* base);
+// Read-only completed-tick evidence; no native calls or staging changes.
+bool OwnedActorBasisConsumed(uint64_t peer,uint64_t generation,uint64_t tick);
 // Generic action replay stays blocked. Movement must use the explicit staged-
 // tick API above; all other native actions return UnsupportedAction.
 ActorInputResult ReplayOwnedActorAction(uint64_t peer,const NativeActorAction&,const ActorLookBasis&,PPCContext&,uint8_t* base);

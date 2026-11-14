@@ -26,7 +26,7 @@ std::mutex queue_mutex;
 thread_local unsigned native_event_depth=0;
 bool Readable(uint32_t address,size_t size,uint8_t* base){return base && address>=4096 && uint64_t(address)+size<=0x100000000ull && em2::GuestReadBatch::Readable(base+address,size);}
 bool Owner(){return queue.owner && queue.owner==GetCurrentThreadId();}
-bool SameActor(const Actor& a,const Actor& b){return a.peer==b.peer && a.generation==b.generation && a.registry==b.registry && a.handle==b.handle && a.entity==b.entity && a.controller==b.controller && a.listener==b.listener;}
+bool SameActor(const Actor& a,const Actor& b){return a.peer==b.peer && a.generation==b.generation && a.registry==b.registry && a.handle==b.handle && a.entity==b.entity && a.controller==b.controller && a.listener==b.listener && a.action_user==b.action_user;}
 bool SameTicket(const Ticket& a,const Ticket& b){return a.sequence==b.sequence && a.consumer_epoch==b.consumer_epoch && a.actor.enabled==b.actor.enabled && SameActor(a.actor,b.actor);}
 bool ReloadParameter(uint32_t parameter,uint8_t* base){
     constexpr char name[]="ReloadCheckpoint";
@@ -149,7 +149,8 @@ bool em2::net::TestOwnedActorDeaths(PPCContext& ctx,uint8_t* base,uint64_t first
         const bool retired=PeekOwnedActorDeath(17,ctx,base,ticket,state) && state==OwnedActorDeathState::Retired && ticket.actor.peer==b.peer;
         PPC_STORE_U32(b.controller+64,owner);
         auto forged=ticket;forged.actor.entity+=8;auto forged_enabled=ticket;forged_enabled.actor.enabled=!forged_enabled.actor.enabled;
-        if(!check(retired && !ConfirmOwnedActorDeath(17,forged) && !ConfirmOwnedActorDeath(17,forged_enabled) && PeekOwnedActorDeath(17,ctx,base,ticket,state) && state==OwnedActorDeathState::Current,
+        auto forged_profile=ticket;forged_profile.actor.action_user^=1;
+        if(!check(retired && !ConfirmOwnedActorDeath(17,forged) && !ConfirmOwnedActorDeath(17,forged_enabled) && !ConfirmOwnedActorDeath(17,forged_profile) && PeekOwnedActorDeath(17,ctx,base,ticket,state) && state==OwnedActorDeathState::Current,
             "stale controller ownership is reported retired without dropping or retargeting the pending ticket; forged confirmation rejects"))return false;
     }
     {

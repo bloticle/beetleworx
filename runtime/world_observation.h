@@ -8,5 +8,7 @@ bool ReadNativeWorldIdentity(uint8_t* base,net::GameplayObservation::World&);
 bool ReadNativeGameplayObservation(PPCContext&,uint8_t* base,net::GameplayObservation&);
 bool ReadNativeResources(PPCContext&,uint8_t* base,const std::array<uint32_t,2>& entities,
                          std::array<uint32_t,4>& life,std::array<float,6>& ammo);
+// Suppresses local HUD substitutions only while reading canonical actor resources.
+bool NativeResourceObservationActive();
 bool TestNativeResources();
 }

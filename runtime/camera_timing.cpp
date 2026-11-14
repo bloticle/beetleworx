@@ -10,6 +10,7 @@
 #include "pc_settings.h"
 #include "online.h"
 #include "online_runtime.h"
+#include "online_room_gameplay.h"
 #include "controls.h"
 #include "mouse_look.h"
 #include <rex/cvar.h>
@@ -477,6 +478,7 @@ void em2::ObserveNativeCameraEntity(const PPCContext& ctx,uint8_t* base) noexcep
 PPC_FUNC_IMPL(sub_82A5D278) {
     if(ctx.lr==0x827C439C)
         em2::ObserveNativeCameraLookBinding(ctx.r3.u32,ctx.r4.u32,ctx.r5.u32,base);
+    if(em2::net::SuppressNativeRoomCameraLook(ctx,base))return;
     // Identify the engine action dispatcher without synthesizing input or
     // changing the native listener's arguments, side effects or ABI clobbers.
     if(REXCVAR_GET(em2_trace_camera)) {

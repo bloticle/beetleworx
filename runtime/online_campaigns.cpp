@@ -1,4 +1,5 @@
 #include "online_campaigns.h"
+#include "online_room.h"
 #include <windows.h>
 #include <algorithm>
 #include <array>
@@ -114,6 +115,13 @@ HostCampaignRecord RecordValidatedNativeHostCampaign(const fs::path& normal,cons
     if(ready.state()!=State::Ready || ready.local_player()!=0 || ready.identity().startup_policy!=StartupPolicy::NativeMenu ||
         ready.identity().initialization_policy!=InitializationPolicy::SharedNativeV1)
         return {{},"Only a ready native host session may register a resumable campaign."};
+    return Publish(normal,session,ready.identity());
+}
+HostCampaignRecord RecordValidatedNativeHostCampaign(const fs::path& normal,const fs::path& session,const Room& ready){
+    if(ready.state()!=RoomState::Loading || ready.local_peer()!=1 || !ready.native_bootstrap() ||
+       !ready.lobby().locked || !ready.checkpoint_ready() || ready.identity().startup_policy!=StartupPolicy::NativeMenu ||
+       ready.identity().initialization_policy!=InitializationPolicy::SharedNativeV1)
+        return {{},"Only a frozen native Room host may register a resumable campaign."};
     return Publish(normal,session,ready.identity());
 }
 HostCampaignCatalog FindRetainedHostCampaigns(const fs::path& normal,std::stop_token stop){

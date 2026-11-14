@@ -1,4 +1,5 @@
 #include "online_identity.h"
+#include "demo_support.h"
 #include <windows.h>
 #include <bcrypt.h>
 #include <rex/logging.h>
@@ -267,6 +268,11 @@ IdentityResult FingerprintProgram(const fs::path& executable,const fs::path& con
         InstallationIdentity identity;
         const File build{executable,"beetleworx.exe",fs::file_size(executable),fs::last_write_time(executable)};
         identity.build=HashFile(build,false,stop,identity);
+        const auto version=em2::OnlineReleaseVersion(executable.parent_path());
+        if(!version.empty()){
+            Sha compatibility;compatibility.Text("Beetleworx-online-release-v1:");compatibility.Text(version);
+            identity.build=compatibility.Finish();
+        }
         const auto files=cache.empty()?std::vector<File>{}:Inventory(content,true,stop);
         const auto key=cache.empty()?std::optional<Hash>{}:ContentCacheKey(files,stop,&identity);
         const auto cached=key?ReadContentCache(cache,*key):std::optional<Hash>{};
@@ -399,6 +405,25 @@ bool TestInstallationIdentity(const fs::path& root) {
         if(!check(altered.value && altered.value->checkpoint!=first.value->checkpoint && altered.value->build!=first.value->build,"checkpoint and executable changes detected independently"))return false;
         std::stop_source stop;stop.request_stop();const auto cancelled=FingerprintInstallation(a/"game.exe",a/"content",a/"save",stop.get_token());
         if(!check(!cancelled.value && !cancelled.error.empty() && !FingerprintInstallation(a/"missing.exe",a/"content",a/"save").value,"cancellation/missing file never returns a usable identity"))return false;
+        auto release=[&](const fs::path& place,std::string_view version){
+            const std::string digest(64,'0');
+            write(place/"release-manifest.json","{\"format\":2,\"product\":\"Beetleworx\",\"executable\":\"beetleworx.exe\",\"version\":\""+std::string(version)+"\",\"tag\":\"v"+std::string(version)+"\",\"exe_sha256\":\""+digest+"\",\"files\":[{\"path\":\"beetleworx.exe\",\"bytes\":3,\"sha256\":\""+digest+"\"}]}");
+        };
+        release(a,"0.1.0-demo.3");release(b,"0.1.0-demo.3");
+        const auto version_a=fingerprint(a),version_b=fingerprint(b);
+        if(!check(version_a.value && version_b.value && version_a.value->build==version_b.value->build,
+            "matching release versions accept different executable bytes"))return false;
+        release(b,"0.1.0-demo.3+local");const auto metadata=fingerprint(b);
+        if(!check(metadata.value && metadata.value->build==version_a.value->build,
+            "SemVer build metadata does not block a matching version"))return false;
+        release(b,"0.1.0-demo.4");const auto next=fingerprint(b);
+        if(!check(next.value && next.value->build!=version_a.value->build,
+            "different prerelease version numbers cannot connect"))return false;
+        release(b,"0.1.0");const auto stable=fingerprint(b);
+        if(!check(stable.value && stable.value->build!=version_a.value->build,
+            "stable and prerelease versions remain distinct"))return false;
+        write(b/"release-manifest.json","{invalid}");
+        if(!check(!fingerprint(b).value,"malformed release identity fails instead of falling back to an executable hash"))return false;
         REXLOG_INFO("Installation identity tests passed: streamed SHA-256, relocation/case, multi-block content, graphics normalization, per-file NTFS cache reuse/integrity/metadata-only edits, gameplay config, preserved-metadata edits, checkpoint/build changes and cancellation");return true;
     }catch(const std::exception& error){REXLOG_ERROR("Identity fixture failure: {}",error.what());return false;}
 }
