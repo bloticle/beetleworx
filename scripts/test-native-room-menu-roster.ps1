@@ -9,7 +9,7 @@ param(
  [ValidatePattern('^([a-z0-9_.]{1,63})?$')][string]$NativeLevelTarget='',
  [switch]$DebugCleanLevelLoad,
  [ValidateRange(0,16)][int]$CloseParticipant=0,
- [switch]$ReturnToTitle,[switch]$ReenterAfterReturn,
+ [switch]$ReturnToTitle,[switch]$ReenterAfterReturn,[switch]$RecoveryPrompt,
  [ValidateRange(0,16)][int]$PartialDeliveryParticipant=0,
  [ValidateRange(400,100000)][int]$PartialDeliveryTick=500,
  [string]$ReuseVerifiedContent='', [string]$ReplayInvitationFile='',
@@ -17,6 +17,7 @@ param(
  [ValidateRange(120,600)][int]$StartupTimeoutSeconds=360
 )
 $ErrorActionPreference='Stop'
+if($RecoveryPrompt -and (!$ReenterAfterReturn -or !$ReturnToTitle)){throw 'Recovery prompt QA requires the native return and re-entry capture.'}
 if($ReturnToTitle -and !$CloseParticipant -and !$ReenterAfterReturn){throw 'Private title-return test requires participant-close injection or controlled disconnect/re-entry.'}
 if($ReenterAfterReturn -and (!$ReturnToTitle -or !$ScriptedInput -or $CloseParticipant -or $PartialDeliveryParticipant -or $CheckpointReloadTick)){throw 'Private re-entry requires scripted input and title return, without other failure/reload injection.'}
 if($PartialDeliveryParticipant -and (!$ScriptedInput -or $CheckpointReloadTick -or $CloseParticipant -or $PartialDeliveryParticipant -gt $Players)){throw 'Partial-delivery injection requires scripted input, an existing participant, no scheduled reload and no window-close injection.'}
@@ -39,7 +40,18 @@ if($ReuseVerifiedContent){
  $previous=Get-Content -LiteralPath (Join-Path $ReuseVerifiedContent 'roster.json') -Raw | ConvertFrom-Json
  if(!$previous.native_room_menu){throw 'Content reuse requires a native-menu capture.'}
  $previousPacks=(Resolve-Path -LiteralPath (Join-Path $ReuseVerifiedContent 'shared-packfiles')).Path
- New-Item -ItemType Junction -Path $packs -Target $previousPacks | Out-Null
+ $sameUI=$true
+ foreach($name in @('UIMainMenu.pak','UIStartGame.pak','UIhud.pak')){
+  $current=Join-Path $workspace ('private/pc-assets/packfiles/'+$name)
+  $prior=Join-Path $previousPacks $name
+  if(!(Test-Path -LiteralPath $prior) -or (Get-FileHash -LiteralPath $current).Hash -ne (Get-FileHash -LiteralPath $prior).Hash){$sameUI=$false;break}
+ }
+ if($sameUI){New-Item -ItemType Junction -Path $packs -Target $previousPacks | Out-Null}
+ else{
+  Write-Output 'Authored menu/HUD changed; preparing a fresh immutable snapshot instead of testing stale UI.'
+  $ReuseVerifiedContent=''
+  New-Item -ItemType Directory -Path $packs | Out-Null
+ }
 }else{New-Item -ItemType Directory -Path $packs | Out-Null}
 $normal=Join-Path $runtime 'user_data'
 $baseline=@{};foreach($file in Get-ChildItem -LiteralPath $normal -Recurse -File){$baseline[$file.FullName]=(Get-FileHash -LiteralPath $file.FullName).Hash}
@@ -55,7 +67,7 @@ $record.native_level_target=$NativeLevelTarget
 $record.native_level_method=if($NativeLevelTarget){if($DebugCleanLevelLoad){'original-level'}else{'original-transition'}}else{''}
 $record.reused_verified_content=$ReuseVerifiedContent
 $record.close_participant=$CloseParticipant;$record.failure_observed=$false;$record.leave_boundary_probe=[bool]($CloseParticipant -or $PartialDeliveryParticipant)
-$record.partial_delivery_participant=$PartialDeliveryParticipant;$record.partial_delivery_tick=$PartialDeliveryTick;$record.return_to_title_probe=[bool]$ReturnToTitle;$record.reenter_after_return=[bool]$ReenterAfterReturn
+$record.partial_delivery_participant=$PartialDeliveryParticipant;$record.partial_delivery_tick=$PartialDeliveryTick;$record.return_to_title_probe=[bool]$ReturnToTitle;$record.reenter_after_return=[bool]$ReenterAfterReturn;$record.recovery_prompt=[bool]$RecoveryPrompt
 if(-not ('BWNativeMenuWindows' -as [type])){Add-Type -TypeDefinition @'
 using System;using System.Text;using System.Runtime.InteropServices;
 public static class BWNativeMenuWindows {
@@ -160,6 +172,7 @@ try {
   if($ScriptedInput){$info.ArgumentList.Add('--em2_room_probe_scripted_input=true')}
   if($CloseParticipant -or $PartialDeliveryParticipant){$info.ArgumentList.Add('--em2_probe_room_leave_boundary=true')}
   if($ReturnToTitle){$info.ArgumentList.Add('--em2_probe_room_return_title=true')}
+  if($RecoveryPrompt){$info.ArgumentList.Add('--em2_probe_room_recovery_prompt=true')}
   if($ReenterAfterReturn){foreach($arg in @('--em2_native_lobby_qa_reenter=true','--em2_room_probe_input_warmup_ticks=180','--em2_probe_room_hud_properties=true')){$info.ArgumentList.Add($arg)};if($peer.role -eq 'host'){$info.ArgumentList.Add('--em2_probe_room_disconnect_tick=800')}}
   if($PartialDeliveryParticipant -and $peer.role -eq $records[$PartialDeliveryParticipant-1].role){$info.ArgumentList.Add('--em2_probe_room_partial_delivery_tick='+$PartialDeliveryTick)}
   $process=[Diagnostics.Process]::Start($info);$peer.pid=$process.Id;$peer.started_utc=$process.StartTime.ToUniversalTime().ToString('o')

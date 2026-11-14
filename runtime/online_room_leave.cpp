@@ -23,6 +23,7 @@
 PPC_EXTERN_FUNC(__imp__sub_829DA2C0);
 REXCVAR_DECLARE(bool,em2_private_profile);
 REXCVAR_DEFINE_BOOL(em2_probe_room_return_title,false,"Debug","Private native lobby QA only: return a stopped completed world to title and refresh original storage");
+REXCVAR_DEFINE_BOOL(em2_probe_room_recovery_prompt,false,"Debug","Validated private native lobby only: request recovery through the authored HUD button instead of automatic return");
 REXCVAR_DEFINE_UINT32(em2_probe_room_disconnect_tick,0xFFFFFFFFu,"Debug","Private native lobby QA only: disconnect at a completed outer boundary once at/after this tick");
 namespace em2::net {
 namespace {
@@ -62,7 +63,12 @@ void Fail(const char* why){leave.phase=Phase::Failed;halted.store(true,std::memo
 bool NativeRoomRecoveryOption(int id,int choice,int& result){
     if(id!=2790 && id!=2791)return false;
     result=0;
-    if(id==2790){result=choice==1?int(RequestRecovery()):int(recovery.load(std::memory_order_acquire));return true;}
+    if(id==2790){
+        if(choice==1){result=int(RequestRecovery());if(result)REXLOG_INFO("Native recovery HUD return request accepted; queued for checked native boundary");}
+        else if(choice==2)result=REXCVAR_GET(em2_probe_room_recovery_prompt) && REXCVAR_GET(em2_private_profile) && NativeOnlineMenuQaActive();
+        else if(choice==-1 || choice==0)result=int(recovery.load(std::memory_order_acquire));
+        return true;
+    }
     static thread_local std::string text;
     if(choice==0){std::lock_guard lock(recovery_mutex);text=recovery_message;}
     if(choice>=0 && size_t(choice)<text.size())result=uint8_t(text[size_t(choice)]);
@@ -101,13 +107,14 @@ void NotifyNativeRoomTitleLeaveLoaded(std::string_view level){
 }
 void TickNativeRoomTitleLeave(PPCContext& ctx,uint8_t* base,bool completed){
     Environment environment;
-    const bool private_auto=REXCVAR_GET(em2_probe_room_return_title) && REXCVAR_GET(em2_private_profile) && NativeOnlineMenuQaActive();
+    const bool private_mode=REXCVAR_GET(em2_probe_room_return_title) && REXCVAR_GET(em2_private_profile) && NativeOnlineMenuQaActive();
+    const bool private_auto=private_mode && !REXCVAR_GET(em2_probe_room_recovery_prompt);
     if(NativeRoomLoadsCancelled())return;
     if(leave.phase==Phase::Ready && NativeRoomActive() && NativeRoomStatus().state!=NativeSessionState::Failed){leave=Leave{};RecoveryHint(Recovery::Inactive,{});}
     if(leave.phase==Phase::Ready || leave.phase==Phase::Failed)return;
     if(leave.phase==Phase::Idle){
         const auto tick=REXCVAR_GET(em2_probe_room_disconnect_tick);
-        if(private_auto && !disconnect_injected && tick!=0xFFFFFFFFu && completed && NativeOnlineMenuQaActive() &&
+        if(private_mode && !disconnect_injected && tick!=0xFFFFFFFFu && completed && NativeOnlineMenuQaActive() &&
            NativeRoomActive() && NativeRoomStatus().state==NativeSessionState::Attached){
             auto* game=CurrentNativeRoomGameplay();auto* room=PrivateNativeMenuRoom();
             const auto finished=game?game->last_native_completed_tick():std::nullopt;

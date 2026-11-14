@@ -69,6 +69,10 @@ def verify(root):
             fresh,
         ]
         assert markers == sorted(markers) and len(set(markers)) == len(markers)
+        if result.get('recovery_prompt'):
+            requested = text.index('Native recovery HUD return request accepted; queued for checked native boundary')
+            assert stop < requested < markers[1], 'Recovery did not originate from the HUD request before native transition'
+            assert text.count('Native recovery HUD return request accepted;') == 1, 'Recovery request repeated'
         assert "phase 'complete' reads" in text[:stop]
         assert 'Native gameplay observation v' not in text[stop:fresh]
         assert not re.search(r'Native (?:Room title return|online title restore) (?:failed|rejected):', text)
@@ -101,6 +105,7 @@ def verify(root):
         (view / filename).write_text(json.dumps(projected, indent=2) + '\n', encoding='utf-8')
     active = runpy.run_path(str(Path(__file__).with_name('verify-native-menu-active-input.py')))['verify'](view)
     return {'passed': True, 'binary_sha256': result['exe_sha256'], 'roles': roles,
+            'hud_recovery_request': bool(result.get('recovery_prompt')),
             'fresh_session_nonce': True,
             'offline_campaigns': saved, 'fresh_session': active,
             'derived_log_view': str(view), 'scope': __doc__.strip()}

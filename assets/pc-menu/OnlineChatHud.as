@@ -137,5 +137,10 @@ function _pcRecoveryTick()
    panel.message.text=this._pcChatRead(2791);
    panel.back.enabled=state==1;panel.back._alpha=state==1?100:55;
    panel.back.label.text=state==1?"Return to title (Enter)":state==4?"Restart required":"Returning to title...";
+   if(state==1 && !this._pcRecoveryQARequested && _level0.PCOnlineChat(2790,2)==1)
+   {
+      this._pcRecoveryQARequested=true;
+      panel.back.onRelease();
+   }
    return true;
 }
