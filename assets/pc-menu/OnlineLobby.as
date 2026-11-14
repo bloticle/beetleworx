@@ -15,8 +15,34 @@
    function _em2OnlineButton(index,label,enabled)
    {
       var button = this._items[index];
-      button._visible = true; button._alpha = 100; button.label = label;
+      if(button._em2LabelWidth == undefined) {
+         var width=Number(_global.initVars.screenWidth); if(!(width>=640)) width=1280;
+         var offset=Number(_global.offsetX); if(isNaN(offset)) offset=0;
+         var left={x:offset+width*0.14,y:0}; var right={x:offset+width*0.86,y:0};
+         this.localToGlobal(left); this.localToGlobal(right);
+         button.labelclip.globalToLocal(left); button.labelclip.globalToLocal(right);
+         button._em2LabelWidth=right.x-left.x;
+         button._em2LabelX=left.x;
+      }
+      button._visible = enabled; button._alpha = 100; button.label = label;
       if(enabled) button.enable(); else button.disable();
+      var field=button.t_label; field.autoSize="none"; field._x=button._em2LabelX;
+      field._width=button._em2LabelWidth; field.multiline=false; field.wordWrap=false;
+      button.hitarea._x=button.labelclip._x+field._x*button.labelclip._xscale/100;
+      button.hitarea._width=field._width*button.labelclip._xscale/100;
+      var format=field.getTextFormat(); format.size=24; format.align="center"; field.setTextFormat(format);
+      while(field.textWidth>field._width-8 && format.size>16) { format.size--; field.setTextFormat(format); }
+      var full=label;
+      while(field.textWidth>field._width-8 && full.length>1) { full=full.substr(0,full.length-1); field.text=full+"..."; }
+      var name="_em2OnlineInfo"+index;
+      if(this[name]==undefined) {
+         var point={x:button._em2LabelX,y:field._y};
+         button.labelclip.localToGlobal(point); this.globalToLocal(point);
+         this.createTextField(name,this.getNextHighestDepth(),point.x,point.y,button._em2LabelWidth,40);
+         this[name].embedFonts=true; this[name].selectable=false;
+      }
+      var info=this[name]; info._visible=!enabled; info.setNewTextFormat(format);
+      info.textColor=13421772; info.text=field.text;
    }
    function _em2OnlineOpen()
    {
@@ -54,6 +80,7 @@
       if(this._em2OnlinePump != undefined) this._em2OnlinePump.removeMovieClip();
       Key.removeListener(this._em2OnlineKeyListener);
       if(this._em2OnlineHelp != undefined) this._em2OnlineHelp._visible = false;
+      var statusIndex=0; while(statusIndex<6) { this["_em2OnlineInfo"+statusIndex]._visible=false; statusIndex++; }
       this._setText();
       var i = 0; while(i < this._items.length) { this._items[i].enable(); this._items[i]._visible = true; i++; }
       if(!_level0.IsSavedGamePresent()) { this.b_main.disable(); this.b_main._visible = false; }

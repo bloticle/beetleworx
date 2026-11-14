@@ -207,6 +207,15 @@ def main():
                 controller_tags.remove(tag)
         document.write(xml_path, encoding="utf-8", xml_declaration=True)
         run("java", "-jar", args.ffdec, "-xml2swf", xml_path, modified)
+        roundtrip = work / "layout-roundtrip"
+        run("java", "-jar", args.ffdec, "-export", "script", roundtrip, modified)
+        for class_name in ("TVSettings", "PlayerControls"):
+            compiled = (roundtrip / "scripts/__Packages/em2/options" / (class_name + ".as")).read_text(encoding="utf-8-sig")
+            for marker in ('pc_heading', 'pc_info_', 'pcBaseX', 'field.autoSize = "none"',
+                           'field.textWidth', 'item.readOnly', 'item.title',
+                           'Back to settings categories', 'this._list._goNext()'):
+                if marker not in compiled:
+                    raise RuntimeError(f"Native menu layout lost in {class_name}: {marker}")
         result = [(name, modified.read_bytes() if name == member else blob, kind) for name, blob, kind in files]
         pak.write_pak(result, ROOT / "private/pc-assets/packfiles" / archive)
         print("Verified modified menu archive:", archive)
