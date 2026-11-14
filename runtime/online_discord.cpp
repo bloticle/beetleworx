@@ -223,9 +223,9 @@ public:
     void Set(std::string_view code,unsigned players,unsigned capacity,bool joinable){
         if(!Code(code) || capacity<2 || capacity>16 || !players || players>capacity)return;
         std::lock_guard lock(mutex);Party next{std::string(code),players,capacity,joinable};
-        if(next!=wanted){wanted=std::move(next);++revision;wake.notify_all();}
+        if(next!=wanted){wanted=std::move(next);++revision;invite_requested=false;invite_busy=false;wake.notify_all();}
     }
-    void Clear(std::string_view code){std::lock_guard lock(mutex);if(wanted.code==code){wanted={};++revision;wake.notify_all();}}
+    void Clear(std::string_view code){std::lock_guard lock(mutex);if(wanted.code==code){wanted={};++revision;invite_requested=false;invite_busy=false;wake.notify_all();}}
     std::optional<std::string> Take(){std::lock_guard lock(mutex);if(pending.empty())return {};auto value=std::move(pending);pending.clear();return value;}
     std::string Status(){std::lock_guard lock(mutex);return status;}
     bool CanInvite(){std::lock_guard lock(mutex);return enabled && !invite_busy && confirmed_revision==revision && wanted.joinable && !wanted.code.empty() && wanted.players<wanted.capacity;}

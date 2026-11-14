@@ -26,6 +26,7 @@
 #include <windows.h>
 #include <immintrin.h>
 #include <cstring>
+#include <cmath>
 #include <algorithm>
 #include <thread>
 #include <optional>
@@ -667,6 +668,21 @@ void ObserveNativeRoomHudLife(unsigned profile,PPCContext& ctx,uint8_t* base){
 }
 PPC_FUNC_IMPL(sub_82A2F6B8){__imp__sub_82A2F6B8(ctx,base);ObserveNativeRoomHudLife(0,ctx,base);}
 PPC_FUNC_IMPL(sub_82A2F708){__imp__sub_82A2F708(ctx,base);ObserveNativeRoomHudLife(1,ctx,base);}
+bool em2::net::ReadNativeRoomHudLife(unsigned profile,PPCContext& ctx,uint8_t* base,double& value){
+    Environment environment;Context preserve(ctx);
+    if(profile>1 || !base || ctx.r1.u32<1024 || em2::NativeResourceObservationActive())return false;
+    auto* game=CurrentNativeRoomGameplay();
+    if(!game || !game->LocalHudActor(profile,ctx,base))return false;
+    // Invoke the authored numeric getter only because the actual GFx status
+    // widget is requesting its current value. The existing read-only entity
+    // lookup selects the admitted actor; no PlayerManager record is replaced.
+    const auto stack=ctx.r1.u32-256,output=stack+64;
+    PPC_STORE_U32(stack,ctx.r1.u32);ctx.r1.u64=stack;ctx.r3.u64=output;
+    if(profile)sub_82A2F708(ctx,base);else sub_82A2F6B8(ctx,base);
+    if(PPC_LOAD_U32(output)!=2)return false;
+    const auto bits=PPC_LOAD_U64(output+8);std::memcpy(&value,&bits,sizeof(value));
+    return std::isfinite(value) && value>=0;
+}
 PPC_FUNC_IMPL(sub_8276B878){
     const auto caller=ctx.lr;const auto manager=ctx.r3.u32;const auto profile=ctx.r4.u32;
     __imp__sub_8276B878(ctx,base);

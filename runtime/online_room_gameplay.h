@@ -65,4 +65,7 @@ bool NativeRoomRenderBindingsAvailable(uint8_t*);
 uint32_t NativeRoomLocalCameraController();
 bool SuppressNativeRoomCameraLook(PPCContext&,uint8_t*);
 bool NativeRoomOwnsCameraMode(uint32_t,uint8_t*);
+// Real HUD polling for extra humans after late admission; false until the
+// current world's local actor is ready. Never changes canonical health.
+bool ReadNativeRoomHudLife(unsigned profile,PPCContext&,uint8_t*,double&);
 }

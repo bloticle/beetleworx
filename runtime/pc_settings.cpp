@@ -7,6 +7,7 @@
 #include "online_native_menu.h"
 #include "online_chat.h"
 #include "online_voice_runtime.h"
+#include "online_room_gameplay.h"
 #include "controls.h"
 #include "engine_workbench.h"
 #include "gameplay_mods.h"
@@ -689,6 +690,11 @@ PPC_FUNC_IMPL(sub_82B0D118) {
                 int result=0;if(em2::net::NativeOnlineVoiceOption(int(raw_id),int(raw_choice),result)){
                     ctx.f1.f64=result;sub_8295FEA8(ctx,base);return;
                 }
+            }
+            if(std::isfinite(raw_id) && (raw_id==2764 || raw_id==2765) && raw_choice==-1){
+                double life=-1;
+                if(!em2::net::ReadNativeRoomHudLife(unsigned(raw_id-2764),ctx,base,life))life=-1;
+                ctx.f1.f64=life;sub_8295FEA8(ctx,base);return;
             }
             if(std::isfinite(raw_id) && raw_id>=2750 && raw_id<=2763 && std::floor(raw_id)==raw_id &&
                std::isfinite(raw_choice) && raw_choice>=-1 && raw_choice<=1024 && std::floor(raw_choice)==raw_choice){

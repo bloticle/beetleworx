@@ -6,6 +6,7 @@ import subprocess
 import shutil
 import hashlib
 import json
+import runpy
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,20 +52,82 @@ def run(*args):
         result.check_returncode()
 
 
+def build_character_hud(game_dir, ffdec):
+    files = pak.read_pak(game_dir / "packfiles/UIhud.pak")
+    member = "ui/flash/hud/hud.gfx"
+    work = ROOT / "private/pc-menu-build/UIhud"
+    work.mkdir(parents=True, exist_ok=True)
+    source = work / "original.gfx"
+    source.write_bytes(next(blob for name, blob, kind in files if name.lower() == member))
+    exported = work / "export"
+    run("java", "-jar", ffdec, "-export", "script", exported, source)
+    hud = (exported / "scripts/__Packages/em2/hud/Hud.as").read_text(encoding="utf-8-sig")
+    patches = {
+        'this._oswaldControlled = value;':
+        'this._oswaldControlled = value;\n      if(this._pcSelectedCharacter)\n      {\n         this.pcSelectedCharacter = this._pcHudMode;\n         return undefined;\n      }',
+        'this.oswaldControlled = _level0.BindGameProperty("OswaldIsPlayerControlled",String(this),"oswaldControlled");':
+        'this.oswaldControlled = _level0.BindGameProperty("OswaldIsPlayerControlled",String(this),"oswaldControlled");\n      this.pcSelectedCharacter = _level0.BindGameProperty("PCSelectedCharacter",String(this),"pcSelectedCharacter");',
+        'function _updatePlayerHUDVisibility()\n   {':
+        'function _updatePlayerHUDVisibility()\n   {\n      if(this._pcSelectedCharacter)\n      {\n         this._showSelectedCharacterHUD();\n         return undefined;\n      }',
+        'this.oswaldCameraReticle._x = this._screenCenter + (this._screenCenter >> 1) - (_global.offsetX >> 1);':
+        'this.oswaldCameraReticle._x = this._pcSelectedCharacter ? this._screenCenter : this._screenCenter + (this._screenCenter >> 1) - (_global.offsetX >> 1);',
+    }
+    patches['this._isHorizontalSplitScreen = value;'] = 'this._isHorizontalSplitScreen = value && !this._pcSelectedCharacter;\n      value = this._isHorizontalSplitScreen;'
+    for before, after in patches.items():
+        if hud.count(before) != 1:
+            raise RuntimeError("Unexpected Hud.as structure; refusing an unverified patch: " + before)
+        hud = hud.replace(before, after)
+    end = hud.rfind("}")
+    hud = hud[:end] + (ROOT / "assets/pc-menu/CharacterSwitchHud.as").read_text() + hud[end:]
+    hud = hud[:hud.rfind("}")] + (ROOT / "assets/pc-menu/OnlineChatHud.as").read_text() + hud[hud.rfind("}"):]
+    anchor = '      this.maxPhotos = _level0.BindGameProperty("MaxRollPhotos",String(this),"maxPhotos");'
+    if hud.count(anchor) != 1:
+        raise RuntimeError('Native HUD chat init anchor changed')
+    hud = hud.replace(anchor, anchor + '\n      this._pcChatInit();')
+    imports = work / "import"
+    package = imports / "__Packages/em2/hud"
+    package.mkdir(parents=True, exist_ok=True)
+    (package / "Hud.as").write_text(hud, encoding="utf-8")
+    modified = work / "modified.gfx"
+    run("java", "-jar", ffdec, "-importScript", source, modified, imports)
+    run("java", "-jar", ffdec, "-export", "script", work / "roundtrip", modified)
+    result = (work / "roundtrip/scripts/__Packages/em2/hud/Hud.as").read_text(encoding="utf-8-sig")
+    for marker in ('function _pcChatTick()', 'this._pcChatInit();', '_level0.PCOnlineChat(2761,1)', 'Enter / Y: Send',
+                   '_level0.PCOnlineChat(2764,-1)', '_level0.PCOnlineChat(2765,-1)',
+                   'this.mickey.lifeChanged = mickeyLife', 'this.oswald.lifeChanged = oswaldLife'):
+        if marker not in result:
+            raise RuntimeError('Native HUD chat did not survive compilation: ' + marker)
+    tags = runpy.run_path(str(ROOT / 'scripts/build-online-lobby-menu.py'))['gfx_tags']
+    old_header, old_tags = tags(source.read_bytes())
+    new_header, new_tags = tags(modified.read_bytes())
+    altered = [i for i, (a, b) in enumerate(zip(old_tags, new_tags)) if a != b]
+    if old_header != new_header or len(old_tags) != len(new_tags) or len(altered) != 1:
+        raise RuntimeError('Expected exactly one native HUD class bytecode change')
+    if old_tags[altered[0]][0] != 59 or b'Hud\0' not in old_tags[altered[0]][1]:
+        raise RuntimeError('Changed native HUD tag is not the authored Hud class')
+    pak.write_pak([(name, modified.read_bytes() if name.lower() == member else blob, kind)
+                   for name, blob, kind in files], ROOT / "private/pc-assets/packfiles/UIhud.pak")
+
+
 def main():
     import runpy
-    runpy.run_path(str(ROOT / 'scripts/generate-native-options.py'))['generate']()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--game-dir", type=Path, default=Path("D:/Modding/Builds/EM2X360"))
     parser.add_argument("--ffdec", type=Path, default=ROOT / "analysis/ffdec/ffdec.jar")
     parser.add_argument("--emr-glb", type=Path)
+    parser.add_argument("--hud-only", action="store_true", help="Rebuild only the local character HUD archive")
     args = parser.parse_args()
     if not args.ffdec.is_file():
         raise RuntimeError("JPEXS 26.4.0 is required; run scripts/bootstrap-pc-menu.ps1")
+    if args.hud_only:
+        build_character_hud(args.game_dir, args.ffdec)
+        return
+    runpy.run_path(str(ROOT / 'scripts/generate-native-options.py'))['generate']()
     local_glb = ROOT / "private/emr_mickey_source/mickeyEM2-rebrushedAnim.glb"
     emr_glb = args.emr_glb if args.emr_glb is not None else (local_glb if local_glb.is_file() else None)
     inputs = [ROOT / "scripts/emr_ability_clips.py", Path(__file__), ROOT / "scripts/game-pak.py", ROOT / "scripts/patch-player-behaviors.py", ROOT / "scripts/generate-native-options.py", ROOT / "assets/pc-menu/NativeOptions.as.in", ROOT / "runtime/engine_settings_catalog.h", ROOT / "assets/pc-menu/TVSettings.as", ROOT / "assets/pc-menu/PlayerControls.as",
               ROOT / "assets/pc-menu/CharacterSwitchHud.as",
+              ROOT / "assets/pc-menu/OnlineChatHud.as",
               args.game_dir / "packfiles/UIOptions.pak", args.game_dir / "packfiles/UIPauseOptions.pak",
               args.game_dir / "packfiles/UIhud.pak", args.game_dir / "packfiles/_Dynamic.pak"]
     if emr_glb is not None:
@@ -146,39 +209,7 @@ def main():
         result = [(name, modified.read_bytes() if name == member else blob, kind) for name, blob, kind in files]
         pak.write_pak(result, ROOT / "private/pc-assets/packfiles" / archive)
         print("Verified modified menu archive:", archive)
-    files = pak.read_pak(args.game_dir / "packfiles/UIhud.pak")
-    member = "ui/flash/hud/hud.gfx"
-    work = ROOT / "private/pc-menu-build/UIhud"
-    work.mkdir(parents=True, exist_ok=True)
-    source = work / "original.gfx"
-    source.write_bytes(next(blob for name, blob, kind in files if name.lower() == member))
-    exported = work / "export"
-    run("java", "-jar", args.ffdec, "-export", "script", exported, source)
-    hud = (exported / "scripts/__Packages/em2/hud/Hud.as").read_text(encoding="utf-8-sig")
-    patches = {
-        'this._oswaldControlled = value;':
-        'this._oswaldControlled = value;\n      if(this._pcSelectedCharacter)\n      {\n         this.pcSelectedCharacter = 1;\n         return undefined;\n      }',
-        'this.oswaldControlled = _level0.BindGameProperty("OswaldIsPlayerControlled",String(this),"oswaldControlled");':
-        'this.oswaldControlled = _level0.BindGameProperty("OswaldIsPlayerControlled",String(this),"oswaldControlled");\n      this.pcSelectedCharacter = _level0.BindGameProperty("PCSelectedCharacter",String(this),"pcSelectedCharacter");',
-        'function _updatePlayerHUDVisibility()\n   {':
-        'function _updatePlayerHUDVisibility()\n   {\n      if(this._pcSelectedCharacter)\n      {\n         this._showSelectedCharacterHUD();\n         return undefined;\n      }',
-        'this.oswaldCameraReticle._x = this._screenCenter + (this._screenCenter >> 1) - (_global.offsetX >> 1);':
-        'this.oswaldCameraReticle._x = this._pcSelectedCharacter ? this._screenCenter : this._screenCenter + (this._screenCenter >> 1) - (_global.offsetX >> 1);',
-    }
-    for before, after in patches.items():
-        if hud.count(before) != 1:
-            raise RuntimeError("Unexpected Hud.as structure; refusing an unverified patch: " + before)
-        hud = hud.replace(before, after)
-    end = hud.rfind("}")
-    hud = hud[:end] + (ROOT / "assets/pc-menu/CharacterSwitchHud.as").read_text() + hud[end:]
-    imports = work / "import"
-    package = imports / "__Packages/em2/hud"
-    package.mkdir(parents=True, exist_ok=True)
-    (package / "Hud.as").write_text(hud, encoding="utf-8")
-    modified = work / "modified.gfx"
-    run("java", "-jar", args.ffdec, "-importScript", source, modified, imports)
-    pak.write_pak([(name, modified.read_bytes() if name.lower() == member else blob, kind)
-                   for name, blob, kind in files], ROOT / "private/pc-assets/packfiles/UIhud.pak")
+    build_character_hud(args.game_dir, args.ffdec)
     behavior_module = runpy.run_path(str(ROOT / 'scripts/patch-player-behaviors.py'))
     patch_behavior = behavior_module['patch']
     dynamic = pak.read_pak(args.game_dir / 'packfiles/_Dynamic.pak')
