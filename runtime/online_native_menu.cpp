@@ -496,6 +496,33 @@ struct Controller {
 };
 Controller& Menu(){static Controller controller;return controller;}
 }
+bool JoinNativeOnlineRoom(std::string_view text){
+    if(!OnlineMenuAvailable())return false;
+    auto& menu=Menu();std::lock_guard lock(menu.mutex);
+    if(menu.Busy() || !menu.InternetMode())return false;
+    std::string code;
+    for(unsigned char c:text){
+        if(c==' ' || c=='-' || c=='\r' || c=='\n' || c=='\t')continue;
+        if(c>='a' && c<='z')c-=32;
+        if(code.size()==8 || std::string_view("ABCDEFGHJKLMNPQRSTUVWXYZ23456789").find(char(c))==std::string_view::npos){menu.error="Enter the eight-character room code from your friend.";return false;}
+        code+=char(c);
+    }
+    if(code.size()!=8){menu.error="Enter all eight characters of the room code.";return false;}
+    menu.join_input.End();menu.Begin(false,std::move(code));return menu.error.empty();
+}
+bool RenameNativeOnlinePlayer(std::string_view name){
+    if(!OnlineMenuAvailable())return false;
+    auto& menu=Menu();std::lock_guard lock(menu.mutex);
+    return menu.ProfileEditable() && menu.boot->RenameLobbyPlayer(name);
+}
+bool SetNativeOnlineAppearance(int character,int color){
+    if(!OnlineMenuAvailable() || character<0 || character>1 || color<0 || color>=int(kLobbyColors.size()))return false;
+    auto& menu=Menu();std::lock_guard lock(menu.mutex);
+    if(!menu.ProfileEditable())return false;
+    const auto roster=menu.boot->lobby();const auto* player=menu.LocalPlayer(roster);
+    if(!player || (player->peer<=2 && int(player->character)!=character))return false;
+    return menu.boot->SetAppearance(LobbyCharacter(character),uint8_t(color));
+}
 bool NativeOnlineMenuOption(int id,int choice,int& result){
     if((id<2700 || id>2745 || (id>2716 && id<2720)) && (id<2770 || id>2782))return false;
     if(id==2743){result=choice==1?(!REXCVAR_GET(em2_online_relay_url).empty() && !Em1DemoSession()):OnlineMenuAvailable();return true;}

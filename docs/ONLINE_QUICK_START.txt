@@ -13,37 +13,39 @@ Start Epic Mickey 2 and open Online Multiplayer at the title menu.
 Host: select Host Game to use your current single-player save. If you have no save yet,
 start an offline game first and reach a save point, then return to the title.
 The first game-file check can take several minutes; keep the menu open.
-When the lobby opens, use the copy icon beside the room code and send it to your
+When the desktop lobby opens, select Copy code and send it to your
 friends. The code has eight characters. There are no router settings to change.
 
-Guest: select Join Game and type the host's room code, or choose Paste room code.
+Guest: select Join Game and type the host's room code, or choose Paste code.
 The host's save is transferred into a separate online session. Choose Ready;
 the host selects Start Game when everyone is ready.
 
-The player list shows names, character icons, colors and ready marks. Player
-options changes your name, character and color. Colors must be unique. The host
-can select a guest in the list or Manage players, then confirm Kick player.
+The player table shows names, characters, colors and ready status. Your player
+controls are below it: edit Name and select Save name, choose a character when
+available, and click a color swatch. Colors in use by others are disabled.
+The host can click Kick beside a guest and confirm the removal.
 
-For lobby text chat, click the message box or select Chat. Type your message and
-press Enter to send. Controller users get a character grid: A types, X deletes,
-Y sends and B closes it. During gameplay, T or D-pad Up opens text chat.
+Type in the Lobby chat message box and press Enter or Send. Use mouse, keyboard,
+or controller navigation in the desktop lobby. A keyboard is needed for text
+entry. During gameplay, T or D-pad Up opens the native text-chat interface.
+Esc or controller Start closes the desktop lobby and leaves the room.
 
 DISCORD
 
 Run Beetleworx once to register game launching with Discord. Keep the Discord
-desktop app open. After hosting, select Invite Friends in the online menu
+desktop app open. After hosting, select Invite Friends on Discord in the online menu
 to open Discord's game invitation screen. Choose friends or a channel there.
-The copy icon shares the room code instead. Accepting an invite enters the Join flow without
+Copy code shares the room code instead. Accepting an invite enters the Join flow without
 copying a code. During gameplay, invites wait until you return to the title.
 Joining a session that has already started is not supported in this demo.
 
 VOICE CHAT
 
-Open Voice chat settings in Online Multiplayer, or Player options in a lobby.
+Expand Voice chat at the bottom of the online window.
 Choose Listen only, Push to talk, or Open microphone. Voice is Off initially;
 new profiles use Proximity positioning when enabled. Existing choices stay saved.
 The default push-to-talk key is F8; controller users hold D-pad Down.
-Change proximity range, microphone, speakers and volume in the voice pages.
+Change proximity range, microphone, speakers and volume in that section.
 Nearby players are louder; other levels or unavailable player positions are muted.
 Voice uses the internet relay without router configuration. It is experimental;
 cross-machine hardware and long sessions still need testing.

@@ -57,6 +57,11 @@
    }
    function _em2OnlineOpen()
    {
+      // Desktop lobby owns all online controls; never lay out the old page.
+      if(_level0.SetOption(2500,4)>0) {
+         this._em2ImGuiOnline=true; this._visible=false; return;
+      }
+      return;
       if(_level0.SetOption(2743,-1) != 1) { this.b_5.disable(); this.b_5._visible = false; return; }
       this._em2Online = true;
       this._em2JoinPage=false; this._em2KickConfirm=false;

@@ -1,4 +1,8 @@
 #include "online_runtime.h"
+#include "online_native_menu.h"
+#include "online_chat.h"
+#include "online_lobby.h"
+#include "online_voice_runtime.h"
 #include "em1_level_entry.h"
 #include <immintrin.h>
 #include "engine_workbench.h"
@@ -30,7 +34,7 @@
 #include <sstream>
 #include <vector>
 namespace {
-enum class Panel {Closed,Settings,Console};
+enum class Panel {Closed,Settings,Console,Online};
 std::atomic<Panel> requested{Panel::Closed};
 std::atomic<int> requested_page{-1};
 std::atomic<rex::input::InputSystem*> input_system{nullptr};
@@ -74,6 +78,7 @@ int SettingIndex(std::string_view name){
 void SetPanel(Panel panel){requested.store(panel);em2::SetExternalControlCapture(panel!=Panel::Closed);focus_command=panel==Panel::Console;pad_armed=false;}
 void PadNavigation(ImGuiIO& io){
     auto* input=input_system.load();rex::input::X_INPUT_STATE state{};
+    if(input && window_focused.load())em2::PollControlCapture(*input);
     if(!window_focused.load() || (input && input->GetState(0,&state)!=0))state={};
     int capture=0;em2::ControlOption(2200,-1,capture);
     if(capture){state={};pad_armed=false;}
@@ -228,6 +233,7 @@ void DrawConsole(){
         if(*command){history.emplace_back(command);if(history.size()>100)history.erase(history.begin());history_index=-1;em2::ExecuteEngineConsole(command);command[0]=0;}focus_command=true;
     }
 }
+#include "online_imgui_menu.inl"
 }
 void em2::InitializeEngineWorkbench(const std::filesystem::path& path){directory=path;Log("EM2 Engine Console. Browse Commands for searchable help, or Tools for direct controls. Type help for a quick start. ` closes; game settings remain in Options.");}
 void em2::DraftEngineConsoleCommand(std::string_view text){snprintf(command,sizeof(command),"%.*s",int(std::min(text.size(),sizeof(command)-1)),text.data());focus_command=true;}
@@ -245,13 +251,20 @@ void em2::EngineConsoleMessage(const std::string& message){
 }
 bool em2::EngineWorkbenchKey(unsigned key,bool down){
     auto* held=key==VK_OEM_3?&console_held:nullptr;
-    if(held){const bool pressed=down && !*held;*held=down;int capture=0;ControlOption(2200,-1,capture);if(pressed && !capture){SetPanel(requested.load()==Panel::Console?Panel::Closed:Panel::Console);}return true;}
-    if(down && key==VK_ESCAPE && requested.load()!=Panel::Closed){int capture=0;ControlOption(2200,-1,capture);if(!capture){SetPanel(Panel::Closed);return true;}}
+    if(held){const bool pressed=down && !*held;*held=down;int capture=0;ControlOption(2200,-1,capture);if(pressed && !capture){if(requested.load()==Panel::Online)CloseWorkbench();else SetPanel(requested.load()==Panel::Console?Panel::Closed:Panel::Console);}return true;}
+    if(down && key==VK_ESCAPE && requested.load()!=Panel::Closed){int capture=0;ControlOption(2200,-1,capture);if(!capture){if(requested.load()!=Panel::Online || !ImGui::GetCurrentContext() || !ImGui::GetIO().WantTextInput)CloseWorkbench();return true;}}
     return false;
 }
 void em2::ResetEngineWorkbenchInput(){f1_held=console_held=false;pad_armed=false;}
 void em2::SetEngineWorkbenchFocused(bool focused){window_focused.store(focused);ResetEngineWorkbenchInput();}
-bool em2::EngineWorkbenchOption(int id,int command,int& result){if(id!=2500)return false;if(command==1)ShowEngineSettings();else if(command==2)ShowEngineConsole();else if(command==3){requested_page=5;ShowEngineSettings();}else if(command==0)SetPanel(Panel::Closed);result=int(requested.load());return true;}
+bool em2::EngineWorkbenchOption(int id,int command,int& result){
+    if(id!=2500)return false;
+    if(command==-2){result=requested.load()==Panel::Online;return true;}
+    if(command==1)ShowEngineSettings();else if(command==2)ShowEngineConsole();
+    else if(command==3){requested_page=5;ShowEngineSettings();}
+    else if(command==4)OpenOnlineWorkbench();else if(command==0)CloseWorkbench();
+    result=int(requested.load());return true;
+}
 void em2::ExecuteEngineConsole(std::string_view line){
     // Lua takes the unmodified remainder: normal tokenization would remove
     // Lua's own string quotes. A single outer quoted argument is accepted for
@@ -312,14 +325,15 @@ void em2::DrawEngineWorkbench(ImGuiIO& io){
     was_open=true;
     if(const auto selected=requested_page.exchange(-1);selected>=0)page=selected;
     PadNavigation(io);
-    if(ImGui::IsKeyPressed(ImGuiKey_GamepadStart)){SetPanel(Panel::Closed);return;}
+    if(ImGui::IsKeyPressed(ImGuiKey_GamepadStart)){CloseWorkbench();return;}
     io.ConfigFlags|=ImGuiConfigFlags_NavEnableKeyboard;
     const auto width=std::max(220.f,std::min(1180.f,io.DisplaySize.x-32)),height=std::max(150.f,std::min(850.f,io.DisplaySize.y-32));
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x*.5f,io.DisplaySize.y*.5f),ImGuiCond_Always,ImVec2(.5f,.5f));ImGui::SetNextWindowSize(ImVec2(width,height),ImGuiCond_Always);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,14);ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,6);ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(20,18));
     ImGui::PushStyleColor(ImGuiCol_WindowBg,ImVec4(.035f,.045f,.07f,.985f));ImGui::PushStyleColor(ImGuiCol_Header,ImVec4(.16f,.26f,.38f,1));ImGui::PushStyleColor(ImGuiCol_Button,ImVec4(.12f,.19f,.28f,1));ImGui::PushStyleColor(ImGuiCol_CheckMark,ImVec4(.94f,.69f,.25f,1));
     bool open=true;
-    if(ImGui::Begin(mode==Panel::Console?"EM2 / ENGINE CONSOLE":"EM2 / INTERNAL WIDGET TEST",&open,ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_NoResize)){
+    if(ImGui::Begin(mode==Panel::Online?"Beetleworx - Online Multiplayer":mode==Panel::Console?"EM2 / ENGINE CONSOLE":"EM2 / INTERNAL WIDGET TEST",&open,ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_NoResize)){
+        if(mode==Panel::Online)DrawOnlineLobby();else {
         ImGui::TextColored(ImVec4(.94f,.72f,.32f,1),"%s",mode==Panel::Console?"ENGINE CONSOLE":"SETTINGS");
         if(width>=850)ImGui::SameLine();ImGui::TextDisabled("  ` console  /  Esc close  /  Game settings: Options");ImGui::Separator();
         if(mode==Panel::Console)DrawConsole();else{
@@ -339,7 +353,8 @@ void em2::DrawEngineWorkbench(ImGuiIO& io){
             ImGui::EndChild();
         }
     }
-    ImGui::End();ImGui::PopStyleColor(4);ImGui::PopStyleVar(3);if(!open)SetPanel(Panel::Closed);
+        }
+    ImGui::End();ImGui::PopStyleColor(4);ImGui::PopStyleVar(3);if(!open)CloseWorkbench();
 }
 bool em2::TestEngineWorkbench(){
     if(!TestDebugLevelCatalog())return false;
@@ -385,4 +400,30 @@ bool em2::TestEngineWorkbench(){
     ImGui::DestroyContext(context);ImGui::SetCurrentContext(previous_context);page=previous_page;SetPanel(previous_panel);
     if(!drawn)return false;
     return true;
+}
+
+bool em2::TestOnlineDesktopMenu(){
+    auto* previous=ImGui::GetCurrentContext();auto* context=ImGui::CreateContext();
+    auto& io=ImGui::GetIO();io.IniFilename=nullptr;io.LogFilename=nullptr;io.DeltaTime=1.f/60;io.Fonts->Build();
+    const auto saved_panel=requested.load();bool ok=true;
+    auto frame=[&]{ImGui::NewFrame();DrawEngineWorkbench(io);ImGui::Render();
+        const auto* draw=ImGui::GetDrawData();ok=ok && draw && draw->TotalVtxCount>0;
+        if(draw)for(const auto* list:draw->CmdLists)for(const auto& command:list->CmdBuffer)
+            ok=ok && std::isfinite(command.ClipRect.x) && std::isfinite(command.ClipRect.y) && std::isfinite(command.ClipRect.z) && std::isfinite(command.ClipRect.w);
+    };
+    for(const auto size:{ImVec2(640,480),ImVec2(1280,720),ImVec2(3840,2160)}){
+        io.DisplaySize=size;
+        for(const int state:{0,1,2,3,6,9}){online_ui_fixture=state;SetPanel(Panel::Online);frame();frame();}
+    }
+    io.DisplaySize=ImVec2(1280,720);online_ui_fixture=0;online_ui_host_clicked=false;SetPanel(Panel::Online);frame();
+    io.AddMousePosEvent((online_host_min.x+online_host_max.x)*.5f,(online_host_min.y+online_host_max.y)*.5f);frame();
+    io.AddMouseButtonEvent(0,true);frame();io.AddMouseButtonEvent(0,false);frame();
+    ok=ok && online_ui_host_clicked;
+    int visible=0;EngineWorkbenchOption(2500,-2,visible);ok=ok && visible==1;
+    CloseWorkbench();EngineWorkbenchOption(2500,-2,visible);ok=ok && visible==0;
+    online_ui_fixture=-1;online_profile_loaded=false;online_ui_error.clear();online_message[0]=0;
+    ImGui::DestroyContext(context);ImGui::SetCurrentContext(previous);SetPanel(saved_panel);
+    if(ok)REXLOG_INFO("Desktop online menu passed: idle/preparing/connecting/lobby/error draws, sixteen-player rows at 640/1280/3840 widths, real ImGui mouse Host activation and exclusive window visibility");
+    else REXLOG_ERROR("Desktop online menu draw/input regression failed");
+    return ok;
 }

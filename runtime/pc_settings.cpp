@@ -748,7 +748,7 @@ PPC_FUNC_IMPL(sub_82B0D118) {
                 ctx.f1.f64=authorized?1:0;
                 sub_8295FEA8(ctx,base);return;
             }
-            if(raw_id==2500 && std::isfinite(raw_choice) && raw_choice>=-1 && raw_choice<=3 && std::floor(raw_choice)==raw_choice){
+            if(raw_id==2500 && std::isfinite(raw_choice) && raw_choice>=-2 && raw_choice<=4 && std::floor(raw_choice)==raw_choice){
                 int result=0;if(em2::EngineWorkbenchOption(2500,int(raw_choice),result)){ctx.f1.f64=result;sub_8295FEA8(ctx,base);return;}
             }
             if(std::isfinite(raw_id) && raw_id==1996) {

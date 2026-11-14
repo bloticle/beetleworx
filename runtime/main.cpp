@@ -192,6 +192,7 @@ REXCVAR_DECLARE(std::string,em2_room_probe_role);
 REXCVAR_DEFINE_BOOL(em2_online_menu,false,"Online","Show experimental direct-connect co-op Host/Join before starting the game");
 REXCVAR_DEFINE_BOOL(em2_test_pc_settings,false,"Debug","Run PC menu settings tests without opening the game");
 REXCVAR_DEFINE_BOOL(em2_test_guest_shutdown,false,"Debug","Run isolated cancellable guest wait and C++ unwind checks without guest execution");
+REXCVAR_DEFINE_BOOL(em2_test_online_menu_ui,false,"Debug","Headless ImGui online menu layout and mouse checks; no connections or gameplay");
 REXCVAR_DEFINE_BOOL(em2_test_online_input,false,"Debug","Run online room/native-slot and sealed local-source regressions headlessly in the canonical executable");
 REXCVAR_DEFINE_BOOL(em2_test_online_voice,false,"Debug","Test native voice codec/mixing; SDL dummy backend only for device tests, never real microphone hardware");
 REXCVAR_DEFINE_STRING(em2_test_voice_relay_origin,"","Debug","Optional explicit HTTPS relay for headless native encrypted voice integration; never opens audio devices");
@@ -361,7 +362,7 @@ public:
             const std::filesystem::path report=REXCVAR_GET(em2_allocation_crash_output);
             if(!report.is_absolute() || std::filesystem::exists(report) || !std::filesystem::is_directory(report.parent_path()))ExitProcess(2);
             InstallCrashHandler(report);
-        } else if(REXCVAR_GET(em2_test_guest_shutdown) || REXCVAR_GET(em2_test_online_voice) || REXCVAR_GET(em2_test_online_input) || REXCVAR_GET(em2_test_content_setup) || REXCVAR_GET(em2_test_mickey_ears) || REXCVAR_GET(em2_test_pc_settings) || REXCVAR_GET(em2_test_demo_support) || REXCVAR_GET(em2_test_update_swap) || REXCVAR_GET(em2_test_video_blocks) || REXCVAR_GET(em2_test_shader_storage) || REXCVAR_GET(em2_test_screen_upscale) || !REXCVAR_GET(em2_analyze_shadow_shader_path).empty() || !REXCVAR_GET(em2_analyze_bloom_shader_path).empty()) {
+        } else if(REXCVAR_GET(em2_test_online_menu_ui) || REXCVAR_GET(em2_test_guest_shutdown) || REXCVAR_GET(em2_test_online_voice) || REXCVAR_GET(em2_test_online_input) || REXCVAR_GET(em2_test_content_setup) || REXCVAR_GET(em2_test_mickey_ears) || REXCVAR_GET(em2_test_pc_settings) || REXCVAR_GET(em2_test_demo_support) || REXCVAR_GET(em2_test_update_swap) || REXCVAR_GET(em2_test_video_blocks) || REXCVAR_GET(em2_test_shader_storage) || REXCVAR_GET(em2_test_screen_upscale) || !REXCVAR_GET(em2_analyze_shadow_shader_path).empty() || !REXCVAR_GET(em2_analyze_bloom_shader_path).empty()) {
             const auto reports=exe_dir/"diagnostic-crashes"/(std::to_string(GetCurrentProcessId())+"-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
             if(!std::filesystem::create_directories(reports))ExitProcess(2);
             InstallCrashHandler(reports/"crash.log");
@@ -535,6 +536,9 @@ public:
             const auto voice_preferences_test=exe_dir/("online-voice-settings-test-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
             bool success=false;try{success=em2::net::TestOnlineInternetVoiceRelay(REXCVAR_GET(em2_test_voice_relay_origin)) && em2::net::TestOnlineVoiceAudio() && em2::net::TestOnlineVoiceTransport() && em2::net::TestOnlineRoomVoice() && em2::net::TestOnlineVoicePreferences(voice_preferences_test) && em2::net::TestOnlineVoiceSettings(voice_preferences_test) && em2::net::TestOnlineVoiceDevices() && em2::net::TestOnlineVoiceRuntime();}catch(const std::exception& e){REXLOG_ERROR("Voice regression threw: {}",e.what());}
             spdlog::shutdown();ExitProcess(success?0:1);
+        }
+        if(REXCVAR_GET(em2_test_online_menu_ui)){
+            const bool success=em2::TestOnlineDesktopMenu();spdlog::shutdown();ExitProcess(success?0:1);
         }
         if (REXCVAR_GET(em2_test_online_input)) {
             const auto fixture=exe_dir/("online-input-test-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));

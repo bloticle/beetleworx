@@ -4,6 +4,10 @@ namespace em2::net {
 // Native GFx numeric command/status bridge. Only main-menu callers may start
 // preparation; network/save work stays asynchronous and private.
 bool NativeOnlineMenuOption(int id,int choice,int& result);
+// Validated submissions from the desktop lobby; never synthesize window keys.
+bool JoinNativeOnlineRoom(std::string_view code);
+bool RenameNativeOnlinePlayer(std::string_view name);
+bool SetNativeOnlineAppearance(int character,int color);
 // Main application lifecycle owner consumes only after native Start is pressed.
 // It must safely route and reload the isolated save before native Continue.
 std::optional<NativeMenuReady> TakeNativeOnlineMenuReady();

@@ -61,6 +61,15 @@ void SendLocked(){
 int Byte(std::string_view text,int index){return index>=0 && size_t(index)<text.size()?uint8_t(text[size_t(index)]):0;}
 }
 void CloseOnlineChat(){std::lock_guard lock(mutex);OpenLocked(false);held.fill(false);pad_held=0;opening_character=false;}
+bool SubmitOnlineLobbyChat(std::string_view text){
+    std::lock_guard lock(mutex);
+    if(!connected.load() || !in_lobby.load() || !REXCVAR_GET(em2_online_text_chat))return false;
+    const auto first=text.find_first_not_of(' '),last=text.find_last_not_of(' ');
+    if(first!=std::string_view::npos)text=text.substr(first,last-first+1);
+    if(!ValidRoomChatText(text)){status="Enter a message of up to 240 UTF-8 bytes.";return false;}
+    if(outgoing.size()>=8){status="Chat is busy. Wait a moment and try again.";return false;}
+    outgoing.emplace_back(text);status.clear();return true;
+}
 bool OnlineChatKey(unsigned key,bool down,bool shift,bool control){
     std::lock_guard lock(mutex);
     if(key=='T' && !down)opening_character=false;

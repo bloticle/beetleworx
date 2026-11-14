@@ -21,4 +21,5 @@ void DraftEngineConsoleCommand(std::string_view);
 std::optional<std::vector<std::string>> TokenizeEngineConsole(std::string_view);
 void EngineConsoleMessage(const std::string&);
 bool TestEngineWorkbench();
+bool TestOnlineDesktopMenu();
 }

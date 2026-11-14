@@ -67,6 +67,10 @@ def main():
       {
          if(_level0.SetOption == undefined) return;
          var owner = this._parent;
+         if(owner._em2ImGuiOnline) {
+            if(_level0.SetOption(2500,-2)==1) { owner._visible=false; return; }
+            owner._em2ImGuiOnline=false; owner._visible=true;
+         }
          owner._pcUpdateTick();
          owner._pcMenuTree(owner._parent,0);
          if(owner._visible == false) return;
