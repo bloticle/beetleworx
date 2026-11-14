@@ -7,8 +7,9 @@ over the relay and real Discord invitations still need end-to-end testing.
 
 The current live deployment still carries gameplay/text only. The source also
 contains a separate media endpoint, verified in the local Cloudflare runtime.
-That media endpoint is not deployed; native voice-client integration remains
-unfinished. Demo.4 still cannot relay voice.
+That media endpoint is not deployed. The native adapter compiles, but its
+queue fixtures and actual encrypted/audio relay path have not run yet.
+Demo.4 still cannot relay voice.
 
 The service accepts outbound HTTPS/WebSocket connections from the host and up
 to fifteen guests. Players do not open inbound ports or configure routers.
@@ -79,9 +80,12 @@ close gameplay. Leaving gameplay closes its media socket and revokes its token.
 Media frames are `[2, channel, encrypted datagram...]`, with 1–512 opaque payload
 bytes. Guests send channel 0; the service supplies their actual admitted game
 channel to the host. Host packets name that channel; the receiving guest sees
-channel 0. A future native adapter must map host-side game channels to actual
-native peer IDs before returning `VoiceDatagram.sender`. Ciphertext headers do
-not establish that mapping. Existing native encryption/replay checks remain.
+channel 0. The native adapter maps host-side game channels to actual native
+peer IDs by matching the admitted loopback TCP connection at voice-offer time.
+Ciphertext headers do not establish that mapping. Existing native encryption
+and replay checks remain. Each media connection has bounded, expiring queues
+and independent retries; its retirement never joins socket work on the game
+owner. These native paths still require runtime validation.
 
 The media socket has independent framing and rate bounds and cannot send game
 control messages. Room generations reject callbacks from expired incarnations.

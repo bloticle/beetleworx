@@ -102,6 +102,7 @@
 #include "online_name_input.h"
 #include "online_native_menu.h"
 #include "online_discord.h"
+#include "online_internet_relay.h"
 #include "online_chat.h"
 #include "online_voice_runtime.h"
 #include "online_voice_preferences.h"
@@ -517,7 +518,7 @@ public:
         }
         if(REXCVAR_GET(em2_test_online_voice)){
             const auto voice_preferences_test=exe_dir/("online-voice-settings-test-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-            bool success=false;try{success=em2::net::TestOnlineVoiceAudio() && em2::net::TestOnlineVoiceTransport() && em2::net::TestOnlineRoomVoice() && em2::net::TestOnlineVoicePreferences(voice_preferences_test) && em2::net::TestOnlineVoiceSettings(voice_preferences_test) && em2::net::TestOnlineVoiceDevices() && em2::net::TestOnlineVoiceRuntime();}catch(const std::exception& e){REXLOG_ERROR("Voice regression threw: {}",e.what());}
+            bool success=false;try{success=em2::net::TestOnlineInternetVoiceRelay() && em2::net::TestOnlineVoiceAudio() && em2::net::TestOnlineVoiceTransport() && em2::net::TestOnlineRoomVoice() && em2::net::TestOnlineVoicePreferences(voice_preferences_test) && em2::net::TestOnlineVoiceSettings(voice_preferences_test) && em2::net::TestOnlineVoiceDevices() && em2::net::TestOnlineVoiceRuntime();}catch(const std::exception& e){REXLOG_ERROR("Voice regression threw: {}",e.what());}
             spdlog::shutdown();ExitProcess(success?0:1);
         }
         if (REXCVAR_GET(em2_test_online_input)) {

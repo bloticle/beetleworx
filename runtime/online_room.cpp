@@ -264,7 +264,9 @@ struct Room::Impl {
     uint16_t VoiceMask()const{uint16_t mask=0;for(const auto& player:lobby.players)mask|=uint16_t(1u<<(player.peer-1));return mask;}
     bool HostVoice(){
         if(!host)return false;if(voice)return true;
-        auto candidate=std::make_unique<VoiceTransport>();if(!candidate->Host(voice_bind,id.session))return false;
+        auto candidate=std::make_unique<VoiceTransport>();
+        if(internet_relay){auto channel=internet_relay->VoiceChannel();if(!channel || !candidate->UseDatagramChannel(std::move(channel)))return false;}
+        if(!candidate->Host(voice_bind,id.session))return false;
         candidate->SetRoster(VoiceMask());voice=std::move(candidate);for(auto& c:connections)c->voice_offered=false;return true;
     }
     bool OfferVoice(Connection& c){
@@ -273,6 +275,7 @@ struct Room::Impl {
         if(c.outgoing.size()-c.sent+80>MaxQueued/2 || !HostVoice())return false;
         NumericAddress address;address.size=sizeof(address.storage);
         if(getpeername(c.socket,reinterpret_cast<sockaddr*>(&address.storage),&address.size)!=0)return false;
+        if(internet_relay && !internet_relay->BindVoicePeer(unsigned(c.peer),address.Port()))return false;
         VoiceKeys keys;if(!voice->AddPeer(unsigned(c.peer),address.Text(),keys))return false;
         auto packet=Packet(Wire::VoiceOffer);U64(packet,voice->port(),2);packet.insert(packet.end(),keys.to_host.begin(),keys.to_host.end());packet.insert(packet.end(),keys.to_guest.begin(),keys.to_guest.end());
         const bool queued=c.Queue(packet);SecureZeroMemory(packet.data(),packet.size());
@@ -509,7 +512,11 @@ struct Room::Impl {
             if(!r.Done() || !port)return true;
             if(voice_keys && voice_keys->to_host==keys.to_host && voice_keys->to_guest==keys.to_guest)return true;
             NumericAddress address;address.size=sizeof(address.storage);if(getpeername(c.socket,reinterpret_cast<sockaddr*>(&address.storage),&address.size)!=0)return true;
-            try{auto candidate=std::make_unique<VoiceTransport>();if(candidate->Join(address.Text(),port,unsigned(peer),id.session,keys)){candidate->SetRoster(VoiceMask());voice=std::move(candidate);voice_keys=keys;}}catch(...){}return true;
+            try{
+                auto candidate=std::make_unique<VoiceTransport>();
+                if(internet_relay){auto channel=internet_relay->VoiceChannel();if(!channel || !candidate->UseDatagramChannel(std::move(channel)))return true;}
+                if(candidate->Join(address.Text(),port,unsigned(peer),id.session,keys)){candidate->SetRoster(VoiceMask());voice=std::move(candidate);voice_keys=keys;}
+            }catch(...){}return true;
         }
         if(kind==Wire::ChatRequest){
             if(!host)return false;const auto text=r.String();
