@@ -11,6 +11,7 @@
 PPC_EXTERN_FUNC(__imp__sub_8283BB58);
 PPC_EXTERN_FUNC(__imp__sub_8283C210);
 PPC_EXTERN_FUNC(__imp__sub_8333AC20);
+PPC_EXTERN_FUNC(__imp__sub_8283B5C0);
 
 namespace {
 struct MovieClock {
@@ -77,6 +78,20 @@ bool em2::net::NativeMovieSkipTimerOwned(uint32_t timer,uint32_t caller,PPCConte
     uint64_t agreed=0;return caller==0x82B1E070 || (em2::CurrentAgreedSimulationTick(agreed) && agreed==tick);
 }
 
+bool em2::net::ServiceNativeDirectMovieSkip(uint32_t registry,PPCContext& ctx,uint8_t* base){
+    uint32_t profile=0,object=0,handler=0;
+    if(!ReadNativeControlTarget(ctx,base,registry,1,profile,object,handler) || handler!=0x82B1EDF8)return false;
+    float elapsed=0;if(!NativeDirectMovieSkipReady(object,ctx,base,elapsed))return true;
+    auto* game=CurrentNativeRoomGameplay();uint64_t tick=0;
+    const auto manager=Readable(base,0x833DCCB8,4)?PPC_LOAD_U32(0x833DCCB8):0;
+    if(!game || !Readable(base,manager,132) || !game->ReadMovieClock(manager,ctx,base,tick))return false;
+    // This runs once at the owned agreed-delivery boundary. Original movie
+    // update/exit will observe the stop and restore controls themselves.
+    const auto saved=ctx;const auto csr=_mm_getcsr();const auto error=GetLastError();ctx.r3.u64=manager;
+    __imp__sub_8283B5C0(ctx,base);ctx=saved;_mm_setcsr(csr);SetLastError(error);
+    REXLOG_INFO("Native Room direct movie held skip: tick {} object {:08X} elapsed {}; original movie stop, native completion follows",tick,object,elapsed);
+    return true;
+}
 PPC_FUNC_IMPL(sub_8283BB58){Dispatch(ctx,base,__imp__sub_8283BB58);}
 PPC_FUNC_IMPL(sub_8283C210){Dispatch(ctx,base,__imp__sub_8283C210);}
 PPC_FUNC_IMPL(sub_8333AC20){

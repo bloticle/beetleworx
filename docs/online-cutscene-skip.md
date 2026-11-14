@@ -99,7 +99,7 @@ callbacks despite both carried entry input and a fresh extra-peer hold.
 
 The [held-button return fix](online-cutscene-held-return.md) has a native
 three-world reproduction and fixed comparison. Real mode-6 scene completion,
-timer-driven skip, nested cinematics, cinematic choices, movie mode 1 and
+timer-driven skip, nested cinematics, cinematic choices, other direct movies and
 cutscenes before gameplay admission still need native campaign tests and any
 corresponding fixes. No complete online playthrough
 claim follows from the isolated fixtures.
@@ -110,7 +110,7 @@ That Apprentice sequence does not enter the cinematic input state, so its
 completion does not establish skip delivery. State-2 `StartSequence` movies
 now have [separate native entry/playback/return coverage](online-movie-sequence.md);
 their [Menu/Accept skip controls](online-movie-skip.md) now have separate native
-coverage. Direct movie state 1 remains unverified or unfinished.
+coverage. Direct movie state 1 now has [natural playback and configured held-skip coverage](online-direct-movie-status.md) in three local native clients. Other direct movies and live unskippable playback still need coverage.
 
 The real guard capture `analysis/native-lobby-20261114-124527-59fe6d76`
 (binary `1ADCC49ACB1B2EAD686A4B6E31EDFC2278DF223AEAFD66C493D1EED8309D5773`)

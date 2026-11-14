@@ -2,7 +2,7 @@
 
 Three native clients play the retail Havok logo through StartSequence.
 --direct-movie instead checks the original PlayMovieInternal state-1 route.
---expect-skip additionally checks native Accept, its delay and held-input return.
+--expect-skip checks native Accept or direct held-skip timing and held-input return.
 This does not prove other movies, every skip configuration, credits, Internet
 stalls or a campaign.
 """
@@ -20,12 +20,11 @@ def verify(root, expect_skip=False, direct_movie=False):
     assert result['players'] == 3
     assert bool(result.get('direct_movie')) == direct_movie
     assert bool(result['movie_sequence']) != direct_movie
-    assert not (direct_movie and expect_skip), 'Direct-movie skip is not yet supported by this fixture'
     assert result['checkpoint_reload_tick'] == 300 and result['checkpoint_reload_count'] == 1
     assert not result['cutscene_cycle'] and not result['authored_conversation']
     skip_delay = result.get('movie_skip_delay', 0)
     if expect_skip:
-        assert result['cutscene_skip_input'] and skip_delay in (0, 2)
+        assert result['cutscene_skip_input'] and skip_delay in ((0,) if direct_movie else (0, 2))
     helpers = Path(__file__).parent
     menu = runpy.run_path(str(helpers / 'verify-native-room-menu-roster.py'))['verify'](root, allow_scripted=True)
     sample = runpy.run_path(str(helpers / 'verify-native-player-respawn.py'))['SAMPLE']
@@ -50,16 +49,40 @@ def verify(root, expect_skip=False, direct_movie=False):
         assert 'Native Room movie camera retained: tick 360;' in text
         if not expect_skip:
             assert 'Native Room movie camera retained: tick 420;' in text
-        assert 'Native Room cutscene UI callback delivered:' not in text
+        if not (direct_movie and expect_skip):
+            assert 'Native Room cutscene UI callback delivered:' not in text
         assert 'Native Room loader agreed:' not in text and 'Room native world rebootstrap:' not in text
         resumed = re.findall(r'Native Room cutscene bindings re-admitted: source tick (\d+), first delivery (\d+), input epoch 3;', text)
         assert len(resumed) == 1
         source, delivery = map(int, resumed[0])
-        assert (source == 372 if expect_skip else 430 <= source <= 480) and delivery == source + 2
+        assert delivery == source + 2
+        if direct_movie and expect_skip:
+            stops = list(re.finditer(r'Native Room direct movie held skip: tick (\d+) object [0-9A-F]+ elapsed ([^;]+);', text))
+            assert len(stops) == 1
+            # The observation immediately after the native stop belongs to the
+            # original update that consumed it, not a guessed wall-clock frame.
+            stop_tick = int(stops[0][1])
+            assert int(obs.search(text, stops[0].end())[1]) == stop_tick
+            callbacks = [(int(t), action, int(stamp)) for t, action, stamp in re.findall(
+                r"Native Room cutscene UI callback delivered: tick (\d+) epoch 2 action '([^']+)' native result \d+ timer (\d+);", text)]
+            assert [r[1] for r in callbacks] == ['DisplaySkipMovieButton', 'MovieSkipStart']
+            assert callbacks[0][0] == 321 and 321 < callbacks[1][0] < 350
+            settings = [(int(t), int(allowed), int(held), float(duration), action) for t, allowed, held, duration, action in re.findall(
+                r"Native Room direct movie skip settings: tick (\d+) allowed (\d+) held (\d+) duration ([^;]+); native fields after '([^']+)'", text)]
+            assert len(settings) == 2 and settings[0][0] == callbacks[0][0] and settings[0][1:3] == (1, 0)
+            assert settings[1][0] == callbacks[1][0] and settings[1][1:3] == (1, 1)
+            duration = settings[1][3]
+            assert math.isfinite(duration) and 0 < duration <= 3600 and settings[0][3] == duration
+            assert float(stops[0][2]) >= duration and (stop_tick-callbacks[1][0]-1)/30 < duration
+            assert callbacks[1][2] == 100000000 + callbacks[1][0]*1000000
+            assert stop_tick == callbacks[1][0] + math.ceil(duration*30-1e-6) and source == stop_tick+2 and source < 430
+            assert text.count('Native Room cutscene UI receiver armed: tick 304 epoch 2 handler 82B1EDF8;') == 1
+        else:
+            assert source == 372 if expect_skip else 430 <= source <= 480
         accepts = [(int(t), int(epoch), int(native), int(delay), bool(int(remaining, 16)), int(done))
                    for t, epoch, native, delay, remaining, done in re.findall(
                        r'Native Room movie Accept delivered: tick (\d+) epoch (\d+) native result (\d+) skip delay (-?\d+) remaining ([0-9A-F]+) completed (\d+);', text)]
-        if expect_skip:
+        if expect_skip and not direct_movie:
             assert text.count('Native Room movie Accept receiver armed: tick 304 epoch 2 handler 82B1DF70;') == 1
             expected = [(371, 2, 0, skip_delay, False, 1)]
             if skip_delay:

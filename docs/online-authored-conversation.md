@@ -69,5 +69,5 @@ it does not start a cinematic player. `StartSequence` (82772F20, helper
 82772D50) selects native **state 2**, which queues movies and frontend
 commands. Its [movie-only path now has separate native coverage](online-movie-sequence.md).
 Starting this Apprentice conversation does not validate that movie path or
-state-6 cinematic completion. Direct movie state 1, choices, nested scenes,
+state-6 cinematic completion. Direct movie state 1 has [separate playback and held-skip coverage](online-direct-movie-status.md); choices, nested scenes,
 credits/menu routes and complete campaign traversal remain unproven.

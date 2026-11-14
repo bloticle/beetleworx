@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <thread>
+#include <limits>
 #include <rex/logging.h>
 #include <rex/cvar.h>
 REXCVAR_DECLARE(bool,em2_private_profile);
@@ -156,28 +157,30 @@ struct BorrowContext {
     ~BorrowContext(){if(stack)std::memcpy(stack,bytes.data(),8192);ctx=saved;}
 };
 struct Target {
-    uint32_t registry=0,profile=0,object=0,table=0,event=0;std::array<uint32_t,3> actions{};
+    uint32_t registry=0,profile=0,object=0,table=0,event=0,mode=0;std::array<uint32_t,3> actions{};
     bool operator==(const Target&)const=default;
 };
 bool ReadTarget(uint32_t registry,PPCContext& ctx,uint8_t* base,Target& out){
     BorrowContext preserve(ctx,base);if(!preserve.stack)return false;
     NativeGameOverState state;uint32_t mode=0;NativeCutsceneUiSnapshot ui;
-    if(!ReadNativeControlState(ctx,base,state,mode) || mode!=6 || state.registry!=registry || !InspectNativeCutsceneUi(ctx,base,registry,ui))return false;
-    Target target;target.registry=registry;target.profile=PPC_LOAD_U32(0x833DAD98);
+    if(!ReadNativeControlState(ctx,base,state,mode) || (mode!=6 && mode!=1) || state.registry!=registry || (mode==1 && !ReadNativeCutsceneContext(ctx,base,registry)) || !InspectNativeCutsceneUi(ctx,base,registry,ui))return false;
+    Target target;target.registry=registry;target.mode=mode;target.profile=PPC_LOAD_U32(0x833DAD98);
     if(!Readable(base,target.profile,16))return false;
     const auto profile_table=PPC_LOAD_U32(target.profile+12);if(!Readable(base,profile_table,32))return false;
     const auto getter=PPC_LOAD_U32(profile_table+28);
     if((getter&3) || getter<PPC_CODE_BASE || uint64_t(getter)>=uint64_t(PPC_CODE_BASE)+PPC_CODE_SIZE || !PPC_LOOKUP_FUNC(base,getter))return false;
     ctx.r3.u64=target.profile;ctx.r4.u64=mode;__imp__sub_82770EE8(ctx,base);target.object=ctx.r3.u32;
-    if(!Readable(base,target.object,96))return false;target.table=PPC_LOAD_U32(target.object);
-    // Original authored mode-6 CutScene handler, not restriction/Movie/Pause/GameOver or a retail
-    // character listener. Keep its own unskippable guard and director state.
+    if(!Readable(base,target.object,mode==1?32:96))return false;target.table=PPC_LOAD_U32(target.object);
+    // Original mode-6 ending-movie or mode-1 direct-movie handler. Reject
+    // restriction, Pause, GameOver and retail character listeners; preserve
+    // each native handler's own allow-skipping/authoring guard.
     if(!Readable(base,target.table,48))return false;
     if(REXCVAR_GET(em2_private_profile)){
         static thread_local uint32_t observed=0;
         if(observed!=target.object){observed=target.object;REXLOG_INFO("Private native cutscene UI target observed: object {:08X} table {:08X} handler {:08X}",target.object,target.table,PPC_LOAD_U32(target.table+44));}
     }
-    if(PPC_LOAD_U32(target.table+44)!=0x82B210B0)return false;
+    if(PPC_LOAD_U32(target.table+44)!=(mode==1?0x82B1EDF8u:0x82B210B0u) ||
+       (mode==1 && target.table!=0x8215B7B0))return false;
     unsigned contexts=0;
     for(const auto& c:ui.contexts)if(c.name=="CutScene"){
         ++contexts;target.event=c.event;unsigned listeners=0;
@@ -192,6 +195,15 @@ bool ReadTarget(uint32_t registry,PPCContext& ctx,uint8_t* base,Target& out){
     if(contexts!=1 || std::any_of(target.actions.begin(),target.actions.end(),[](auto a){return !a;}))return false;
     out=target;return true;
 }
+bool DirectHoldReady(uint64_t tick,uint64_t stamp,float duration,bool allowed,bool held,float& elapsed){
+    elapsed=0;
+    constexpr uint64_t origin=100000000,step=1000000;
+    if(!allowed || !held || !std::isfinite(duration) || duration<0 || duration>3600 ||
+       tick>(uint64_t(INT64_MAX)-origin)/step || stamp<origin || (stamp-origin)%step)return false;
+    const auto now=origin+tick*step;if(stamp>now)return false;
+    elapsed=float(float(now-stamp)*float(1./30000000.));
+    return elapsed>=duration;
+}
 struct TimerLease {void* owner=nullptr;DWORD thread=0;uint8_t* base=nullptr;uint64_t controls=0;Target target;};
 thread_local TimerLease timer_lease;
 }
@@ -205,12 +217,21 @@ bool NativeCutsceneSkipTargetAvailable(uint32_t registry,PPCContext& ctx,uint8_t
 bool NativeCutsceneSkipTimerOwned(uint32_t timer,uint32_t caller,PPCContext& ctx,uint8_t* base){
     Environment env;const auto lease=timer_lease;
     if(!lease.owner || lease.thread!=GetCurrentThreadId() || lease.base!=base ||
-       lease.controls!=em2::SynchronizedControlsGeneration() || timer!=lease.target.object+88 ||
-       (caller!=0x82B211B8 && caller!=0x82B22628))return false;
+       lease.controls!=em2::SynchronizedControlsGeneration() || timer!=lease.target.object+(lease.target.mode==1?24u:88u) ||
+       (lease.target.mode==1?caller!=0x82B1EF94:(caller!=0x82B211B8 && caller!=0x82B22628)))return false;
     Target current;if(!ReadTarget(lease.target.registry,ctx,base,current) || current!=lease.target)return false;
     // The start stamp is a simulation mutation. Elapsed reads can also serve
     // the retained prompt between native updates using the last published tick.
     uint64_t tick=0;return caller==0x82B22628 || em2::CurrentAgreedSimulationTick(tick);
+}
+bool NativeDirectMovieSkipReady(uint32_t object,PPCContext& ctx,uint8_t* base,float& elapsed){
+    Environment env;elapsed=0;const auto lease=timer_lease;uint64_t tick=0;
+    if(!lease.owner || lease.target.mode!=1 || lease.target.object!=object || lease.thread!=GetCurrentThreadId() ||
+       lease.base!=base || lease.controls!=em2::SynchronizedControlsGeneration() || !em2::CurrentAgreedSimulationTick(tick))return false;
+    Target current;if(!ReadTarget(lease.target.registry,ctx,base,current) || current!=lease.target ||
+       !PPC_LOAD_U8(object+12) || PPC_LOAD_U8(object+13))return false;
+    return DirectHoldReady(tick,PPC_LOAD_U64(object+24),std::bit_cast<float>(PPC_LOAD_U32(object+16)),
+        PPC_LOAD_U8(object+21)==1,PPC_LOAD_U8(object+20)==1,elapsed);
 }
 bool NativeCutsceneSkipReceiver::Consume(const RoomFrame& frame,uint32_t registry,uint64_t epoch,PPCContext& ctx,uint8_t* base){
     Environment env;auto& s=*impl_;uint64_t tick=0,generation=0;Frame published,neutral;neutral.tick=frame.tick;
@@ -222,7 +243,7 @@ bool NativeCutsceneSkipReceiver::Consume(const RoomFrame& frame,uint32_t registr
         if(timer_lease.owner || !s.source.Arm(registry,0,epoch,tick,ctx,base))return false;
         s.target=target;s.thread=GetCurrentThreadId();s.base=base;s.epoch=epoch;s.next=tick;s.controls=generation;s.armed=true;
         timer_lease={impl_.get(),s.thread,base,generation,target};
-        REXLOG_INFO("Native Room cutscene UI receiver armed: tick {} epoch {} handler 82B210B0; original authored guard retained",tick,epoch);
+        REXLOG_INFO("Native Room cutscene UI receiver armed: tick {} epoch {} handler {:08X}; original authored guard retained",tick,epoch,target.mode==1?0x82B1EDF8u:0x82B210B0u);
     }
     if(s.thread!=GetCurrentThreadId() || s.base!=base || s.epoch!=epoch || s.next!=tick || s.controls!=generation || s.target!=target)return false;
     bool all_ui=true;Pad intent;
@@ -241,7 +262,9 @@ bool NativeCutsceneSkipReceiver::Consume(const RoomFrame& frame,uint32_t registr
         BorrowContext preserve(ctx,base);if(!preserve.stack)return false;
         ctx.r3.u64=target.profile;ctx.r4.u64=target.event;ctx.r5.u64=target.actions[i];ctx.f1.f64=0;ctx.f2.f64=0;
         __imp__sub_82770F58(ctx,base);
-        REXLOG_INFO("Native Room cutscene UI callback delivered: tick {} epoch {} action '{}' native result {} timer {}; canonical UI only, no character input",tick,epoch,Names[i],ctx.r3.u32,PPC_LOAD_U64(target.object+88));
+        REXLOG_INFO("Native Room cutscene UI callback delivered: tick {} epoch {} action '{}' native result {} timer {}; canonical UI only, no character input",tick,epoch,Names[i],ctx.r3.u32,PPC_LOAD_U64(target.object+(target.mode==1?24u:88u)));
+        if(target.mode==1)REXLOG_INFO("Native Room direct movie skip settings: tick {} allowed {} held {} duration {}; native fields after '{}'",tick,
+            PPC_LOAD_U8(target.object+21),PPC_LOAD_U8(target.object+20),std::bit_cast<float>(PPC_LOAD_U32(target.object+16)),Names[i]);
     }
     s.next=tick+1;s.faulted=false;return true;
 }
@@ -348,6 +371,21 @@ bool TestNativeCutsceneSkipMath(){
         std::memcpy(base+name,Names[i],std::strlen(Names[i])+1);PPC_STORE_U32(p,name);PPC_STORE_U32(p+80,Kinds[i]);PPC_STORE_U32(p+88,7);PPC_STORE_U32(p+92,0x01400009);PPC_STORE_U32(p+408,1);
         std::memcpy(b.shapes[i].data(),base+p,436);b.actions[i]=p;}
     unsigned checks=0;auto check=[&](bool ok,const char* why){++checks;if(!ok)REXLOG_ERROR("Native cutscene skip math: {}",why);return ok;};
+    {float elapsed=0;constexpr uint64_t stamp=200000000;
+        if(!check(!DirectHoldReady(114,stamp,.5f,true,true,elapsed) && std::abs(elapsed-14.f/30)<1e-6f &&
+                  DirectHoldReady(115,stamp,.5f,true,true,elapsed) && elapsed==.5f,
+                  "direct-movie hold keeps the configured native half-second boundary on agreed ticks"))return false;
+        if(!check(!DirectHoldReady(189,stamp,3.f,true,true,elapsed) && DirectHoldReady(190,stamp,3.f,true,true,elapsed) && elapsed==3.f,
+            "the live three-second native setting requires ninety ticks rather than the illustrative half-second setting"))return false;
+        for(unsigned bad=0;bad<8;++bad){
+            const auto at=bad==0?99ull:bad==1?UINT64_MAX:115ull;
+            const auto start=bad==2?0ull:bad==3?stamp+1:stamp;
+            const auto duration=bad==4?std::numeric_limits<float>::quiet_NaN():bad==5?-1.f:.5f;
+            if(!check(!DirectHoldReady(at,start,duration,bad!=6,bad!=7,elapsed),
+                "future/invalid stamp, exhausted clock, invalid duration, unskippable or released hold cannot stop a direct movie"))return false;
+        }
+        if(!check(!NativeDirectMovieSkipReady(0x5000,ctx,base,elapsed),"direct movie completion requires a live owned receiver lease"))return false;
+    }
     std::array<uint8_t,sizeof(PPCContext)> context;std::memcpy(context.data(),&ctx,sizeof(ctx));
     std::array<uint8_t,8192> stack;std::memcpy(stack.data(),base+ctx.r1.u32-8192,8192);
     for(unsigned user=0;user<4;++user){

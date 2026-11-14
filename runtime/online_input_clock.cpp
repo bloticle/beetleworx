@@ -199,7 +199,7 @@ bool RunAgreedNativeInputClockHelper(PPCContext& ctx,uint8_t* base,PPCFunc* orig
     const bool start=original==__imp__sub_831C14E0 && caller==0x827C62BC;
     const bool elapsed=original==__imp__sub_831C1558 && (caller==0x827C6054 || caller==0x827C628C);
     const bool cutscene=(original==__imp__sub_831C14E0 || original==__imp__sub_831C1558) &&
-        ((original==__imp__sub_831C14E0 && caller==0x82B211B8) || (original==__imp__sub_831C1558 && caller==0x82B22628)) &&
+        ((original==__imp__sub_831C14E0 && (caller==0x82B211B8 || caller==0x82B1EF94)) || (original==__imp__sub_831C1558 && caller==0x82B22628)) &&
         NativeCutsceneSkipTimerOwned(ctx.r3.u32,caller,ctx,base);
     const bool movie=((original==__imp__sub_831C14E0 && caller==0x82B1DD88) ||
         (original==__imp__sub_831C1558 && caller==0x82B1E070)) && NativeMovieSkipTimerOwned(ctx.r3.u32,caller,ctx,base);

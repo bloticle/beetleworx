@@ -672,7 +672,7 @@ RoomGameplayAdmission NativeRoomGameplay::Prepare(PPCContext& ctx,uint8_t* base,
             REXLOG_INFO("Native Room movie sequence target retained: tick {} object {:08X}; native movie state {}, no gameplay callbacks",s.room->next_tick(),object,mode);
         }
         TracePrivateNativeCutsceneUi(s.input_epoch,ctx,base,s.registry);
-        const bool target_available=!s.return_pending && ((mode==6 && NativeCutsceneSkipTargetAvailable(s.registry,ctx,base)) ||
+        const bool target_available=!s.return_pending && (((mode==6 || mode==1) && NativeCutsceneSkipTargetAvailable(s.registry,ctx,base)) ||
             (mode==2 && NativeMovieAcceptTargetAvailable(s.registry,ctx,base)));
         if(target_available!=s.skip_target_available || (target_available && s.skip_target_mode!=mode)){
             s.skip_receiver.reset();s.movie_receiver.reset();s.skip_gate={};s.skip_target_available=target_available;s.skip_target_mode=target_available?mode:0;
@@ -830,7 +830,10 @@ bool NativeRoomGameplay::Deliver(PPCContext& ctx,uint8_t* base){
                 }
             }
         }
-        s.delivered=true;return true; // Character gameplay callbacks remain quarantined.
+        s.delivered=true;
+        if(s.skip_target_mode==1 && s.skip_receiver && !ServiceNativeDirectMovieSkip(s.registry,ctx,base))
+            return s.Stop("Native direct movie held-skip completion lost its agreed owner");
+        return true; // Character gameplay callbacks remain quarantined.
     }
     if(!s.Actions(*s.consumed,ctx,base))return s.Stop("Native retail action bindings changed before delivery");
     if(!s.ButtonFrame(*s.consumed,ctx,base))return s.Stop("Native retail button frame failed delivery admission");

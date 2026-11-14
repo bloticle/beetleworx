@@ -385,6 +385,7 @@ std::unique_ptr<rex::input::InputSystem> MakePrivateRoomInput(Room& room){
             if(cutscene_fixture){
                 const bool boundary_move=REXCVAR_GET(em2_probe_cutscene_boundary_move);
                 if(REXCVAR_GET(em2_native_lobby_qa_movie_sequence) && REXCVAR_GET(em2_probe_cutscene_skip_input) && REXCVAR_GET(em2_native_lobby_qa_movie_skip_delay)>0 && room_.local_peer()==3 && elapsed>=280 && elapsed<284){state->gamepad.buttons=0x1000;phase="early movie Accept tap";}
+                if(REXCVAR_GET(em2_native_lobby_qa_direct_movie) && REXCVAR_GET(em2_probe_cutscene_skip_input) && room_.local_peer()==3 && elapsed>=280 && elapsed<440){state->gamepad.buttons=0x1000;phase="fresh direct movie skip hold";}
                 if(REXCVAR_GET(em2_native_lobby_qa_movie_sequence) && REXCVAR_GET(em2_probe_cutscene_skip_input) && room_.local_peer()==3 && elapsed>=330 && elapsed<350){state->gamepad.buttons=0x1000;phase="fresh movie Accept hold";}
                 if(elapsed>=200 && elapsed<204){state->gamepad.buttons=0x1000;phase="jump before cutscene";}
                 if(elapsed>=660 && elapsed<680){state->gamepad.buttons=0x1000;phase="held jump across cutscene";}

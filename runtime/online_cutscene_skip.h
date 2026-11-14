@@ -35,6 +35,11 @@ private:
 };
 bool NativeCutsceneSkipTargetAvailable(uint32_t registry,PPCContext&,uint8_t*);
 bool NativeCutsceneSkipTimerOwned(uint32_t timer,uint32_t caller,PPCContext&,uint8_t*);
+// State 1 retains the native held-skip fields but has no completion consumer.
+// An owned agreed update may stop playback after its configured hold duration;
+// original movie update/exit remains responsible for completion and controls.
+bool NativeDirectMovieSkipReady(uint32_t object,PPCContext&,uint8_t*,float& elapsed);
+bool ServiceNativeDirectMovieSkip(uint32_t registry,PPCContext&,uint8_t*);
 class NativeMovieAcceptReceiver {
 public:
     NativeMovieAcceptReceiver();~NativeMovieAcceptReceiver();
