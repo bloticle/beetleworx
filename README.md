@@ -16,6 +16,10 @@ In the online demo, open **Online Multiplayer** at the Epic Mickey 2 title menu.
 
 Use **Support & Updates** to review and save a diagnostic report before opening a [GitHub issue](https://github.com/Bloticle/beetleworx/issues). Nothing is submitted automatically. The menu can also check for and download newer releases. Verified updates install on normal exit, preserving your saves and game files.
 
+## Demo.10 host/join fix
+
+Host, Join and resume requests from the desktop window now execute on the original game-menu thread. This fixes the incorrect “Return to the title menu” error caused by checking thread-local game state on the desktop UI thread. The title-menu validation remains enabled.
+
 ## Demo.9 online menu replacement
 
 Online Multiplayer now opens an ImGui desktop window. The native main-menu controls hide while it is open. Hosting, room-code entry, Discord invites, the sixteen-player roster, name/color controls, host kick confirmation, text chat and voice settings share this window. Networking and the original save-to-game handoff use the existing backend. Mouse activation and connection/lobby/error layouts have focused headless checks; a complete multiplayer playthrough remains unverified. Controller navigation is supported; desktop text fields currently require a keyboard.

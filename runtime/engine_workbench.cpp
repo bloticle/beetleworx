@@ -33,6 +33,7 @@
 #include <optional>
 #include <sstream>
 #include <vector>
+#include <thread>
 namespace {
 enum class Panel {Closed,Settings,Console,Online};
 std::atomic<Panel> requested{Panel::Closed};
@@ -259,7 +260,7 @@ void em2::ResetEngineWorkbenchInput(){f1_held=console_held=false;pad_armed=false
 void em2::SetEngineWorkbenchFocused(bool focused){window_focused.store(focused);ResetEngineWorkbenchInput();}
 bool em2::EngineWorkbenchOption(int id,int command,int& result){
     if(id!=2500)return false;
-    if(command==-2){result=requested.load()==Panel::Online;return true;}
+    if(command==-2){DispatchDesktopOnlineStart();result=requested.load()==Panel::Online;return true;}
     if(command==1)ShowEngineSettings();else if(command==2)ShowEngineConsole();
     else if(command==3){requested_page=5;ShowEngineSettings();}
     else if(command==4)OpenOnlineWorkbench();else if(command==0)CloseWorkbench();
@@ -403,6 +404,13 @@ bool em2::TestEngineWorkbench(){
 }
 
 bool em2::TestOnlineDesktopMenu(){
+    // Render-thread requests must carry owned data and run only when the guest
+    // heartbeat consumes them, never on the producer's thread-local context.
+    TakeDesktopOnlineStart();
+    std::thread producer([]{QueueDesktopOnlineStart(20,"ABCD2345");});producer.join();
+    const auto queued=TakeDesktopOnlineStart();
+    if(!queued || queued->choice!=20 || queued->code!="ABCD2345" || TakeDesktopOnlineStart())return false;
+
     auto* previous=ImGui::GetCurrentContext();auto* context=ImGui::CreateContext();
     auto& io=ImGui::GetIO();io.IniFilename=nullptr;io.LogFilename=nullptr;io.DeltaTime=1.f/60;io.Fonts->Build();
     const auto saved_panel=requested.load();bool ok=true;
@@ -423,7 +431,7 @@ bool em2::TestOnlineDesktopMenu(){
     CloseWorkbench();EngineWorkbenchOption(2500,-2,visible);ok=ok && visible==0;
     online_ui_fixture=-1;online_profile_loaded=false;online_ui_error.clear();online_message[0]=0;
     ImGui::DestroyContext(context);ImGui::SetCurrentContext(previous);SetPanel(saved_panel);
-    if(ok)REXLOG_INFO("Desktop online menu passed: idle/preparing/connecting/lobby/error draws, sixteen-player rows at 640/1280/3840 widths, real ImGui mouse Host activation and exclusive window visibility");
+    if(ok)REXLOG_INFO("Desktop online menu passed: idle/preparing/connecting/lobby/error draws, sixteen-player rows at 640/1280/3840 widths, real ImGui mouse Host activation, cross-thread start queue and exclusive window visibility");
     else REXLOG_ERROR("Desktop online menu draw/input regression failed");
     return ok;
 }

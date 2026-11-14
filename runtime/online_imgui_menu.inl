@@ -3,6 +3,24 @@
 thread_local int online_ui_fixture=-1;
 thread_local bool online_ui_host_clicked=false;
 ImVec2 online_host_min{},online_host_max{};
+struct DesktopOnlineStart {int choice=0;std::string code;};
+std::mutex desktop_start_mutex;
+std::optional<DesktopOnlineStart> desktop_start;
+void QueueDesktopOnlineStart(int choice,std::string code={}){
+    std::lock_guard lock(desktop_start_mutex);
+    if(!desktop_start)desktop_start=DesktopOnlineStart{choice,std::move(code)};
+}
+std::optional<DesktopOnlineStart> TakeDesktopOnlineStart(){
+    std::lock_guard lock(desktop_start_mutex);auto result=std::move(desktop_start);desktop_start.reset();return result;
+}
+// Only called by the native GFx heartbeat on the original guest menu thread.
+void DispatchDesktopOnlineStart(){
+    if(auto request=TakeDesktopOnlineStart()){
+        if(request->choice==20)em2::net::JoinNativeOnlineRoom(request->code);
+        else {int result=0;em2::net::NativeOnlineMenuOption(2700,request->choice,result);}
+    }
+}
+
 int OnlineOption(int id,int choice=-1){
     if(online_ui_fixture>=0){
         if(id==2700){if(choice==1)online_ui_host_clicked=true;return online_ui_fixture;}
@@ -17,6 +35,9 @@ int OnlineOption(int id,int choice=-1){
         else if(id==2711)text="ABCD2345";
         else if(id==2771){text="Player "+std::to_string(choice/128+1);choice%=128;}
         return choice>=0 && size_t(choice)<text.size()?uint8_t(text[size_t(choice)]):0;
+    }
+    if(id==2700 && (choice==1 || choice==2 || choice==4 || choice==12)){
+        QueueDesktopOnlineStart(choice);return 0;
     }
     int value=0;em2::net::NativeOnlineMenuOption(id,choice,value);return value;
 }
@@ -33,6 +54,7 @@ char online_code[64]{},online_name[100]{},online_message[241]{};
 bool online_profile_loaded=false,online_open_kick=false;
 std::string online_ui_error;
 void CloseWorkbench(){
+    TakeDesktopOnlineStart();
     if(requested.load()==Panel::Online)OnlineOption(2700,6);
     SetPanel(Panel::Closed);
 }
@@ -89,7 +111,7 @@ void DrawOnlineLobby(){
             const bool enter=ImGui::InputTextWithHint("##room-code","Room code",online_code,sizeof(online_code),ImGuiInputTextFlags_CharsUppercase|ImGuiInputTextFlags_EnterReturnsTrue);
             if(ImGui::Button("Paste code")){if(const auto* text=ImGui::GetClipboardText())snprintf(online_code,sizeof(online_code),"%s",text);}
             ImGui::SameLine();
-            if(ImGui::Button("Join Game") || enter){online_profile_loaded=false;online_ui_error.clear();em2::net::JoinNativeOnlineRoom(online_code);}
+            if(ImGui::Button("Join Game") || enter){online_profile_loaded=false;online_ui_error.clear();QueueDesktopOnlineStart(20,online_code);}
             ImGui::EndTable();
         }
         ImGui::Spacing();
