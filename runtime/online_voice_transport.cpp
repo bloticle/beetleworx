@@ -16,6 +16,7 @@ VoiceKeys::~VoiceKeys(){SecureZeroMemory(to_host.data(),to_host.size());SecureZe
 namespace {
 using Bytes=std::vector<uint8_t>;
 constexpr size_t Header=16,Tag=16,MaxDatagram=Header+Tag+11+kVoicePacketBytes;
+static_assert(MaxDatagram<=kVoiceDatagramBytes);
 enum class Kind:uint8_t {Hello=1,Ack,Audio};
 void Put(Bytes& data,uint64_t value,unsigned count){for(unsigned i=count;i;--i)data.push_back(uint8_t(value>>(8*(i-1))));}
 uint64_t Read(std::span<const uint8_t> data,size_t at,unsigned count){uint64_t value=0;for(unsigned i=0;i<count;++i)value=(value<<8)|data[at+i];return value;}
@@ -75,6 +76,7 @@ bool Audio(std::span<const uint8_t> data,unsigned& peer,VoicePacket& p){
 }
 struct VoiceTransport::Impl {
     SOCKET socket=INVALID_SOCKET;bool host=false;unsigned local=0;uint16_t bound=0,roster=0;
+    std::shared_ptr<VoiceDatagramChannel> datagrams;
     std::array<uint8_t,16> session{};std::array<std::unique_ptr<Link>,16> links;
     std::array<Rate,16> media_rate;
     std::array<std::deque<VoicePacket>,16> incoming;VoiceTransportStats stats;Rate local_rate;VoiceTime hello_at{};
@@ -85,8 +87,10 @@ struct VoiceTransport::Impl {
         int size=sizeof(address.storage);if(getsockname(socket,reinterpret_cast<sockaddr*>(&address.storage),&size)!=0){Close(socket);return false;}bound=address.Port();return bound!=0;
     }
     bool Send(Link& link,unsigned route,Kind kind,std::span<const uint8_t> plain){
+        if(datagrams && !datagrams->ready())return false;
         Bytes packet;if(!link.Seal(kind,route,host,session,plain,packet))return false;
-        const auto n=sendto(socket,reinterpret_cast<const char*>(packet.data()),int(packet.size()),0,reinterpret_cast<const sockaddr*>(&link.endpoint.storage),link.endpoint.size);
+        const auto n=datagrams?(datagrams->Send(host?route:1,packet)?int(packet.size()):SOCKET_ERROR):
+            sendto(socket,reinterpret_cast<const char*>(packet.data()),int(packet.size()),0,reinterpret_cast<const sockaddr*>(&link.endpoint.storage),link.endpoint.size);
         if(n!=int(packet.size())){++stats.dropped;return false;}++stats.sent;return true;
     }
     void Remember(unsigned peer,const VoicePacket& p){auto& q=incoming[peer-1];if(q.size()==8){q.pop_front();++stats.dropped;}q.push_back(p);}
@@ -97,6 +101,10 @@ struct VoiceTransport::Impl {
 };
 VoiceTransport::VoiceTransport():impl_(std::make_unique<Impl>()){}
 VoiceTransport::~VoiceTransport()=default;
+bool VoiceTransport::UseDatagramChannel(std::shared_ptr<VoiceDatagramChannel> channel){
+    auto& s=*impl_;if(!channel || s.socket!=INVALID_SOCKET || s.datagrams)return false;
+    s.datagrams=std::move(channel);return true;
+}
 bool VoiceTransport::Host(std::string_view address,const std::array<uint8_t,16>& session){
     auto& s=*impl_;const auto endpoint=ParseNumericAddress(address,true);if(!endpoint || !Nonzero(session) || !s.Bind(*endpoint))return false;
     s.host=true;s.local=1;s.session=session;s.roster=1;return true;
@@ -115,7 +123,7 @@ bool VoiceTransport::Join(std::string_view address,uint16_t port,unsigned peer,c
 }
 void VoiceTransport::RemovePeer(unsigned peer){if(peer>=2 && peer<=16){impl_->links[peer-1].reset();impl_->incoming[peer-1].clear();}}
 void VoiceTransport::SetRoster(uint16_t mask){auto& s=*impl_;s.roster=mask;for(unsigned peer=1;peer<=16;++peer)if(!(mask&(1u<<(peer-1))))s.incoming[peer-1].clear();}
-bool VoiceTransport::ready()const{return impl_->socket!=INVALID_SOCKET && (impl_->host || (impl_->links[0] && impl_->links[0]->ready));}
+bool VoiceTransport::ready()const{return impl_->socket!=INVALID_SOCKET && (!impl_->datagrams || impl_->datagrams->ready()) && (impl_->host || (impl_->links[0] && impl_->links[0]->ready));}
 bool VoiceTransport::peer_ready(unsigned peer)const{return peer>=2 && peer<=16 && impl_->host && impl_->links[peer-1] && impl_->links[peer-1]->ready;}
 uint16_t VoiceTransport::port()const{return impl_->bound;}
 VoiceTransportStats VoiceTransport::stats()const{return impl_->stats;}
@@ -128,14 +136,23 @@ void VoiceTransport::Poll(VoiceTime now){
     if(!s.host && s.links[0] && (s.hello_at==VoiceTime{} || now-s.hello_at>std::chrono::seconds(1))){s.hello_at=now;s.Send(*s.links[0],s.local,Kind::Hello,{});}
     for(unsigned work=0;work<64;++work){
         std::array<uint8_t,MaxDatagram+1> bytes{};NumericAddress from;from.size=sizeof(from.storage);
-        const auto size=recvfrom(s.socket,reinterpret_cast<char*>(bytes.data()),int(bytes.size()),0,reinterpret_cast<sockaddr*>(&from.storage),&from.size);
-        if(size==SOCKET_ERROR){if(WSAGetLastError()==WSAEWOULDBLOCK)break;++s.stats.rejected;continue;}
+        int size=0;unsigned authenticated_sender=0;
+        if(s.datagrams){
+            auto datagram=s.datagrams->Receive();if(!datagram)break;
+            if(datagram->size>MaxDatagram){++s.stats.rejected;continue;}
+            authenticated_sender=datagram->sender;size=datagram->size;
+            std::copy_n(datagram->data.begin(),size,bytes.begin());
+        }else{
+            size=recvfrom(s.socket,reinterpret_cast<char*>(bytes.data()),int(bytes.size()),0,reinterpret_cast<sockaddr*>(&from.storage),&from.size);
+            if(size==SOCKET_ERROR){if(WSAGetLastError()==WSAEWOULDBLOCK)break;++s.stats.rejected;continue;}
+        }
         ++s.stats.received;
         if(size<int(Header+Tag) || size>MaxDatagram || std::memcmp(bytes.data(),"BWVC",4) || bytes[4]!=1 || bytes[7]!=(s.host?0:1)){++s.stats.rejected;continue;}
         const auto route=unsigned(bytes[6]);const auto kind=Kind(bytes[5]);
         if(route<2 || route>16 || !(s.roster&(1u<<(route-1))) || (!s.host && route!=s.local) || (kind!=Kind::Hello && kind!=Kind::Ack && kind!=Kind::Audio)){++s.stats.rejected;continue;}
         auto* link=s.host?s.links[route-1].get():s.links[0].get();
-        if(!link || !SameIp(from,link->expected) || (!s.host && !SameEndpoint(from,link->expected))){++s.stats.rejected;continue;}
+        if(!link || (s.datagrams?authenticated_sender!=(s.host?route:1):
+            (!SameIp(from,link->expected) || (!s.host && !SameEndpoint(from,link->expected))))){++s.stats.rejected;continue;}
         Bytes plain;const auto packet=std::span(bytes).first(size);
         if(!link->Open(packet,s.session,plain)){++s.stats.rejected;continue;}
         if(kind==Kind::Hello && s.host && plain.empty()){
@@ -145,7 +162,7 @@ void VoiceTransport::Poll(VoiceTime now){
         }
         if(kind==Kind::Ack && !s.host && plain.empty()){link->replay.Commit(Read(packet,8,8));link->ready=true;continue;}
         unsigned speaker=0;VoicePacket audio;
-        if(kind!=Kind::Audio || !link->ready || !SameEndpoint(from,link->endpoint) || !Audio(plain,speaker,audio) ||
+        if(kind!=Kind::Audio || !link->ready || (!s.datagrams && !SameEndpoint(from,link->endpoint)) || !Audio(plain,speaker,audio) ||
            !(s.roster&(1u<<(speaker-1))) || speaker==s.local || (s.host && speaker!=route)){++s.stats.rejected;continue;}
         link->replay.Commit(Read(packet,8,8));if(!s.media_rate[speaker-1].Take(now)){++s.stats.dropped;continue;}
         s.Remember(speaker,audio);if(s.host)s.Relay(speaker,audio);
@@ -202,6 +219,51 @@ bool TestOnlineVoiceTransport(){
     const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(2);while(!fresh->ready() && std::chrono::steady_clock::now()<end){fresh->Poll();channels[0]->Poll();std::this_thread::sleep_for(std::chrono::milliseconds(1));}
     check(fresh->ready(),"replacement endpoint authenticates independently");
     check(raw(valid),"old key replay after replacement attempted");settle();check(host.incoming[1].empty(),"replaced key cannot authenticate");
+    // Exercise the same cipher and replay path through an authenticated media
+    // channel contract. This is not a WebSocket or Internet transport test.
+    struct MediaHub {std::array<std::deque<VoiceDatagram>,16> pending;std::array<bool,16> connected{};};
+    struct MediaEndpoint final:VoiceDatagramChannel {
+        std::shared_ptr<MediaHub> hub;unsigned peer;
+        MediaEndpoint(std::shared_ptr<MediaHub> value,unsigned identity):hub(std::move(value)),peer(identity){}
+        bool ready()const override{return hub->connected[peer-1];}
+        bool Send(unsigned destination,std::span<const uint8_t> bytes)override{
+            if(!ready() || !destination || destination>16 || destination==peer || !hub->connected[destination-1] ||
+               (peer!=1 && destination!=1) || bytes.size()>kVoiceDatagramBytes)return false;
+            VoiceDatagram datagram;datagram.sender=peer;datagram.size=uint16_t(bytes.size());std::copy(bytes.begin(),bytes.end(),datagram.data.begin());
+            auto& queue=hub->pending[destination-1];if(queue.size()>=128)queue.pop_front();queue.push_back(datagram);return true;
+        }
+        std::optional<VoiceDatagram> Receive()override{
+            auto& queue=hub->pending[peer-1];if(queue.empty())return {};auto next=queue.front();queue.pop_front();return next;
+        }
+    };
+    auto media=std::make_shared<MediaHub>();media->connected.fill(true);channels.clear();
+    for(unsigned peer=1;peer<=16;++peer){
+        auto transport=std::make_unique<VoiceTransport>();
+        if(!check(transport->UseDatagramChannel(std::make_shared<MediaEndpoint>(media,peer)),"separate media adapter installed before socket/key setup"))return false;
+        channels.push_back(std::move(transport));
+    }
+    if(!check(channels[0]->Host("127.0.0.1",session),"media host keeps existing key and roster ownership"))return false;
+    channels[0]->SetRoster(0xFFFF);
+    for(unsigned peer=2;peer<=16;++peer){VoiceKeys keys;
+        if(!check(channels[0]->AddPeer(peer,"127.0.0.1",keys) && channels[peer-1]->Join("127.0.0.1",channels[0]->port(),peer,session,keys),"media peers use fresh per-peer duplex keys"))return false;
+        channels[peer-1]->SetRoster(0xFFFF);
+    }
+    if(!check(pump([&]{return std::all_of(channels.begin(),channels.end(),[](const auto& channel){return channel->ready();});}),"sixteen encrypted handshakes traverse the media channel"))return false;
+    for(unsigned peer=1;peer<=16;++peer)check(channels[peer-1]->Send(speech[peer-1]),"real encoded voice enters separate media transport");
+    if(!check(pump([&]{return std::all_of(channels.begin(),channels.end(),[&](const auto& channel){return queued(*channel)==15;});}),"media transport preserves all fifteen other speakers"))return false;
+    for(auto& transport:channels)transport->TakeReceived();
+    auto& media_guest=*channels[1]->impl_;auto& media_host=*channels[0]->impl_;
+    Bytes media_packet;check(media_guest.links[0]->Seal(Kind::Audio,2,false,session,Audio(2,speech[1]),media_packet),"media comparison packet uses actual authenticated cipher");
+    VoiceDatagram claimed;claimed.sender=3;claimed.size=uint16_t(media_packet.size());std::copy(media_packet.begin(),media_packet.end(),claimed.data.begin());
+    const auto before_rejected=media_host.stats.rejected;media->pending[0].push_back(claimed);channels[0]->Poll();
+    check(media_host.stats.rejected==before_rejected+1 && queued(*channels[0])==0,"valid ciphertext cannot override the channel's admitted sender");
+    claimed.sender=2;media->pending[0].push_back(claimed);channels[0]->Poll();
+    check(queued(*channels[0])==1,"wrong channel identity did not poison authenticated replay state");
+    media->pending[0].push_back(claimed);channels[0]->Poll();
+    check(queued(*channels[0])==1,"exact replay is rejected on the media channel as on UDP");
+    media->connected[1]=false;
+    check(!channels[1]->ready() && !channels[1]->Send(speech[1]),"media disconnect cannot report voice readiness or accept speech");
+    check(!channels[0]->UseDatagramChannel(std::make_shared<MediaEndpoint>(media,1)),"active transport cannot switch media ownership in place");
     REXLOG_INFO("Voice UDP {} {} checks: sixteen real encrypted sockets, host relay, actual Opus-to-PCM, sender/session/tag/replay rejection, reorder/rate/backlog/removal/rekey. No Room/native-gameplay or Internet relay assertion",ok?"passed":"FAILED",checks);
     return ok;
 }
