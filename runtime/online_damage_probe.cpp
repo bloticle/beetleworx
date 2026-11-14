@@ -5,6 +5,7 @@
 #include "guest_read_batch.h"
 #include "guest_shutdown.h"
 #include "simulation.h"
+#include "allocation_trace.h"
 #include "players.h"
 #include "ppc_context.h"
 #include <rex/cvar.h>
@@ -26,6 +27,7 @@ PPC_EXTERN_FUNC(__imp__sub_82821AC8);
 PPC_EXTERN_FUNC(__imp__sub_828218B0);
 PPC_EXTERN_FUNC(sub_827340E0);
 PPC_EXTERN_FUNC(__imp__sub_827621C0);
+PPC_EXTERN_FUNC(__imp__sub_82770F00);
 namespace {
 using Actor=em2::net::OwnedActorInput;
 bool Readable(uint32_t address,size_t bytes,uint8_t* base){return base && address>=4096 && uint64_t(address)+bytes<=0x100000000ull && em2::GuestReadBatch::Readable(base+address,bytes);}
@@ -40,7 +42,7 @@ struct Borrow {
  }
  ~Borrow(){if(memory)std::memcpy(memory,bytes.data(),bytes.size());ctx=saved;_mm_setcsr(csr);SetLastError(error);}
 };
-struct Probe {em2::net::Room* room=nullptr;Actor actor{};uint32_t peer=0;bool sent=false;};
+struct Probe {em2::net::Room* room=nullptr;Actor actor{};uint32_t peer=0;uint64_t load=0;bool sent=false;};
 thread_local Probe probe;
 bool Health(const Actor& actor,PPCContext& ctx,uint8_t* base,uint32_t& value){
  Borrow borrow(ctx,base);if(!borrow.memory || !Readable(actor.entity,4,base) || !Readable(0x833DBB14,4,base))return false;
@@ -81,12 +83,12 @@ bool em2::net::TickPrivateNativeExtraDamage(PPCContext& ctx,uint8_t* base){
  if(probe.room!=room)probe={room};
  auto reject=[&](const char* why){REXLOG_ERROR("Native lobby QA rejected: extra damage {}",why);game->ObservationFailed();};
  if(probe.sent || peer<3 || peer>16 || REXCVAR_GET(em2_native_lobby_qa_restart_count)!=1 ||
-    REXCVAR_GET(em2_native_lobby_qa_damage_player) || !REXCVAR_GET(em2_native_lobby_qa_level_target).empty() || !REXCVAR_GET(em2_native_lobby_qa_level_route).empty()){
+    (REXCVAR_GET(em2_native_lobby_qa_damage_player) && (REXCVAR_GET(em2_native_lobby_qa_damage_player)!=4 || peer!=3 || room->lobby().players.size()!=3)) || !REXCVAR_GET(em2_native_lobby_qa_level_target).empty() || !REXCVAR_GET(em2_native_lobby_qa_level_route).empty()){
   reject("fixture configuration or repeated dispatch");return true;
  }
  Actor actor;uint32_t before=0,after=0;
  if(!game->OwnedActorForPeer(peer,ctx,base,actor) || !Health(actor,ctx,base,before) || !before){reject("live target or native health query unavailable");return true;}
- probe.sent=true;probe.actor=actor;probe.peer=peer;
+ probe.sent=true;probe.actor=actor;probe.peer=peer;probe.load=em2::CurrentNativeLoadGeneration();
  if(!Damage(actor,ctx,base) || !Health(actor,ctx,base,after)){reject("native damage/query did not finish");return true;}
  REXLOG_INFO("Private extra damage dispatched: tick {} peer {} generation {} handle {:08X} entity {:08X} health {}->{}; original native Damage event, no forced reload or death interception",tick,peer,actor.generation,actor.handle,actor.entity,before,after);
  return true;
@@ -103,11 +105,20 @@ void em2::net::ObservePrivateExtraDamage(uint64_t tick,PPCContext& ctx,uint8_t* 
 
  if(!REXCVAR_GET(em2_probe_extra_damage_peer) || !probe.sent || !REXCVAR_GET(em2_private_profile) || !NativeOnlineMenuQaActive())return;
  auto* game=CurrentNativeRoomGameplay();if(!game || PrivateNativeMenuRoom()!=probe.room)return;
+ if(REXCVAR_GET(em2_native_lobby_qa_damage_player)==4 && em2::CurrentNativeLoadGeneration()!=probe.load){
+  REXLOG_INFO("Private whole-party damage target retired: original load {} current load {}; observer stopped without retargeting replacement actors",probe.load,em2::CurrentNativeLoadGeneration());probe.sent=false;return;
+ }
  Actor current;uint32_t life=0;
  if(!game->OwnedActorForPeer(probe.peer,ctx,base,current) || current.generation!=probe.actor.generation || current.entity!=probe.actor.entity || !Health(current,ctx,base,life)){
   REXLOG_ERROR("Private extra damage target lost: tick {} peer {} generation {}; no replacement retargeted",tick,probe.peer,probe.actor.generation);game->ObservationFailed();return;
  }
  REXLOG_INFO("Private extra damage health: tick {} peer {} generation {} life {}; native property query",tick,probe.peer,current.generation,life);
+ if(REXCVAR_GET(em2_native_lobby_qa_damage_player)==4 && tick==REXCVAR_GET(em2_native_lobby_qa_restart_tick)){
+  Borrow borrow(ctx,base);
+  if(!borrow.memory || !Readable(0x833DAD98,4,base) || !PPC_LOAD_U32(0x833DAD98)){game->ObservationFailed();return;}
+  ctx.r3.u64=PPC_LOAD_U32(0x833DAD98);__imp__sub_82770F00(ctx,base);
+  REXLOG_INFO("Private whole-party native decision: tick {} state {} native dead {} extra life {}; original control-state getter after fatal native damage",tick,ctx.r3.u32,Readable(0x833E36CC,4,base)?PPC_LOAD_U32(0x833E36CC):0u,life);
+ }
 }
 
 void em2::net::TracePrivateExtraPosition(PPCContext& ctx,uint8_t* base,const char* operation,unsigned offset){

@@ -6,7 +6,7 @@ param(
  [switch]$ScriptedInput,[switch]$ChatProbe,[switch]$VoiceProbe,[switch]$ButtonTaskProbe,[switch]$PolicyCycle,[switch]$CaptureShutdownHang,
  [switch]$NavigationTrace,[switch]$FaceTargetPoison,[switch]$UnfixedFaceTarget,[switch]$NativeReload,
  [ValidateRange(0,100000)][int]$CheckpointReloadTick=0,
- [ValidateSet(0,1,2,3)][int]$DamagePlayer=0,
+ [ValidateSet(0,1,2,3,4)][int]$DamagePlayer=0,
  [ValidateRange(0,16)][int]$DamageExtraPeer=0,
  [ValidateRange(-1,16)][int]$PipelineCreationThreads=-1,
  [ValidateRange(1,4)][int]$CheckpointReloadCount=1,
@@ -25,7 +25,8 @@ param(
  [ValidateRange(120,600)][int]$StartupTimeoutSeconds=360
 )
 $ErrorActionPreference='Stop'
-if($DamageExtraPeer -and ($DamageExtraPeer -lt 3 -or $DamageExtraPeer -gt $Players -or $DamagePlayer -or !$ScriptedInput -or !$CheckpointReloadTick -or $CheckpointReloadCount -ne 1 -or $NativeLevelTarget -or $NativeLevelTargets.Count -or $PolicyCycle -or $ReenterAfterReturn -or $CloseParticipant -or $PartialDeliveryParticipant)){throw 'Extra damage requires one real extra peer, one scheduled native damage action, scripted input, and no other fixture.'}
+if($DamagePlayer -eq 4){if($Players -ne 3 -or ($DamageExtraPeer -and $DamageExtraPeer -ne 3)){throw 'Whole-party damage requires exactly three players and extra peer 3.'};$DamageExtraPeer=3}
+if($DamageExtraPeer -and ($DamageExtraPeer -lt 3 -or $DamageExtraPeer -gt $Players -or ($DamagePlayer -and $DamagePlayer -ne 4) -or !$ScriptedInput -or !$CheckpointReloadTick -or $CheckpointReloadCount -ne 1 -or $NativeLevelTarget -or $NativeLevelTargets.Count -or $PolicyCycle -or $ReenterAfterReturn -or $CloseParticipant -or $PartialDeliveryParticipant)){throw 'Extra damage requires one real extra peer, one scheduled native damage action, scripted input, and no other fixture.'}
 if($DamagePlayer -and (!$ScriptedInput -or !$CheckpointReloadTick -or $CheckpointReloadCount -ne 1 -or $NativeLevelTarget -or $NativeLevelTargets.Count -or $PolicyCycle -or $ReenterAfterReturn -or $CloseParticipant -or $PartialDeliveryParticipant)){throw 'Damage fixture requires one scheduled original damage action without a level route, policy cycle, or disconnect injection.'}
 if($PolicyCycle -and (!$ScriptedInput -or !$ButtonTaskProbe -or $Players -ne 4 -or $CheckpointReloadTick -or $ReenterAfterReturn -or $CloseParticipant -or $PartialDeliveryParticipant)){throw 'PolicyCycle requires four isolated scripted players and task probes, without reload or fault injection.'}
 if($RecoveryController -and !$RecoveryPrompt){throw 'Controller recovery QA requires RecoveryPrompt mode; the HUD auto-click will be disabled.'}
@@ -77,7 +78,7 @@ $record.capture_shutdown_hang=[bool]$CaptureShutdownHang
 $record.cooperative_shutdown_override=[bool]$CooperativeShutdown
 $record.damage_extra_peer=$DamageExtraPeer;
 $record.extra_dead_input=[bool]$DamageExtraPeer;$record.extra_oswald=[bool]$ExtraOswald;$record.mixed_characters=!$ExtraOswald;
-$record.damage_player=$DamagePlayer;$record.pipeline_creation_threads=$PipelineCreationThreads
+$record.whole_party_damage=($DamagePlayer -eq 4);$record.damage_player=$DamagePlayer;$record.pipeline_creation_threads=$PipelineCreationThreads
 $record.commit_guard_mb=$MinimumFreeCommitMB;$record.minimum_free_commit_mb=$null
 $record.memory_guard_mb=$MinimumFreeMemoryMB;$record.memory_samples=@();$record.minimum_free_memory_mb=$null;$record.peak_owned_working_set_mb=0;$record.peak_owned_private_mb=0
 $nextMemorySample=[DateTime]::MinValue

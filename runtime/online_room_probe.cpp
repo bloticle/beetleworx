@@ -344,7 +344,7 @@ std::unique_ptr<rex::input::InputSystem> MakePrivateRoomInput(Room& room){
             const auto damage_player=REXCVAR_GET(em2_native_lobby_qa_damage_player);
             const auto extra_damage=REXCVAR_GET(em2_probe_extra_damage_peer);
             const bool damage_fixture=damage_player || extra_damage;
-            const bool damage_target=room_.local_peer()==(damage_player?damage_player:extra_damage);
+            const bool damage_target=damage_player==4 || room_.local_peer()==(damage_player?damage_player:extra_damage);
             const bool active=room_.lobby().players.size()>2?room_.local_peer()>=3:room_.local_peer()==2;
             const int direction=room_.lobby().players.size()>2 && !(room_.local_peer()&1)?-1:1;
             if(active){

@@ -7,6 +7,7 @@
 #include "online_runtime.h"
 #include "online_native_menu.h"
 #include "online_room_probe.h"
+#include "online_room.h"
 #include "online.h"
 #include "simulation.h"
 #include "players.h"
@@ -35,7 +36,8 @@ PPC_EXTERN_FUNC(__imp__sub_82705AF8);
 REXCVAR_DEFINE_BOOL(em2_verify_game_console_vm,false,"Debug","Run pure arithmetic/string/error/stack console probes in the real game VM; no gameplay actions");
 REXCVAR_DEFINE_UINT32(em2_native_lobby_qa_restart_tick,0xFFFFFFFFu,"Debug","Private validated loopback QA only: invoke the original RestartCurrentLevel at this agreed native script-scheduler tick; maximum disables");
 REXCVAR_DEFINE_BOOL(em2_native_lobby_qa_checkpoint_reload,false,"Debug","Private validated loopback QA: compare native checkpoint-memory restoration with bare level restart");
-REXCVAR_DEFINE_UINT32(em2_native_lobby_qa_damage_player,0,"Debug","Private native lobby scheduler fixture only: damage retail player 1 or 2 (3 means both) at the requested restart tick; zero disables");
+REXCVAR_DEFINE_UINT32(em2_native_lobby_qa_damage_player,0,"Debug","Private native lobby scheduler fixture only: damage retail player 1 or 2 (3 means both, 4 means all three private test humans) at the requested restart tick; zero disables");
+REXCVAR_DECLARE(uint32_t,em2_probe_extra_damage_peer);
 REXCVAR_DEFINE_UINT32(em2_native_lobby_qa_restart_count,1,"Debug","Private validated loopback QA only: one through four scheduled original reloads");
 REXCVAR_DEFINE_UINT32(em2_native_lobby_qa_restart_interval,700,"Debug","Private validated loopback QA only: agreed ticks between scheduled reloads");
 REXCVAR_DEFINE_STRING(em2_native_lobby_qa_level_target,"","Debug","Private validated loopback QA only: known retail state for the original TransitionToLevel helper");
@@ -275,7 +277,7 @@ void Service(PPCContext& ctx,uint8_t* base,uint32_t state){
 
 void em2::TickPrivateNativeRestart(PPCContext& ctx,uint8_t* base){
  net::TickPrivateNativeTaskPolicy(ctx,base);
- if(net::TickPrivateNativeExtraDamage(ctx,base))return;
+ if(REXCVAR_GET(em2_native_lobby_qa_damage_player)!=4 && net::TickPrivateNativeExtraDamage(ctx,base))return;
  const auto requested=REXCVAR_GET(em2_native_lobby_qa_restart_tick);
  const auto count=REXCVAR_GET(em2_native_lobby_qa_restart_count);
  const auto interval=REXCVAR_GET(em2_native_lobby_qa_restart_interval);
@@ -305,8 +307,11 @@ void em2::TickPrivateNativeRestart(PPCContext& ctx,uint8_t* base){
  if(!requested_level.empty() && !level){
    REXLOG_ERROR("Native lobby QA rejected: unknown retail target state");return;
  }
- if(damage_player && (damage_player>3 || level || !route.empty() || count!=1 || Signature("Damage")!="ScriptEntityHandle hEntity, float fAmount")){
+ if(damage_player && (damage_player>4 || level || !route.empty() || count!=1 || Signature("Damage")!="ScriptEntityHandle hEntity, float fAmount")){
    REXLOG_ERROR("Native lobby QA rejected: damage fixture requires one scheduled retail player and no manual level route");return;
+ }
+ if(damage_player==4 && (REXCVAR_GET(em2_probe_extra_damage_peer)!=3 || !net::PrivateNativeMenuRoom() || net::PrivateNativeMenuRoom()->lobby().players.size()!=3)){
+   REXLOG_ERROR("Native lobby QA rejected: whole-party damage requires exactly three private humans and extra peer 3");return;
  }
  // 82732AB8 publishes the reusable native BScript at 833DA5E0. Retail
  // 82732634 reads its +4 lua_State before calling Lua. Borrow it freshly at
@@ -323,13 +328,14 @@ void em2::TickPrivateNativeRestart(PPCContext& ctx,uint8_t* base){
  const bool clean=REXCVAR_GET(em2_native_lobby_qa_clean_level_load);
  REXLOG_INFO("Native lobby QA reload method: {}",damage_player?"original-damage":level?(clean?"original-level":"original-transition"):checkpoint?"checkpoint-memory":"level-only");
  if(level)REXLOG_INFO("Native lobby QA level target: {}",*level);
- const auto source=damage_player==3?std::string("local a=GetPlayer(); local b=GetPlayer2(); local x=GetHealth(a); local y=GetHealth(b); Damage(a,1000); Damage(b,1000); return x,y,GetHealth(a),GetHealth(b)"):damage_player?std::string("local p=")+(damage_player==1?"GetPlayer()":"GetPlayer2()")+"; local before=GetHealth(p); Damage(p,1000); return before,GetHealth(p)":level?std::string(clean?"CleanLoadLevel(":"TransitionToLevel(")+Quote(*level)+")":std::string(checkpoint?"LoadGameFromMemory()":"RestartCurrentLevel()");
+ const auto source=damage_player>=3?std::string("local a=GetPlayer(); local b=GetPlayer2(); local x=GetHealth(a); local y=GetHealth(b); Damage(a,1000); Damage(b,1000); return x,y,GetHealth(a),GetHealth(b)"):damage_player?std::string("local p=")+(damage_player==1?"GetPlayer()":"GetPlayer2()")+"; local before=GetHealth(p); Damage(p,1000); return before,GetHealth(p)":level?std::string(clean?"CleanLoadLevel(":"TransitionToLevel(")+Quote(*level)+")":std::string(checkpoint?"LoadGameFromMemory()":"RestartCurrentLevel()");
  if(damage_player)REXLOG_INFO("Native lobby QA damage requested: tick {}, retail player {}, amount 1000; original Damage Lua export, no forced reload",tick,damage_player);
  const auto result=Evaluate(ctx,base,state,source);
  REXLOG_INFO("Native lobby QA restart requested: tick {}, attempted {}, status {}, stack {}",tick,result.attempted,result.status,result.stack_ok);
- if(damage_player==3 && result.values.size()==4)REXLOG_INFO("Native lobby QA pair damage health: before {}/{}, after {}/{}; original Damage and GetHealth, extra humans untouched",result.values[0],result.values[1],result.values[2],result.values[3]);
+ if(damage_player>=3 && result.values.size()==4)REXLOG_INFO("Native lobby QA pair damage health: before {}/{}, after {}/{}; original Damage and GetHealth, extra humans untouched",result.values[0],result.values[1],result.values[2],result.values[3]);
  if(damage_player && result.values.size()==2)REXLOG_INFO("Native lobby QA damage health: player {}, before {}, after {}; native GetHealth",damage_player,result.values[0],result.values[1]);
  if(!result.attempted || result.status || !result.stack_ok){Report(result);net::GameplayInputGate().ObservationFailed();}
+ else if(damage_player==4)net::TickPrivateNativeExtraDamage(ctx,base);
 }
 std::string em2::QueueGameLua(std::string_view source,bool needs_world){
  if(!ValidSource(source))return "Lua source must contain 1..16384 bytes and no embedded NUL.";

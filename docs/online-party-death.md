@@ -77,3 +77,23 @@ transitions still need a synchronized source/receiver lifecycle; see
 [the input-context investigation](online-input-context-lifecycle.md). This
 fix removes the incorrect party-death trigger for the verified survivor case,
 not that broader remaining work. No binary release is created by this change.
+
+
+## Whole-party death diagnostic
+
+The private harness also accepts `-DamagePlayer 4` with exactly three players.
+It delivers original fatal Damage to both retail humans and extra peer 3 at
+the same scheduled boundary, without forcing a reload. The extra-player
+observer records the current native load generation and retires its target
+on a legitimate load change instead of following a replacement actor.
+
+The compiled diagnostic was exercised in
+`analysis/native-lobby-20261114-103227-929d1603`. At tick 700, all three
+native death entries were counted and the original control-state getter
+reported GameOver state 7 with native dead count 3 and extra-player health 0.
+The capture then failed because the live local source could no longer
+produce original native Movement/Jump after the native input-context change.
+This is a reproduced failure, not a successful checkpoint recovery test.
+Normal user files were unchanged. The synchronized game-over input lifecycle
+and recovery remain unfinished; no binary release accompanies this source
+publication.
