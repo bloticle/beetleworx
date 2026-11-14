@@ -41,6 +41,8 @@ bool OwnedActorInputForController(uint32_t controller,PPCContext&,uint8_t* base,
 // for this action profile to the owned collection. Never registers permissions
 // or changes the retail policy. Reapply when authored restrictions change.
 bool ApplyOwnedActorTaskPermissions(uint64_t peer,PPCContext&,uint8_t* base);
+// Consume original task restriction add/remove notifications outside a frame.
+bool RefreshOwnedActorTaskPermissions(PPCContext&,uint8_t* base);
 // Staging only: the caller must begin each authoritative simulation tick once,
 // then stage immutable peer bases before the native controller update. These
 // APIs do not install references, dispatch input or advance physics. Unwired

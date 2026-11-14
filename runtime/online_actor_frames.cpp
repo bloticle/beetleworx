@@ -14,11 +14,22 @@
 #include <rex/logging.h>
 #include <rex/cvar.h>
 REXCVAR_DECLARE(bool,em2_private_profile);
+REXCVAR_DEFINE_BOOL(em2_probe_owned_button_tasks,false,"Debug","Private native owned-action diagnostics: compare extra and retail task flags without changing policy or dispatch");
 namespace em2::net {
 namespace {
 struct ButtonPermit {uint64_t peer,generation,tick;NativeActorAction action;};
 thread_local const ButtonPermit* button_permit=nullptr;
 struct Environment {unsigned csr=_mm_getcsr();DWORD error=GetLastError();~Environment(){_mm_setcsr(csr);SetLastError(error);}};
+void LogButtonTasks(const char* source,uint64_t peer,uint64_t tick,uint32_t listener,uint8_t* base){
+    auto readable=[&](uint32_t p,size_t n){return p>=4096 && uint64_t(p)+n<=0x100000000ull && GuestReadBatch::Readable(base+p,n);};
+    if(!readable(listener,120))return;
+    const auto array=PPC_LOAD_U32(listener+112),count=PPC_LOAD_U32(listener+116);
+    if(count>128 || !readable(array,size_t(count)*4))return;
+    for(unsigned i=0;i<count;++i){const auto task=PPC_LOAD_U32(array+i*4);
+        if(!readable(task,12))continue;const auto table=PPC_LOAD_U32(task);if(!readable(table,72))continue;
+        REXLOG_INFO("Private button task snapshot: {} peer {} tick {} ordinal {} table {:08X} handler {:08X} name {:08X} flags {:08X} entity {:08X}",source,peer,tick,i,table,PPC_LOAD_U32(table+40),PPC_LOAD_U32(table+68),PPC_LOAD_U32(task+8),PPC_LOAD_U32(task+4));
+    }
+}
 bool SameWorld(uint32_t registry,uint8_t* base){return base && GuestReadBatch::Readable(base+0x833DA7E4,4) && PPC_LOAD_U32(0x833DA7E4)==registry;}
 ActorLookBasis Basis(uint64_t peer,uint64_t generation,uint64_t tick,const RoomMovement& movement){
     return {peer,generation,tick,{movement.forward_z,0,-movement.forward_x},{movement.forward_x,0,movement.forward_z}};
@@ -163,6 +174,11 @@ OwnedFrameResult OwnedMovementFrames::Deliver(const RoomFrame& frame,PPCContext&
                             Environment log_environment;
                             const auto definition=std::find_if(binding.buttons->actions.begin(),binding.buttons->actions.end(),[&](const auto& d){return d.action==action.action && d.event==action.event;});
                             if(definition!=binding.buttons->actions.end())REXLOG_INFO("Native Room owned button callback: tick {} peer {} profile {} action '{}' result {} native return {}; original derived handler",frame.tick,i+1,binding.action_user,definition->name,int(result),native_result);
+                            if(definition!=binding.buttons->actions.end() && REXCVAR_GET(em2_probe_owned_button_tasks) && definition->name.find("Electric Stream")!=std::string::npos){
+                                OwnedActorInput actor;
+                                if(OwnedActorInputFor(binding.native_peer,ctx,base,actor))LogButtonTasks("extra",i+1,frame.tick,actor.listener,base);
+                                LogButtonTasks("retail",i+1,frame.tick,binding.buttons->parent.listener,base);
+                            }
                         }
                     }
                     if(result!=ActorInputResult::Applied){faulted_=true;return OwnedFrameResult::NativeFailure;}

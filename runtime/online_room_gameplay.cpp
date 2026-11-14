@@ -435,6 +435,7 @@ RoomGameplayAdmission NativeRoomGameplay::Prepare(PPCContext& ctx,uint8_t* base,
     }
     gameplay_waiting.store(true,std::memory_order_release);
     if(s.pending || s.room->gameplay_frame_blocked())return RoomGameplayAdmission::Waiting;
+    if(!RefreshOwnedActorTaskPermissions(ctx,base)){s.Stop("Could not refresh authored extra-human ability policy");return RoomGameplayAdmission::Stopped;}
     if(s.prepared){output=*s.prepared;return RoomGameplayAdmission::Ready;}
     const auto tick=s.room->next_tick();
     if(s.scripted_input && s.first_game_tick && !s.history_probe_done){

@@ -9,6 +9,10 @@
 #include "guest_read_batch.h"
 #include "ppc_context.h"
 #include <rex/logging.h>
+#include <rex/cvar.h>
+REXCVAR_DECLARE(bool,em2_private_profile);
+REXCVAR_DECLARE(bool,em2_probe_owned_button_tasks);
+REXCVAR_DEFINE_BOOL(em2_owned_actor_policy_refresh,true,"Online","Propagate authored per-character task restriction changes to extra native humans at the next safe input boundary");
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -26,6 +30,9 @@ PPC_EXTERN_FUNC(__imp__sub_82783CE8);
 PPC_EXTERN_FUNC(__imp__sub_8276B968);
 PPC_EXTERN_FUNC(__imp__sub_8276BA50);
 PPC_EXTERN_FUNC(__imp__sub_82A26B60);
+PPC_EXTERN_FUNC(__imp__sub_8285D768);
+PPC_EXTERN_FUNC(__imp__sub_82A27E20);
+PPC_EXTERN_FUNC(__imp__sub_82A27F80);
 PPC_EXTERN_FUNC(__imp__sub_82732A18);
 PPC_EXTERN_FUNC(__imp__sub_827B58D0);
 PPC_EXTERN_FUNC(__imp__sub_82A69948);
@@ -52,12 +59,18 @@ struct BasisUpdate {BasisEntry entry;};
 thread_local const BasisUpdate* basis_update=nullptr;
 // Only isolated native controller fixtures may omit the coordinator input step.
 thread_local bool basis_fixture_without_input=false;
+thread_local uint8_t pending_policy_profiles=0;
 struct Environment {unsigned csr=_mm_getcsr();DWORD error=GetLastError();~Environment(){_mm_setcsr(csr);SetLastError(error);}};
 struct ContextScope {PPCContext& ctx;PPCContext saved;Environment environment;explicit ContextScope(PPCContext& c):ctx(c),saved(c){}~ContextScope(){ctx=saved;}};
 bool Readable(uint32_t address,size_t size,uint8_t* base){return base && address>=4096 && uint64_t(address)+size<=0x100000000ull && em2::GuestReadBatch::Readable(base+address,size);}
 std::optional<Actor> ByPeer(uint64_t peer){std::lock_guard lock(mutex);for(const auto& actor:actors)if(actor.peer==peer && peer)return actor;return {};}
 std::optional<Actor> ByListener(uint32_t listener){std::lock_guard lock(mutex);for(const auto& actor:actors)if(actor.peer && actor.listener==listener)return actor;return {};}
 bool Owner(){std::lock_guard lock(mutex);return owner_thread && owner_thread==GetCurrentThreadId();}
+void NoteHumanTaskPolicy(uint32_t manager,unsigned profile,uint8_t* base){
+    if(!REXCVAR_GET(em2_owned_actor_policy_refresh) || profile>1 || !Owner() ||
+       !Readable(0x833DAB60,4,base) || manager!=PPC_LOAD_U32(0x833DAB60))return;
+    pending_policy_profiles|=uint8_t(1u<<profile);
+}
 bool Resolve(uint32_t registry,uint32_t handle,PPCContext& ctx,uint8_t* base,uint32_t& entity){
     ContextScope restore(ctx);const auto top=ctx.r1.u32&~15u;
     if(!registry || !handle || top<8192 || !Readable(registry,24,base) || !Readable(top-4096,4096,base))return false;
@@ -249,7 +262,7 @@ bool em2::net::UnregisterOwnedActorInput(uint64_t peer,uint64_t actor_generation
     for(auto& actor:actors)if(actor.peer==peer){if(actor.generation!=actor_generation)return false;actor={};break;}
     for(auto& entry:basis_entries)if(entry.actor.peer==peer && entry.actor.generation==actor_generation)entry={};return true;
 }
-void em2::net::ResetOwnedActorInputs(){std::lock_guard lock(mutex);if(owner_thread && owner_thread!=GetCurrentThreadId())return;actors={};basis_entries={};basis_clock={};owner_thread=0;}
+void em2::net::ResetOwnedActorInputs(){std::lock_guard lock(mutex);if(owner_thread && owner_thread!=GetCurrentThreadId())return;actors={};basis_entries={};basis_clock={};pending_policy_profiles=0;owner_thread=0;}
 bool em2::net::OwnedActorInputFor(uint64_t peer,PPCContext& ctx,uint8_t* base,Actor& output){Environment preserve;output={};auto found=ByPeer(peer);if(!found || !Owner() || !Current(*found,ctx,base))return false;output=*found;return true;}
 bool em2::net::OwnedActorInputForController(uint32_t controller,PPCContext& ctx,uint8_t* base,Actor& output){
     ContextScope preserve(ctx);output={};if(!Owner())return false;
@@ -411,6 +424,45 @@ bool em2::net::ApplyOwnedActorTaskPermissions(uint64_t peer,PPCContext& ctx,uint
     return current && current->enabled && current->generation==actor->generation &&
         current->entity==actor->entity && Current(*current,ctx,base);
 }
+bool em2::net::RefreshOwnedActorTaskPermissions(PPCContext& ctx,uint8_t* base){
+    ContextScope preserve(ctx);
+    if(!pending_policy_profiles || !REXCVAR_GET(em2_owned_actor_policy_refresh))return true;
+    if(!Owner() || replay || basis_update)return false;
+    std::array<Actor,16> snapshot;{std::lock_guard lock(mutex);snapshot=actors;}
+    const auto dirty=pending_policy_profiles;pending_policy_profiles=0;
+    for(const auto& actor:snapshot)if(actor.peer && actor.enabled && (dirty&(1u<<actor.action_user))){
+        if(!ApplyOwnedActorTaskPermissions(actor.peer,ctx,base)){pending_policy_profiles|=dirty;return false;}
+        if(REXCVAR_GET(em2_private_profile))REXLOG_INFO("Owned actor native policy refreshed: peer {} profile {}; existing authored permissions only",actor.peer,actor.action_user);
+    }
+    return true;
+}
+PPC_FUNC_IMPL(sub_82A27E20){
+    const auto manager=ctx.r3.u32,profile=ctx.r4.u32;
+    __imp__sub_82A27E20(ctx,base);
+    ContextScope preserve(ctx);NoteHumanTaskPolicy(manager,profile,base);
+}
+PPC_FUNC_IMPL(sub_82A27F80){
+    const auto manager=ctx.r3.u32,profile=ctx.r4.u32;
+    __imp__sub_82A27F80(ctx,base);
+    ContextScope preserve(ctx);NoteHumanTaskPolicy(manager,profile,base);
+}
+PPC_FUNC_IMPL(sub_8285D768){
+    const auto task=ctx.r3.u32,previous=ctx.r4.u32,caller=uint32_t(ctx.lr),stack=ctx.r1.u32;
+    __imp__sub_8285D768(ctx,base);
+    ContextScope preserve(ctx);
+    if(!REXCVAR_GET(em2_probe_owned_button_tasks) || !REXCVAR_GET(em2_private_profile) ||
+       !Readable(task,12,base) || !Readable(previous,4,base))return;
+    const auto table=PPC_LOAD_U32(task),before=PPC_LOAD_U32(previous),after=PPC_LOAD_U32(task+8);
+    if((table!=0x82163AC0 && table!=0x82165840 && table!=0x82164EA8 && table!=0x82161560) || (before&14)==(after&14))return;
+    static thread_local unsigned reports=0;if(reports++>=512)return;
+    std::array<uint32_t,4> callers{caller,0,0,0};auto frame=stack;
+    for(unsigned i=1;i<callers.size();++i){
+        if(!Readable(frame,4,base))break;const auto prior=PPC_LOAD_U32(frame);
+        if(prior<=frame || prior-frame>65536 || !Readable(prior-8,8,base))break;
+        callers[i]=PPC_LOAD_U32(prior-8);frame=prior;
+    }
+    REXLOG_INFO("Private task permission transition: entity {:08X} table {:08X} before {:08X} after {:08X} callers {:08X}/{:08X}/{:08X}/{:08X}",PPC_LOAD_U32(task+4),table,before,after,callers[0],callers[1],callers[2],callers[3]);
+}
 PPC_FUNC_IMPL(sub_8276B968){
     // Only this exact base human movement query, while replaying this actor,
     // can resolve to its owned entity. All normal native routes stay untouched.
@@ -505,9 +557,9 @@ void FixtureMotionWorldVector(PPCContext& ctx,uint8_t* base){
 }
 bool em2::net::TestOwnedActorInput(){
     auto* base=static_cast<uint8_t*>(VirtualAlloc(nullptr,0x100000000ull,MEM_RESERVE,PAGE_NOACCESS));
-    struct Restore {uint8_t* base;decltype(actors) prior;decltype(basis_entries) prior_bases;BasisClock prior_clock;DWORD thread;uint64_t serial;const Replay* scope=replay;const BasisUpdate* update=basis_update;Environment environment;
-        explicit Restore(uint8_t* memory):base(memory){std::lock_guard lock(mutex);prior=actors;prior_bases=basis_entries;prior_clock=basis_clock;thread=owner_thread;serial=generation;actors={};basis_entries={};basis_clock={};owner_thread=0;}
-        ~Restore(){std::lock_guard lock(mutex);actors=prior;basis_entries=prior_bases;basis_clock=prior_clock;owner_thread=thread;generation=serial;replay=scope;basis_update=update;if(base)VirtualFree(base,0,MEM_RELEASE);}
+    struct Restore {uint8_t* base;decltype(actors) prior;decltype(basis_entries) prior_bases;BasisClock prior_clock;DWORD thread;uint64_t serial;uint8_t policy=pending_policy_profiles;const Replay* scope=replay;const BasisUpdate* update=basis_update;Environment environment;
+        explicit Restore(uint8_t* memory):base(memory){std::lock_guard lock(mutex);prior=actors;prior_bases=basis_entries;prior_clock=basis_clock;thread=owner_thread;serial=generation;actors={};basis_entries={};basis_clock={};pending_policy_profiles=0;owner_thread=0;}
+        ~Restore(){std::lock_guard lock(mutex);actors=prior;basis_entries=prior_bases;basis_clock=prior_clock;owner_thread=thread;generation=serial;pending_policy_profiles=policy;replay=scope;basis_update=update;if(base)VirtualFree(base,0,MEM_RELEASE);}
     }restore{base};
     const auto path=std::filesystem::path(__FILE__).parent_path().parent_path()/"private/image.bin";
     std::error_code error;const auto image_size=std::filesystem::file_size(path,error);
@@ -546,6 +598,15 @@ bool em2::net::TestOwnedActorInput(){
     const auto saved=ctx;const auto csr=_mm_getcsr();const auto last_error=GetLastError();
     if(!check(RegisterOwnedActorInput(100,1,ctx,base,a) && RegisterOwnedActorInput(200,2,ctx,base,b),"two extras resolve through actual native registry and typed human-controller layout"))return false;
     if(!check(!std::memcmp(&saved,&ctx,sizeof(ctx)) && _mm_getcsr()==csr && GetLastError()==last_error,"registration preserves full caller context/TLS/FP/LastError"))return false;
+    NoteHumanTaskPolicy(manager+4,0,base);NoteHumanTaskPolicy(manager,2,base);
+    if(!check(!pending_policy_profiles,"foreign manager/profile cannot queue native policy changes"))return false;
+    NoteHumanTaskPolicy(manager,1,base);NoteHumanTaskPolicy(manager,1,base);
+    if(!check(pending_policy_profiles==2,"duplicate authored changes coalesce for only the affected action profile"))return false;
+    NoteHumanTaskPolicy(manager,0,base);
+    if(!check(pending_policy_profiles==3,"independent profile notifications are retained together"))return false;
+    pending_policy_profiles=0;
+    if(!check(RefreshOwnedActorTaskPermissions(ctx,nullptr) && !std::memcmp(&saved,&ctx,sizeof(ctx)) && _mm_getcsr()==csr && GetLastError()==last_error,
+        "no pending policy is a no-read/no-dispatch operation with full caller/environment preservation"))return false;
     Actor duplicate;
     if(!check(!RegisterOwnedActorInput(100,2,ctx,base,duplicate) && !RegisterOwnedActorInput(300,1,ctx,base,duplicate) && !RegisterOwnedActorInput(300,0x111,ctx,base,duplicate),"peer/actor aliases and retail player handles cannot be registered"))return false;
     NativeActorAction first{0,action,.5f,-.25f},second{0,action,-.75f,.125f};

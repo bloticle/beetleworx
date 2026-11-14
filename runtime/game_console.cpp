@@ -37,6 +37,7 @@ REXCVAR_DEFINE_BOOL(em2_native_lobby_qa_checkpoint_reload,false,"Debug","Private
 REXCVAR_DEFINE_UINT32(em2_native_lobby_qa_restart_count,1,"Debug","Private validated loopback QA only: one through four scheduled original reloads");
 REXCVAR_DEFINE_UINT32(em2_native_lobby_qa_restart_interval,700,"Debug","Private validated loopback QA only: agreed ticks between scheduled reloads");
 REXCVAR_DEFINE_STRING(em2_native_lobby_qa_level_target,"","Debug","Private validated loopback QA only: known retail state for the original TransitionToLevel helper");
+REXCVAR_DEFINE_STRING(em2_native_lobby_qa_level_route,"","Debug","Private validated loopback QA only: pipe-separated known retail states, one destination per scheduled original transition");
 REXCVAR_DEFINE_BOOL(em2_native_lobby_qa_clean_level_load,false,"Debug","Private loopback comparison only: use destructive debug CleanLoadLevel instead of the normal campaign transition");
 
 REXCVAR_DECLARE(bool,em2_private_profile);
@@ -283,7 +284,19 @@ void em2::TickPrivateNativeRestart(PPCContext& ctx,uint8_t* base){
  if(sent>=count || executing || faulted || protected_depth || ctx.lr!=0x829ED694 || !CurrentAgreedSimulationTick(tick) || tick!=scheduled ||
     !net::NativeOnlineMenuQaActive() || !NativeCoopReady(base))return;
  const auto requested_level=REXCVAR_GET(em2_native_lobby_qa_level_target);
- const auto level=requested_level.empty()?std::optional<std::string>{}:Level(requested_level);
+ const auto route=REXCVAR_GET(em2_native_lobby_qa_level_route);
+ auto level=requested_level.empty()?std::optional<std::string>{}:Level(requested_level);
+ if(!route.empty()){
+   std::vector<std::string> targets;size_t begin=0;
+   for(;;){
+     const auto end=route.find('|',begin);
+     const auto entry=Level(std::string_view(route).substr(begin,end==std::string::npos?end:end-begin));
+     if(!entry || targets.size()>=4){REXLOG_ERROR("Native lobby QA rejected: route contains an unknown retail state or exceeds four transitions");return;}
+     targets.push_back(*entry);if(end==std::string::npos)break;begin=end+1;
+   }
+   if(!requested_level.empty() || targets.size()!=count){REXLOG_ERROR("Native lobby QA rejected: route must match the scheduled count without a separate target");return;}
+   level=targets[sent];
+ }
  if(!requested_level.empty() && !level){
    REXLOG_ERROR("Native lobby QA rejected: unknown retail target state");return;
  }

@@ -1,12 +1,13 @@
 param(
  [ValidateRange(3,16)][int]$Players=3,
  
- [switch]$ScriptedInput,[switch]$ChatProbe,[switch]$VoiceProbe,
+ [switch]$ScriptedInput,[switch]$ChatProbe,[switch]$VoiceProbe,[switch]$ButtonTaskProbe,
  [switch]$NavigationTrace,[switch]$FaceTargetPoison,[switch]$UnfixedFaceTarget,[switch]$NativeReload,
  [ValidateRange(0,100000)][int]$CheckpointReloadTick=0,
  [ValidateRange(1,4)][int]$CheckpointReloadCount=1,
  [ValidateRange(600,100000)][int]$CheckpointReloadInterval=700,
  [ValidatePattern('^([a-z0-9_.]{1,63})?$')][string]$NativeLevelTarget='',
+ [ValidateCount(1,4)][ValidatePattern('^[a-z0-9_.]{1,63}$')][string[]]$NativeLevelTargets=@(),
  [switch]$DebugCleanLevelLoad,
  [ValidateRange(0,16)][int]$CloseParticipant=0,
  [switch]$ReturnToTitle,[switch]$ReenterAfterReturn,[switch]$RecoveryPrompt,[switch]$RecoveryController,
@@ -23,7 +24,8 @@ if($ReturnToTitle -and !$CloseParticipant -and !$ReenterAfterReturn){throw 'Priv
 if($ReenterAfterReturn -and (!$ReturnToTitle -or !$ScriptedInput -or $CloseParticipant -or $PartialDeliveryParticipant -or $CheckpointReloadTick)){throw 'Private re-entry requires scripted input and title return, without other failure/reload injection.'}
 if($PartialDeliveryParticipant -and (!$ScriptedInput -or $CheckpointReloadTick -or $CloseParticipant -or $PartialDeliveryParticipant -gt $Players)){throw 'Partial-delivery injection requires scripted input, an existing participant, no scheduled reload and no window-close injection.'}
 if($CloseParticipant -and (!$ScriptedInput -or $CheckpointReloadTick -or $CloseParticipant -gt $Players)){throw 'Participant-close negative test requires scripted input, an existing participant and no scheduled reload.'}
-if($DebugCleanLevelLoad -and !$NativeLevelTarget){throw 'Debug CleanLoadLevel comparison requires a native target.'}
+if($NativeLevelTargets.Count -and (!$CheckpointReloadTick -or $NativeLevelTarget -or $NativeLevelTargets.Count -ne $CheckpointReloadCount)){throw 'A level route requires scheduled reloads, matching destination count, and no separate level target.'}
+if($DebugCleanLevelLoad -and !$NativeLevelTarget -and !$NativeLevelTargets.Count){throw 'Debug CleanLoadLevel comparison requires a native target.'}
 if($UnfixedFaceTarget -and !$FaceTargetPoison){throw 'The original undefined fallback comparison requires explicit isolated allocation fault injection.'}
 if($NativeLevelTarget -and !$CheckpointReloadTick){throw 'A native level target requires an explicit scheduled reload tick.'}
 $workspace=(Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
@@ -62,10 +64,12 @@ $normalCrash=Join-Path $runtime 'crash.log';$crashHash=if(Test-Path -LiteralPath
 $records=[Collections.Generic.List[object]]::new();$owned=[Collections.Generic.List[object]]::new()
 $record=[ordered]@{root=$root;players=$Players;exe_sha256=$exeHash;native_room_menu=$true;checkpoint_reload_tick=$CheckpointReloadTick;voice_probe=[bool]$VoiceProbe;navigation_trace=[bool]$NavigationTrace;face_target_poison=[bool]$FaceTargetPoison;face_target_unfixed=[bool]$UnfixedFaceTarget;replay_invitation=$ReplayInvitationFile;chat_probe=[bool]$ChatProbe;scripted_sdk_input=[bool]$ScriptedInput;mixed_characters=$true;gameplay_input_sent=$false;screenshots_taken=$false;startup_complete=$false;observation_complete=$false;processes=@()}
 $record.native_reload=[bool]$NativeReload
+$record.button_task_probe=[bool]$ButtonTaskProbe
 $record.checkpoint_reload_count=$CheckpointReloadCount
 $record.checkpoint_reload_interval=$CheckpointReloadInterval
 $record.native_level_target=$NativeLevelTarget
-$record.native_level_method=if($NativeLevelTarget){if($DebugCleanLevelLoad){'original-level'}else{'original-transition'}}else{''}
+$record.native_level_targets=@($NativeLevelTargets)
+$record.native_level_method=if($NativeLevelTarget -or $NativeLevelTargets.Count){if($DebugCleanLevelLoad){'original-level'}else{'original-transition'}}else{''}
 $record.reused_verified_content=$ReuseVerifiedContent
 $record.close_participant=$CloseParticipant;$record.failure_observed=$false;$record.leave_boundary_probe=[bool]($CloseParticipant -or $PartialDeliveryParticipant)
 $record.partial_delivery_participant=$PartialDeliveryParticipant;$record.partial_delivery_tick=$PartialDeliveryTick;$record.return_to_title_probe=[bool]$ReturnToTitle;$record.reenter_after_return=[bool]$ReenterAfterReturn;$record.recovery_prompt=[bool]$RecoveryPrompt;$record.recovery_controller=[bool]$RecoveryController
@@ -161,9 +165,11 @@ try {
   foreach($arg in @(('--em2_user_data_directory='+$peer.user),('--em2_content_directory='+$peer.content),('--log_file='+$peer.log),'--no-em2_online_menu','--no-em2_demo_build','--em2_private_profile=true','--em2_native_room_lobby=true','--em2_native_online_handoff=true',('--em2_native_lobby_qa_role='+$peer.role),('--em2_native_lobby_qa_players='+$Players),('--em2_native_lobby_qa_invitation_file='+(Join-Path $root 'native-menu-invitation.txt')),'--em2_online_auto_continue=true','--em2_auto_continue=false','--em2_online_world_random=true','--em2_online_single_view=true','--em2_trace_online_observations=true','--em2_trace_auto_continue=true','--em2_trace_online_clothing=true')){$info.ArgumentList.Add($arg)}
   if($ChatProbe){$info.ArgumentList.Add('--em2_probe_online_chat=true')}
   if($VoiceProbe){$info.ArgumentList.Add('--em2_probe_online_voice=true')}
+  if($ButtonTaskProbe){$info.ArgumentList.Add('--em2_probe_owned_button_tasks=true')}
   if($CheckpointReloadTick){$info.ArgumentList.Add('--em2_native_lobby_qa_restart_tick='+$CheckpointReloadTick);$info.ArgumentList.Add('--em2_native_lobby_qa_checkpoint_reload=true')}
   if($CheckpointReloadTick){$info.ArgumentList.Add('--em2_native_lobby_qa_restart_count='+$CheckpointReloadCount);$info.ArgumentList.Add('--em2_native_lobby_qa_restart_interval='+$CheckpointReloadInterval)}
   if($NativeLevelTarget){$info.ArgumentList.Add('--em2_native_lobby_qa_level_target='+$NativeLevelTarget)}
+  if($NativeLevelTargets.Count){$info.ArgumentList.Add('--em2_native_lobby_qa_level_route='+($NativeLevelTargets -join '|'))}
   if($DebugCleanLevelLoad){$info.ArgumentList.Add('--em2_native_lobby_qa_clean_level_load=true')}
   if($NativeReload){$info.ArgumentList.Add('--em2_room_native_reload=true')}
   if($FaceTargetPoison){$info.ArgumentList.Add('--em2_probe_face_target_defaults=true')}
