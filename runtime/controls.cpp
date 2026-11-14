@@ -1,5 +1,6 @@
 #include "ppc_context.h"
 #include "controls.h"
+#include "pc_settings.h"
 #include "online_chat.h"
 #include "online_voice_runtime.h"
 #include "mouse_look.h"
@@ -110,6 +111,10 @@ bool ReadOnlineJoinControls(unsigned user,X_INPUT_STATE* out) {
     return true;
 }
 std::filesystem::path controls_file;
+bool controls_save_failed=false;
+struct MenuPointer {int x=-1,y=-1,click_x=-1,click_y=-1,down_x=-1,down_y=-1;uint32_t buttons=0,click=0,move=0;};
+MenuPointer menu_pointer;
+thread_local MenuPointer menu_pointer_readback;
 int capture=-1;
 int start_capture=-1;
 Clock::time_point start_capture_time{};
@@ -167,7 +172,8 @@ void Save() {
     for(unsigned p=0;p<4;++p) for(unsigned i=0;i<look_names.size();++i)
         stream << p << '.' << look_names[i] << '=' << look_profiles[p][i] << '\n';
     stream.close();
-    if(!stream || !MoveFileExW(temporary.c_str(),controls_file.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))
+    controls_save_failed=!stream || !MoveFileExW(temporary.c_str(),controls_file.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH);
+    if(controls_save_failed)
         REXLOG_ERROR("Unable to save control bindings: {}",controls_file.string());
 }
 void Assign(unsigned profile,int control,int source) {
@@ -747,6 +753,7 @@ void LoadControls(const std::filesystem::path& directory) {
     for(unsigned p=0;p<4;++p) ModernDefaults(p);
     std::filesystem::create_directories(directory);
     controls_file=directory/"controls.ini";
+    controls_save_failed=false;
     std::array<std::array<bool,3>,4> explicit_mod_bindings{};
     std::ifstream stream(controls_file);
     std::string line;
@@ -863,9 +870,56 @@ void SetCaptureSource(bool captured,bool chat){
 }
 void SetExternalControlCapture(bool captured){SetCaptureSource(captured,false);}
 void SetChatControlCapture(bool captured){SetCaptureSource(captured,true);}
-bool ControlOption(int id,int command,int& result) {
+void UpdateMenuPointer(int x,int y,unsigned width,unsigned height,int button,bool down) {
     std::lock_guard lock(controls_mutex);
+    auto normalize=[](int value,unsigned extent){return extent && value>=0 && uint64_t(value)<extent?int(uint64_t(value)*65535/extent):-1;};
+    const auto next_x=normalize(x,width),next_y=normalize(y,height);
+    if(next_x!=menu_pointer.x || next_y!=menu_pointer.y)++menu_pointer.move;
+    menu_pointer.x=next_x;menu_pointer.y=next_y;
+    if(button==1 || button==2) {
+        const auto bit=1u<<unsigned(button-1),before=menu_pointer.buttons;
+        if(down)menu_pointer.buttons|=bit;else menu_pointer.buttons&=~bit;
+        if(button==1 && down && !(before&bit)){menu_pointer.down_x=menu_pointer.x;menu_pointer.down_y=menu_pointer.y;}
+        if(button==1 && !down && (before&bit)) {
+            menu_pointer.click_x=menu_pointer.x;menu_pointer.click_y=menu_pointer.y;
+            menu_pointer.click=(menu_pointer.click+1)&0x7FFFFFFFu;
+        }
+    }
+}
+void ClearMenuPointer(){std::lock_guard lock(controls_mutex);menu_pointer.x=menu_pointer.y=-1;menu_pointer.buttons=0;}
+void PollControlCapture(rex::input::InputSystem& input) {
+    int pending;uint64_t epoch;
+    {
+        std::lock_guard lock(controls_mutex);
+        if(capture<0)return;
+        if(Clock::now()-capture_started>std::chrono::seconds(10)) {
+            capture=-1;suppressed_until=Clock::now()+std::chrono::milliseconds(150);return;
+        }
+        if(!(capture/32&1))return;
+        pending=capture;epoch=view_poll_epoch;
+    }
+    // A fallback driver may take controls_mutex. Never hold it over GetState.
+    // Ask for local physical input even when the game publishes online frames.
+    struct LocalScope{bool prior=sampling_local_controls;LocalScope(){sampling_local_controls=true;}~LocalScope(){sampling_local_controls=prior;}}scope;
+    X_INPUT_STATE physical{};
+    const auto user=unsigned(pending/64);
+    const auto status=input.GetState(user,&physical);
+    std::lock_guard lock(controls_mutex);
+    if(capture!=pending || epoch!=view_poll_epoch || status!=X_ERROR_SUCCESS)return;
+    SuppressInput(user,physical.gamepad);
+}
+bool ControlOption(int id,int command,int& result) {
+    if(id==2230) {result=UsingControllerInput()?1:0;return true;}
+    if(id==2224) {const auto selected=PCSetting(40);result=selected?selected:UsingControllerInput()?2:1;return true;}
+    std::lock_guard lock(controls_mutex);
+    if(id>=2220 && id<=2229) {
+        if(id==2220)menu_pointer_readback=menu_pointer;
+        const auto& p=menu_pointer_readback;
+        result=id==2220?p.x:id==2221?p.y:id==2222?int(p.buttons):id==2223?int(p.move):id==2225?int(p.click):id==2226?p.click_x:id==2227?p.click_y:id==2228?p.down_x:id==2229?p.down_y:0;
+        return true;
+    }
     if(id==2200) {result=capture+1;return true;}
+    if(id==2202) {result=controls_save_failed?1:0;return true;}
     if(id==2201) {++view_poll_epoch;ResetWheelInputs();menu_open=command!=0; if(!menu_open) capture=-1;result=0;return true;}
     if(id==2210){if(command<0 || command>=4)return false;ModernDefaults(unsigned(command));++view_poll_epoch;Save();result=command;return true;}
     if(id>=2300 && id<2332) {
@@ -1003,7 +1057,68 @@ static bool TestLiveLook() {
     check(SampleLiveLook(keyboard,0,look) && look==LiveLookInput{-32768,0},"actual keyboard fallback is polled without recursive locking");
     ControlKey('J',false);
     check(SampleLiveLook(keyboard,0,look) && look==LiveLookInput{},"keyboard fallback release is immediate");
+    device->connected=true;device->pads={};
+    ControlOption(2201,1,ignored);SetControlUIContext(true);SetExternalControlCapture(true);
+    ControlOption(2032,-2,ignored);
+    device->pads[0].buttons=0x2000;
+    PollControlCapture(input);ControlOption(2200,-1,ignored);
+    check(ignored==33,"menu capture ignores the held opening button without gameplay polling");
+    device->pads[0]={};PollControlCapture(input);
+    {std::lock_guard lock(controls_mutex);capture_started=Clock::now()-std::chrono::milliseconds(300);}
+    const auto cached_raw=raw_pads;
+    device->pads[0].buttons=0x2000;PollControlCapture(input);
+    ControlOption(2200,-1,ignored);check(ignored==0,"native menu-only polling completes controller capture");
+    ControlOption(2032,-1,ignored);check(ignored==257,"captured physical B is assigned to controller jump");
+    check(!std::memcmp(raw_pads.data(),cached_raw.data(),sizeof(raw_pads)),"menu capture never publishes gameplay pad state");
+    {
+        std::ifstream saved(controls_file);std::string bytes((std::istreambuf_iterator<char>(saved)),{});
+        check(bytes.find("1.0=257\n")!=std::string::npos,"menu-only controller capture persists immediately");
+    }
+    ControlOption(2032,-2,ignored);device->on_poll=[] {int unused;ControlOption(2032,-5,unused);};
+    PollControlCapture(input);ControlOption(2200,-1,ignored);
+    check(ignored==0,"cancellation during a physical poll cannot resurrect capture");device->on_poll={};
+    ControlOption(2000,-2,ignored);
+    {std::lock_guard lock(controls_mutex);capture_started=Clock::now()-std::chrono::seconds(11);}
+    const auto before_timeout=device->reads;PollControlCapture(input);ControlOption(2200,-1,ignored);
+    check(ignored==0 && device->reads==before_timeout,"idle keyboard capture expires without polling a pad or receiving keys");
+    ControlOption(2032,-2,ignored);device->connected=false;
+    {std::lock_guard lock(controls_mutex);capture_started=Clock::now()-std::chrono::seconds(11);}
+    PollControlCapture(input);ControlOption(2200,-1,ignored);
+    check(ignored==0,"disconnected controller capture also expires from the menu pump");
+    SetExternalControlCapture(false);SetControlUIContext(false);ControlOption(2201,0,ignored);
+    const auto valid_file=controls_file;
+    controls_file=valid_file/"blocked.ini";Save();ControlOption(2202,-1,ignored);
+    check(ignored==1,"failed binding writes are visible to the native menu");
+    controls_file=valid_file;Save();ControlOption(2202,-1,ignored);
+    check(ignored==0,"a successful retry clears the binding save error");
     if(ok)REXLOG_INFO("Live camera input tests passed: fresh look, mapping parity, action isolation and ownership changes");
+    return ok;
+}
+static bool TestMenuPointer() {
+    bool ok=true;
+    auto check=[&](bool value,const char* why){if(!value){ok=false;REXLOG_ERROR("Native menu pointer: {}",why);}};
+    const auto prior=menu_pointer;const auto prompt=PCSetting(kPCButtonPrompts);
+    int value=0;
+    menu_pointer={};UpdateMenuPointer(640,360,1280,720);
+    ControlOption(2220,-1,value);check(value==32767,"horizontal coordinates use output client dimensions");
+    UpdateMenuPointer(1280,720,2560,1440);
+    ControlOption(2221,-1,value);check(value==32767,"all coordinate reads use one coherent snapshot");
+    ControlOption(2220,-1,value);check(value==32767,"1440p and 720p window centers map to identical native coordinates");
+    UpdateMenuPointer(20,30,1280,720,1,true);UpdateMenuPointer(100,200,1280,720,1,false);
+    ControlOption(2220,-1,value);ControlOption(2225,-1,value);check(value==1,"one complete click increments the release serial once");
+    ControlOption(2228,-1,value);check(value==20*65535/1280,"press coordinates are retained independently of release");
+    ControlOption(2226,-1,value);check(value==100*65535/1280,"release coordinate identifies the actual activation target");
+    UpdateMenuPointer(100,200,1280,720,1,false);ControlOption(2220,-1,value);ControlOption(2225,-1,value);
+    check(value==1,"stray releases cannot activate a menu");
+    UpdateMenuPointer(10,10,1280,720,1,true);ClearMenuPointer();UpdateMenuPointer(10,10,1280,720,1,false);
+    ControlOption(2220,-1,value);ControlOption(2225,-1,value);check(value==1,"focus loss cancels a held click");
+    UpdateMenuPointer(-1,50,1280,720);ControlOption(2220,-1,value);check(value==-1,"outside-client coordinates are rejected");
+    UpdateMenuPointer(10,10,0,0);ControlOption(2220,-1,value);check(value==-1,"minimized/zero-size windows cannot divide by zero");
+    for(int style=1;style<=4;++style){ChangePCSetting(kPCButtonPrompts,style);ControlOption(2224,-1,value);check(value==style,"manual prompt selection overrides physical input");}
+    ChangePCSetting(kPCButtonPrompts,0);NotifyMouseKeyboardInput();ControlOption(2224,-1,value);check(value==1,"automatic prompts recognize keyboard/mouse input");
+    NotifyControllerInput(0,0,0,0,0,0,0,0);NotifyControllerInput(0,0x1000,0,0,0,0,0,0);ControlOption(2224,-1,value);check(value==2,"automatic prompts switch to controller input");
+    ChangePCSetting(kPCButtonPrompts,prompt);menu_pointer=prior;
+    if(ok)REXLOG_INFO("Native menu pointer passed: output-space normalization, coherent snapshots, press/release targeting, focus/minimize guards and automatic/manual prompts");
     return ok;
 }
 static bool TestWheelBindings(const std::filesystem::path& directory) {
@@ -1136,7 +1251,7 @@ static bool TestChordRebinding() {
 }
 bool TestControls(const std::filesystem::path& directory) {
     LoadControls(directory);
-    bool ok=TestChordRebinding() && TestLiveLook();
+    bool ok=TestChordRebinding() && TestLiveLook() && TestMenuPointer();
     auto check=[&](bool condition,const char* message){if(!condition){REXLOG_ERROR("Control test: {}",message);ok=false;}};
     {
         int selected=0;ControlOption(2210,0,selected);ControlOption(2210,1,selected);

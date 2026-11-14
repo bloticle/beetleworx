@@ -87,6 +87,7 @@ bool EqualRect(const RECT& a,const RECT& b){return a.left==b.left && a.top==b.to
 void NotifyMouseKeyboardInput() {
     std::lock_guard lock(motion_mutex);MouseActivityLocked(GetMouseCursorOptions());
 }
+bool UsingControllerInput() {std::lock_guard lock(motion_mutex);return handoff.controller;}
 void NotifyControllerInput(unsigned user,uint16_t buttons,uint8_t left,uint8_t right,int16_t lx,int16_t ly,int16_t rx,int16_t ry) {
     if(user)return;
     auto axis=[](int value){return std::abs(value)<8192?0:value/2048;};

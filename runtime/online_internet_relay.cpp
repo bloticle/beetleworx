@@ -381,11 +381,6 @@ struct InternetRelay::Impl {
                 }
                 {
                     std::lock_guard lock(mutex);
-                    if(!host && listener!=INVALID_SOCKET && channels[0].socket==INVALID_SOCKET){
-                        auto client=accept(listener,nullptr,nullptr);
-                        if(client!=INVALID_SOCKET){Need(Nonblocking(client),"Cannot configure local internet connection");channels[0].socket=client;Close(listener);}
-                        else Need(WSAGetLastError()==WSAEWOULDBLOCK,"Cannot accept local internet connection");
-                    }
                     for(unsigned id=0;id<channels.size();++id){auto& channel=channels[id];if(channel.socket==INVALID_SOCKET)continue;
                         if(channel.connecting){
                             fd_set writable,errors;FD_ZERO(&writable);FD_ZERO(&errors);FD_SET(channel.socket,&writable);FD_SET(channel.socket,&errors);timeval timeout{};
@@ -450,6 +445,20 @@ struct InternetRelay::Impl {
                 Need(bind(listener,reinterpret_cast<sockaddr*>(&address),sizeof(address))==0 && listen(listener,1)==0,"Cannot listen for the local game");
                 int length=sizeof(address);Need(getsockname(listener,reinterpret_cast<sockaddr*>(&address),&length)==0,"Cannot identify local internet bridge");
                 decoded->address="127.0.0.1";decoded->port=ntohs(address.sin_port);auto encoded=EncodeInvite(*decoded);Need(encoded.has_value(),"Invalid local internet session");invitation=*encoded;
+                // Publishing the local endpoint starts native file checking.
+                // Do not admit a remote socket while that work is pending:
+                // the host's normal handshake deadline must start only when
+                // the prepared game has connected and can send its Hello.
+                {std::lock_guard lock(mutex);view.ready=true;view.code=code;view.invitation=invitation;}
+                Phase("waiting for prepared local game");
+                const auto deadline=std::chrono::steady_clock::now()+std::chrono::minutes(10);
+                for(;;){
+                    Check();Need(std::chrono::steady_clock::now()<deadline,"Preparing the local game took too long. Try joining again.");
+                    auto client=accept(listener,nullptr,nullptr);
+                    if(client!=INVALID_SOCKET){channels[0].socket=client;Need(Nonblocking(client),"Cannot configure local internet connection");Close(listener);break;}
+                    Need(WSAGetLastError()==WSAEWOULDBLOCK,"Cannot accept local internet connection");
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                }
             }
             Phase("opening TLS WebSocket");
             auto socket=Request(connection.value,"/v1/rooms/"+code+(host?"/host":"/join"),version,{},true,key);
@@ -522,6 +531,15 @@ bool TestOnlineInternetVoiceRelay(std::string origin){
         InternetRelay host,guest;
         Need(host.Host(origin,"0.1.0-demo.4",*encoded) && wait([&]{auto s=host.status();Need(!s.failed,"Native relay host creation failed");return s.ready;}),"Native relay host timed out");
         Need(guest.Join(origin,"0.1.0-demo.4",host.status().code) && wait([&]{auto s=guest.status();Need(!s.failed,"Native relay guest join failed");return s.ready;}),"Native relay guest timed out");
+        // Real first-time file verification can exceed the host's 15-second
+        // handshake timeout. Until local preparation finishes, no connection
+        // may occupy that host socket or consume its handshake deadline.
+        std::this_thread::sleep_for(17s);
+        Need(!host.status().failed && !guest.status().failed,"Local preparation disconnected the relay");
+        const auto premature=accept(sockets.listener,nullptr,nullptr);
+        if(premature!=INVALID_SOCKET){closesocket(premature);Need(false,"Guest admitted before local file preparation completed");}
+        Need(WSAGetLastError()==WSAEWOULDBLOCK,"Fixture preparation admission check failed");
+        REXLOG_INFO("Internet join preparation regression passed: 17-second local preparation did not admit a host game socket");
         auto local=DecodeInvite(guest.status().invitation);Need(local.has_value(),"Fixture local invitation invalid");
         sockets.guest=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);Need(sockets.guest!=INVALID_SOCKET && Nonblocking(sockets.guest),"Fixture guest socket failed");
         address.sin_port=htons(local->port);

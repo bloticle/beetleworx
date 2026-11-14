@@ -32,6 +32,13 @@ and area coverage. Imported Rebrushed movement clips are for Mickey; Oswald
 uses existing animations. Mouse aiming and solo character switching/respawns
 also need additional testing.
 
+The new native menus, mouse navigation, manual prompt sets and lobby panels
+need broader physical keyboard/controller testing. A reported Epic Mickey 2
+campaign-save problem has not been reproduced or claimed fixed. Keep a backup.
+Startup update checks and consent are covered by mocked prerelease/download
+fixtures; a newer official release is needed to verify the complete live popup
+and restart path across different PCs.
+
 For a report, include your release version, area, what each player was doing,
 number of players and reproduction steps. Support & Updates prepares a bounded
 local report for review before you share it. Avoid posting room codes or private

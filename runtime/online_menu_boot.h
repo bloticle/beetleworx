@@ -19,6 +19,8 @@ class OnlineMenuBoot {
 public:
     explicit OnlineMenuBoot(bool rooms):rooms_(rooms){}
     bool uses_room()const{return rooms_;}
+    Room* LobbyChatRoom()const{return rooms_?room_.LobbyChatRoom():nullptr;}
+    bool KickLobbyPeer(uint64_t peer){return rooms_ && room_.KickLobbyPeer(peer);}
     bool Host(BootPaths paths,const std::filesystem::path& source,std::string listen,std::string advertised,uint16_t port,uint8_t delay,std::optional<std::array<uint8_t,16>> nonce){
         host_=true;
         return rooms_?room_.Host(std::move(paths),source,std::move(listen),std::move(advertised),16,"Player 1",port,delay,nonce):legacy_.Host(std::move(paths),source,std::move(listen),std::move(advertised),port,delay,nonce);

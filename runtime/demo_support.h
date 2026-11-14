@@ -9,6 +9,7 @@ struct DemoSupportSnapshot {
   std::string status,version,update_version,report_preview,report_path,report_sha256;
   uint64_t downloaded=0,total=0;
   bool auto_update=false,install_on_exit=false,clean_release=false,report_exported=false;
+  bool update_prompt_pending=false;
   // Recovery replaced the running image, or an install/recovery is in progress.
   // Caller must stop before SDK/guest setup and show status to the user.
   bool restart_required=false;

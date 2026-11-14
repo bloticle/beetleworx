@@ -5,6 +5,7 @@
 namespace rex::ui {class Window;}
 namespace em2 {
 void NotifyMouseKeyboardInput();
+bool UsingControllerInput();
 void NotifyControllerInput(unsigned user,uint16_t buttons,uint8_t left,uint8_t right,int16_t lx,int16_t ly,int16_t rx,int16_t ry);
 void NotifyMappedAimInput(unsigned user,bool aiming);
 void TickMouseCursor(PPCContext&,uint8_t*);

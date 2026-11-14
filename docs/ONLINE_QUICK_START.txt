@@ -10,22 +10,30 @@ PLAY WITH FRIENDS
 Everyone needs the same Beetleworx release version and compatible game files.
 Start Epic Mickey 2 and open Online Multiplayer at the title menu.
 
-Host: select Host my save online to use your current single-player save. If you have no save yet,
+Host: select Host Game to use your current single-player save. If you have no save yet,
 start an offline game first and reach a save point, then return to the title.
 The first game-file check can take several minutes; keep the menu open.
-When the internet room is connected, select Copy room code and send it to your
+When the lobby opens, use the copy icon beside the room code and send it to your
 friends. The code has eight characters. There are no router settings to change.
 
-Guest: copy the host's room code and select Join copied room code. The host's
-save is transferred into a separate online session. Choose Ready in the lobby;
-the host selects Start online game when everyone is ready.
+Guest: select Join Game and type the host's room code, or choose Paste room code.
+The host's save is transferred into a separate online session. Choose Ready;
+the host selects Start Game when everyone is ready.
+
+The player list shows names, character icons, colors and ready marks. Player
+options changes your name, character and color. Colors must be unique. The host
+can select a guest in the list or Manage players, then confirm Kick player.
+
+For lobby text chat, click the message box or select Chat. Type your message and
+press Enter to send. Controller users get a character grid: A types, X deletes,
+Y sends and B closes it. During gameplay, T or D-pad Up opens text chat.
 
 DISCORD
 
 Run Beetleworx once to register game launching with Discord. Keep the Discord
 desktop app open. After hosting, select Invite Friends in the online menu
 to open Discord's game invitation screen. Choose friends or a channel there.
-Copy room code is also available. Accepting an invite enters the Join flow without
+The copy icon shares the room code instead. Accepting an invite enters the Join flow without
 copying a code. During gameplay, invites wait until you return to the title.
 Joining a session that has already started is not supported in this demo.
 
@@ -51,7 +59,9 @@ are not overwritten. No fresh release extraction is required to change sources.
 SETTINGS AND SAVES
 
 Use the native Options menu for graphics, input bindings, mouse/cursor settings
-and movement tuning. Start at 30 FPS; higher frame rates still need work.
+and movement tuning. Controls opens with player/device choices and a Button
+prompts option: Automatic, Keyboard & mouse, Xbox, PlayStation or Nintendo.
+Start at 30 FPS; higher frame rates still need work.
 Normal saves and preferences are in user_data. Online session saves are kept
 separate. Back up your saves before updating.
 
@@ -60,8 +70,11 @@ It needs your Wii game image or extracted files in addition to Epic Mickey 2.
 The preview is offline and the original campaign is not fully playable yet.
 
 Use Support & Updates to review/export a diagnostic report, open a GitHub issue
-draft, or check for updates. Reports are not uploaded automatically. Verified
-updates install on normal exit. Extract a fresh complete ZIP if an interrupted
+draft, or check for updates. Reports are not uploaded automatically. Official
+builds check for updates at launch. The game's notification popup offers Update
+or Not now; nothing downloads until you accept. Update verifies the download and
+restarts the game. Keep playing installs it when you exit normally instead.
+Extract a fresh complete ZIP if an interrupted
 update leaves the game unable to start; keep your saves and original game data.
 
 Read TESTING & KNOWN ISSUES.txt before testing online.

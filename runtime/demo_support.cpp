@@ -2,6 +2,7 @@
 #include "online_runtime.h"
 #include "demo_support_json.h"
 #include "em1_deflate.h"
+#include <rex/logging.h>
 #include <windows.h>
 #include <winhttp.h>
 #include <shellapi.h>
@@ -233,12 +234,14 @@ struct Context {
  ~Context(){stopping.store(true);if(worker.joinable())worker.join();}
 };
 Context context;
+std::string acknowledged_update;
+bool accepted_update=false;
 void UpdateProgress(uint64_t bytes){std::lock_guard lock(context.mutex);context.view.downloaded=bytes;}
-void SetState(DemoSupportState state,std::string text){std::lock_guard lock(context.mutex);context.view.state=state;context.view.status=std::move(text);}
+void SetState(DemoSupportState state,std::string text){std::lock_guard lock(context.mutex);context.view.state=state;if(state==DemoSupportState::Error)context.view.update_prompt_pending=false;context.view.status=std::move(text);}
 void Download(){Release release;fs::path stage;Fetch fetch;{std::lock_guard lock(context.mutex);Need(context.view.clean_release&&context.release.has_value(),"Verified installed release/update selection required");release=*context.release;stage=context.exe/".beetleworx-update"/("stage-"+release.sha.substr(0,16));context.stage=stage;fetch=context.fetch;context.view.total=release.bytes;context.view.downloaded=0;context.view.state=DemoSupportState::Downloading;context.view.status="Downloading verified update in the background...";}
- PlainTree(context.exe,fs::path(".beetleworx-update")/stage.filename());FileLease writer(stage.parent_path()/"stage.lock",true);auto response=fetch(release.url,max_bundle);Need(response.status==200,"Update download failed");auto manifest=Stage(response.bytes,release,stage);{std::lock_guard lock(context.mutex);context.staged=std::move(manifest);context.view.downloaded=release.bytes;context.view.state=DemoSupportState::Ready;context.view.install_on_exit=context.view.auto_update;context.view.status=context.view.auto_update?"Update ready. It will install when you exit normally.":"Update ready. Choose Install on exit when convenient.";}}
+ PlainTree(context.exe,fs::path(".beetleworx-update")/stage.filename());FileLease writer(stage.parent_path()/"stage.lock",true);auto response=fetch(release.url,max_bundle);Need(response.status==200,"Update download failed");auto manifest=Stage(response.bytes,release,stage);{std::lock_guard lock(context.mutex);context.staged=std::move(manifest);context.view.downloaded=release.bytes;context.view.state=DemoSupportState::Ready;context.view.install_on_exit=accepted_update||context.view.auto_update;context.view.status=context.view.install_on_exit?"Update ready. It will install when you exit normally.":"Update ready. Choose Install on exit when convenient.";}}
 void CheckUpdates(){Fetch fetch;Version version;{std::lock_guard lock(context.mutex);Need(context.view.clean_release,"This development/modified build cannot update itself. Install an official packaged release first.");version=Semver(context.installed.version);fetch=context.fetch;context.view.state=DemoSupportState::Checking;context.view.status="Checking public demo releases...";}
- auto response=fetch(api,8*1024*1024);auto release=SelectRelease(response,version);bool automatic=false;{std::lock_guard lock(context.mutex);context.release=release;if(!release){context.view.state=DemoSupportState::NoRelease;context.view.status=response.status==404?"No public releases yet. Your installation is unchanged.":"You have the newest available public demo.";return;}context.view.update_version=release->version;context.view.state=DemoSupportState::Available;context.view.status="Update "+release->version+" is available.";automatic=context.view.auto_update;}if(automatic)Download();}
+ auto response=fetch(api,8*1024*1024);auto release=SelectRelease(response,version);{std::lock_guard lock(context.mutex);context.release=release;if(!release){context.view.update_prompt_pending=false;context.view.update_version.clear();context.view.state=DemoSupportState::NoRelease;context.view.status=response.status==404?"No public releases yet. Your installation is unchanged.":"You have the newest available public demo.";return;}context.view.update_version=release->version;context.view.state=DemoSupportState::Available;context.view.status="Update "+release->version+" is available.";context.view.update_prompt_pending=acknowledged_update!=release->version;}}
 void Start(std::function<void()> fn){if(context.worker.joinable())context.worker.join();context.worker=std::jthread([fn=std::move(fn)]{background_task=true;SetThreadPriority(GetCurrentThread(),THREAD_MODE_BACKGROUND_BEGIN);try{fn();}catch(const std::exception&e){SetState(DemoSupportState::Error,e.what());}SetThreadPriority(GetCurrentThread(),THREAD_MODE_BACKGROUND_END);background_task=false;});}
 bool Busy(){return context.view.state==DemoSupportState::Checking||context.view.state==DemoSupportState::Downloading;}
 bool Open(const fs::path&target){return reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr,L"open",target.c_str(),nullptr,nullptr,SW_SHOWNORMAL))>32;}
@@ -264,7 +267,8 @@ void InitializeDemoSupport(const fs::path&exe,const fs::path&user){
   auto preference=context.user/"support-preferences.json";context.view.auto_update=true;if(fs::is_regular_file(preference))try{context.view.auto_update=ParseJson(String(Read(preference,4096))).At("auto_update").Boolean();}catch(...){context.view.auto_update=false;context.view.status="Update preferences were invalid. Manual updates are available.";}
  }catch(const LeaseBusy&e){context.lease.reset();context.view.restart_required=true;context.view.status=e.what();return;}
  catch(const std::exception&e){if(recovering)context.lease.reset();context.view.version="development";context.view.clean_release=false;context.view.auto_update=false;context.view.restart_required=recovering;context.view.status=std::string(recovering?"Update recovery must finish before playing: ":"Automatic updates unavailable: ")+e.what();}
- const bool automatic=context.view.clean_release&&context.view.auto_update;
+ acknowledged_update.clear();accepted_update=false;
+ const bool automatic=context.view.clean_release;
  if(automatic)context.view.state=DemoSupportState::Checking;
  lock.unlock();if(automatic)Start(CheckUpdates);
 }
@@ -280,6 +284,17 @@ std::string OnlineReleaseVersion(const fs::path& directory){
 bool SupportOption(int id,const std::string&command,std::string&out){try{
  if(id==7310){auto s=SnapshotDemoSupport();out=s.status;return true;}if(id==7311){out=SnapshotDemoSupport().report_preview;return true;}if(id==7312){auto s=SnapshotDemoSupport();out=s.update_version.empty()?s.status:"Update "+s.update_version+" - "+s.status;return true;}
  fs::path exe,user;std::string version;{std::lock_guard lock(context.mutex);Need(context.initialized,"Support has not initialized");exe=context.exe;user=context.user;version=context.view.version;}
+ if(id==7316){
+  {
+   std::lock_guard lock(context.mutex);
+   Need(command=="accept" || command=="later","Choose Update or Not now");
+   if(command=="accept")Need(context.view.clean_release && context.release && context.view.state==DemoSupportState::Available && !Busy(),"No verified update is available to download");
+   acknowledged_update=context.view.update_version;context.view.update_prompt_pending=false;
+   if(command=="later"){out="Update skipped for this launch.";return true;}
+   accepted_update=true;context.view.state=DemoSupportState::Downloading;
+  }
+  Start(Download);out="Downloading the accepted update.";return true;
+ }
  if(id==7300||id==7301){std::string report;if(id==7300){report=Report(exe,user,version,command);std::lock_guard lock(context.mutex);context.view.report_preview=std::move(report);context.view.report_exported=false;out="Report preview prepared. Review the text before choosing Export.";return true;}
   {std::lock_guard lock(context.mutex);Need(!context.view.report_preview.empty(),"Preview the report before exporting it");report=context.view.report_preview;}
   auto hash=Hash(std::span(reinterpret_cast<const uint8_t*>(report.data()),report.size()));auto name="beetleworx-report-"+hash.substr(0,16)+".txt";auto path=user/"reports"/name;PlainTree(user,fs::path("reports")/name);if(fs::exists(path))Need(HashFile(path)==hash,"An existing report has different contents");else WriteText(path,report);std::lock_guard lock(context.mutex);context.view.report_preview=std::move(report);context.view.report_path=PathText(path);context.view.report_sha256=hash;context.view.report_exported=true;out="Report exported to "+PathText(path)+". Nothing was uploaded.";return true;}
@@ -289,7 +304,7 @@ bool SupportOption(int id,const std::string&command,std::string&out){try{
  if(id==7305||id==7308){std::lock_guard lock(context.mutex);if(id==7305)Need(context.staged.has_value()&&context.view.state==DemoSupportState::Ready,"Download and verify an update first");context.view.install_on_exit=id==7305;out=id==7305?"Update will install after you exit the game normally.":"Update installation on exit cancelled.";return true;}
  if(id==7306){bool value;{std::lock_guard lock(context.mutex);Need(context.view.clean_release,"Automatic updates require an unmodified official release");value=PreferenceValue(command,context.view.auto_update);}PlainTree(user,"support-preferences.json");DurableJournal(user/"support-preferences.json",std::string("{\"auto_update\":")+(value?"true}":"false}"));{std::lock_guard lock(context.mutex);context.view.auto_update=value;if(!value)context.view.install_on_exit=false;else if(context.staged&&context.view.state==DemoSupportState::Ready)context.view.install_on_exit=true;}out=value?"Automatic updates enabled; downloads happen in the background and install after normal exit.":"Automatic updates disabled.";return true;}
  return false;
- }catch(const std::exception&e){out=e.what();return false;}}
+ }catch(const std::exception&e){out=e.what();if(id==7316)SetState(DemoSupportState::Error,out);return false;}}
 bool ShutdownDemoSupport(bool restart,std::string&out){try{stopping.store(true);if(context.worker.joinable())context.worker.join();fs::path exe,stage;Manifest old,next;{std::lock_guard lock(context.mutex);context.lease.reset();if(!context.initialized||!context.view.install_on_exit||!context.staged){out="No update installation scheduled.";return true;}exe=context.exe;stage=context.stage;old=context.installed;next=*context.staged;}Install(exe,stage,old,next);out="Updated Beetleworx to "+next.version+". Your user data was preserved.";
  if(restart){auto canonical=exe/"beetleworx.exe";std::wstring command=L"\""+canonical.wstring()+L"\"";STARTUPINFOW startup{sizeof(startup)};PROCESS_INFORMATION process{};Need(CreateProcessW(canonical.c_str(),command.data(),nullptr,nullptr,FALSE,0,nullptr,exe.c_str(),&startup,&process)!=0,"Update installed; please reopen beetleworx.exe manually");CloseHandle(process.hThread);CloseHandle(process.hProcess);}return true;
  }catch(const std::exception&e){out=e.what();return false;}}
@@ -394,6 +409,34 @@ bool TestDemoSupport(std::string&error){
   std::string listing="[{\"draft\":false,\"prerelease\":true,\"tag_name\":"+Quote(next.tag)+",\"assets\":[{\"name\":\"Beetleworx.zip\",\"digest\":"+Quote("sha256:"+release.sha)+",\"browser_download_url\":"+Quote(release.url)+",\"size\":"+std::to_string(release.bytes)+"}]}]";
   unsigned fetches=0;Fetch mock=[&](const std::string&url,uint64_t limit){++fetches;if(url==api)return Response{200,b(listing)};Need(url==release.url&&limit>=archive.size(),"Unexpected update request in fixture");return Response{200,archive};};
   auto selected=SelectRelease(mock(api,8*1024*1024),Semver(old.version));Need(selected.has_value()&&selected->version==next.version,"Public demo prerelease was skipped");auto downloaded=mock(selected->url,max_bundle);auto stage=root/".beetleworx-update"/"stage-fixture";auto staged=Stage(downloaded.bytes,*selected,stage);Need(fetches==2&&staged.exe_sha==Hash(new_exe),"Mock update transport/staging regression");
+  {
+   Need(!context.initialized && !context.worker.joinable(),"Notification fixture requires an idle support context");
+   struct RestoreSupport {
+    Fetch fetch=context.fetch;
+    ~RestoreSupport(){stopping.store(true);if(context.worker.joinable())context.worker.join();std::lock_guard lock(context.mutex);context.lease.reset();context.fetch=std::move(fetch);context.view={};context.installed={};context.release.reset();context.staged.reset();context.exe.clear();context.user.clear();context.stage.clear();context.initialized=false;acknowledged_update.clear();accepted_update=false;stopping.store(false);}
+   }restore;
+   const auto app=root/"notification-app",user=app/"user_data";putRelease(app,old,old_exe,old_data);
+   WriteText(user/"support-preferences.json","{\"auto_update\":false}");
+   context.fetch=mock;fetches=0;
+   InitializeDemoSupport(app,user);context.worker.join();
+   auto notification=SnapshotDemoSupport();
+   Need(fetches==1 && notification.state==DemoSupportState::Available && notification.update_prompt_pending && !context.staged,"Launch must check with legacy automatic downloads disabled, without fetching a bundle");
+   std::string message;Need(SupportOption(7316,"later",message) && !SnapshotDemoSupport().update_prompt_pending && fetches==1,"Not now must dismiss without downloading");
+   CheckUpdates();Need(!SnapshotDemoSupport().update_prompt_pending && fetches==2 && !context.staged,"The same launch must not repeat a declined notification");
+   Need(SupportOption(7306,"on",message),"Legacy preference fixture failed");
+   CheckUpdates();Need(fetches==3 && !context.staged && SnapshotDemoSupport().state==DemoSupportState::Available,"Legacy automatic preference cannot bypass consent");
+   InitializeDemoSupport(app,user);context.worker.join();
+   Need(fetches==4 && SnapshotDemoSupport().update_prompt_pending,"A declined update must be offered again next launch");
+   Need(SupportOption(7306,"off",message),"Legacy manual preference fixture failed");
+   Need(SupportOption(7316,"accept",message),"Accepting the update failed");context.worker.join();
+   notification=SnapshotDemoSupport();
+   Need(fetches==5 && notification.state==DemoSupportState::Ready && notification.install_on_exit && !notification.update_prompt_pending && context.staged,"Only acceptance may download, verify and schedule the update");
+   VerifyTree(app,old);
+   context.fetch=[](const std::string&,uint64_t){return Response{503,{}};};
+   InitializeDemoSupport(app,user);context.worker.join();
+   Need(SnapshotDemoSupport().state==DemoSupportState::Error && !SnapshotDemoSupport().update_prompt_pending,"An offline/failed check cannot create an update prompt or stop game startup");
+   REXLOG_INFO("Startup update notifications passed: prerelease discovery, every-launch checks, no download before consent, Not now/session suppression, next-launch reoffer, accepted staging/install-on-exit and offline failure");
+  }
   auto recovery_work=root/".beetleworx-update";
   {FileLease first(recovery_work/"running.lock",false),second(recovery_work/"running.lock",false);Need(rejects([&]{Install(root,stage,old,next);}),"Install ignored another live game lease");VerifyTree(root,old);VerifyTree(stage,next);}
   {FileLease writer(recovery_work/"stage.lock",true);Need(rejects([&]{FileLease duplicate_writer(recovery_work/"stage.lock",true);}),"Multiple workers admitted to one staging directory");}

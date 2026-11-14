@@ -37,6 +37,8 @@ public:
     bool Rename(std::string_view);
     bool SetAppearance(LobbyCharacter,uint8_t color);
     bool SetReady(bool);
+    Room* LobbyChatRoom()const; // Borrowed, owner thread only; never retained.
+    bool KickLobbyPeer(uint64_t peer);
     bool CanStart()const;
     bool Start();
     // NativeMenu preparation always negotiates shared native initialization;

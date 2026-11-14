@@ -126,7 +126,7 @@ def main():
     runpy.run_path(str(ROOT / 'scripts/generate-native-options.py'))['generate']()
     local_glb = ROOT / "private/emr_mickey_source/mickeyEM2-rebrushedAnim.glb"
     emr_glb = args.emr_glb if args.emr_glb is not None else (local_glb if local_glb.is_file() else None)
-    inputs = [ROOT / "scripts/emr_ability_clips.py", Path(__file__), ROOT / "scripts/game-pak.py", ROOT / "scripts/patch-player-behaviors.py", ROOT / "scripts/generate-native-options.py", ROOT / "assets/pc-menu/NativeOptions.as.in", ROOT / "runtime/engine_settings_catalog.h", ROOT / "assets/pc-menu/TVSettings.as", ROOT / "assets/pc-menu/PlayerControls.as",
+    inputs = [ROOT / "scripts/emr_ability_clips.py", Path(__file__), ROOT / "scripts/game-pak.py", ROOT / "scripts/patch-player-behaviors.py", ROOT / "scripts/generate-native-options.py", ROOT / "assets/pc-menu/NativeOptions.as.in", ROOT / "assets/pc-menu/NativeMenuInput.as", ROOT / "runtime/engine_settings_catalog.h", ROOT / "assets/pc-menu/TVSettings.as", ROOT / "assets/pc-menu/PlayerControls.as",
               ROOT / "assets/pc-menu/CharacterSwitchHud.as",
               ROOT / "assets/pc-menu/OnlineChatHud.as",
               args.game_dir / "packfiles/UIOptions.pak", args.game_dir / "packfiles/UIPauseOptions.pak",
@@ -168,6 +168,11 @@ def main():
         options = options.replace('this.b_controller.label = "UI_User_Controls";', 'this.b_controller.label = "Controls & Camera";')
         options = options.replace('this.t_title.text = "UI_User_Controls";', 'this.t_title.text = "Controls & Camera";')
         options = options.replace('this.b_select.label = "UI_ToggleControls";', 'this.b_select.label = "Rebind";')
+        init_anchor='   function init()\n   {'
+        if options.count(init_anchor)!=1:
+            raise RuntimeError('Native options init changed')
+        options=options.replace(init_anchor,init_anchor+'\n      var pointerPump=this.createEmptyMovieClip("pcPointerPump",this.getNextHighestDepth());\n      pointerPump.onEnterFrame=function() { this._parent._pcMenuTree(this._parent,0); };')
+        options=options[:options.rfind('}')]+(ROOT/'assets/pc-menu/NativeMenuInput.as').read_text()+options[options.rfind('}'):]
         imports = work / "import"
         package = imports / "__Packages/em2/options"
         package.mkdir(parents=True, exist_ok=True)

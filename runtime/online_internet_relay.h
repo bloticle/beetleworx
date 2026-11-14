@@ -5,6 +5,8 @@
 namespace em2::net {
 class VoiceDatagramChannel;
 struct InternetRelayStatus {
+    // Host: hosted connection ready. Guest: local endpoint ready for file
+    // preparation; remote admission waits until the prepared game connects.
     bool ready=false,failed=false;
     std::string code,invitation,error;
 };

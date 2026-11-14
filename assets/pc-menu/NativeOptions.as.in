@@ -60,7 +60,7 @@ class em2.options.CLASS_NAME extends MovieClip
       var offset=Number(_global.offsetX); if(isNaN(offset)) offset=0;
       row._x=row.pcBaseX; row._y=row.pcBaseY;
       row.pcLabelWidth=screenWidth*0.84;
-      var split=this._view!=0 && item.id!=undefined && !item.action && !item.readOnly;
+      var split=this._view==1 && item.id!=undefined && !item.action && !item.readOnly;
       if(this._view==0 || this._view==2) {
          row.pcLabelWidth=screenWidth*0.38;
          row._x=offset+screenWidth*(row.pcRow%2==0?0.29:0.71)-row.pcCenter;
@@ -152,6 +152,8 @@ class em2.options.CLASS_NAME extends MovieClip
          this.pc_heading.text="Choose controls to edit";
          var devices=["Player 1: Keyboard & mouse","Player 1: Controller","Player 2: Keyboard & mouse","Player 2: Controller"];
          i=0; while(i<4) { this._label(this._rows[i],devices[i],{chooseProfile:i}); i++; }
+         var prompts=["Automatic","Keyboard & mouse","Xbox","PlayStation","Nintendo"];
+         this._label(this._rows[4],"Button prompts: "+prompts[_level0.SetOption(1040,-1)],{id:1040,choices:prompts});
          this.pc_help.text="Choose a player and input device. Select an action to rebind it. Changes are saved automatically.";
          this._finishRows(); return;
       }
@@ -206,7 +208,12 @@ class em2.options.CLASS_NAME extends MovieClip
       if(this._category == 7) this.pc_help.text = "Review and save a report before opening an issue. Verified updates install after normal exit. Downloads require a published Beetleworx release.";
       this._finishRows();
    }
-   function _finishRows() { var i=0; while(i<8) { if(!this._rows[i].pcWanted) this._label(this._rows[i],undefined,undefined); i++; } }
+   function _finishRows() {
+      var i=0; while(i<8) { if(!this._rows[i].pcWanted) this._label(this._rows[i],undefined,undefined); i++; }
+      var failed=_level0.SetOption(2202,-1)==1;
+      this.pc_help.textColor=failed?16755370:16777215;
+      if(failed) this.pc_help.text="Controls changed, but could not be saved to disk. Check that your user_data folder is writable, then change a binding to retry.";
+   }
    function _nativeText(id) {
       var text=""; var escaped=""; var hex="0123456789ABCDEF"; var i=0;
       while(i<768) { var value=_level0.SetOption(id,i++); if(value==undefined || value<=0) break; text+=String.fromCharCode(value); escaped+="%"+hex.charAt(value>>4)+hex.charAt(value&15); }
@@ -257,6 +264,7 @@ class em2.options.CLASS_NAME extends MovieClip
    }
    function onEnterFrame()
    {
+      if(this._enabled && !this._capturing) this._pcMenuInput();
       if(this._enabled && this._capturing && _level0.SetOption(2200,-1)==0)
       { this._capturing=false; this._refresh(); this._list.activate(this._selected); }
       if(this._enabled && !this._capturing && ++this._refreshTick>=15) { this._refreshTick=0; this._refresh(); }

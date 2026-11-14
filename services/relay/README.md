@@ -2,8 +2,10 @@
 
 The relay is deployed at https://beetleworx-relay.ryanckoop1.workers.dev.
 A live component check verified host/guest WebSockets, unchanged payloads in
-both directions and rejection of new joins after a room starts. Native gameplay
-over the relay and real Discord invitations still need end-to-end testing.
+both directions and rejection of new joins after a room starts. Two native
+game processes on one PC now have [hosted-relay gameplay, native HUD chat and
+a level-transition check](../../docs/online-relay-gameplay.md). Separate-machine
+play, longer campaigns and real Discord invitations remain unverified.
 
 The live service carries gameplay/text and a separate authenticated media
 endpoint. Demo.5 includes the native voice adapter and proximity settings.

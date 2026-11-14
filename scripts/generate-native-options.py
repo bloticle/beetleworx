@@ -20,7 +20,6 @@ def generate():
         dict(id=7305,title='Install downloaded update',action=True,choices=['When game closes']),
         dict(id=7308,title='Cancel scheduled install',action=True,choices=['Cancel']),
         dict(id=7314,title='Install when game closes',readOnly=True,choices=['Off','On']),
-        dict(id=7306,title='Automatic updates',choices=['Off','On']),
         dict(id=7309,title='Update details',action=True,choices=['Show'])]
     pages[6]['options'] = [
         dict(id=7200, title='Epic Mickey (Wii)', action=True,
@@ -46,6 +45,7 @@ def generate():
         pages[4]['options'].append(dict(id=6000+index,title=title,choices=choices))
     actions = ['Jump','Interact / co-op','Spin attack','Photo mode','Recenter / lock-on','Sketch action','Thinner / electricity','Paint / electricity','Aim mode','Guardian','Pause / join','Cursor mode','Sketch up','Sketch down','Sketch left','Sketch right','Move left','Move right','Move forward','Move back','Camera left','Camera right','Camera up','Camera down','Switch character','Sprint','Dash','Ground pound']
     template = (ROOT / 'assets/pc-menu/NativeOptions.as.in').read_text()
+    template = template[:template.rfind('}')] + (ROOT / 'assets/pc-menu/NativeMenuInput.as').read_text() + '}\n'
     for name, category, view in [('TVSettings',0,0),('PlayerControls',5,2)]:
         text = template.replace('CLASS_NAME',name).replace('INITIAL_CATEGORY',str(category)).replace('INITIAL_VIEW',str(view))
         definitions = re.sub(r'"([A-Za-z_][A-Za-z0-9_]*)":',r'\1:',json.dumps(pages))

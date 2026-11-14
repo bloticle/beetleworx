@@ -15,7 +15,8 @@ def main():
     destination=ROOT/'private/pc-assets/packfiles/UIStartGame.pak'
     manifest=ROOT/'private/pc-assets/online-startup-manifest.json'
     fresh_profile=ROOT/'assets/pc-menu/OnlineFreshProfile.as'
-    fingerprint=hashlib.sha256(Path(__file__).read_bytes()+(ROOT/'scripts/game-pak.py').read_bytes()+snippet.read_bytes()+fresh_profile.read_bytes()+(ROOT/'assets/pc-menu/OnlineSaveNoticeTrace.as').read_bytes()+original.read_bytes()).hexdigest()
+    pointer=ROOT/'assets/pc-menu/NativeMenuInput.as'
+    fingerprint=hashlib.sha256(Path(__file__).read_bytes()+(ROOT/'scripts/game-pak.py').read_bytes()+snippet.read_bytes()+pointer.read_bytes()+fresh_profile.read_bytes()+(ROOT/'assets/pc-menu/OnlineSaveNoticeTrace.as').read_bytes()+original.read_bytes()).hexdigest()
     if manifest.exists() and destination.exists():
         prior=json.loads(manifest.read_text())
         if prior.get('fingerprint')==fingerprint and prior.get('sha256')==hashlib.sha256(destination.read_bytes()).hexdigest():
@@ -29,6 +30,10 @@ def main():
     run('java','-jar',jar,'-export','script',work/'export',source)
     relative=Path('__Packages/em2/mainmenu/startgame/StartGame.as')
     text=(work/'export/scripts'/relative).read_text(encoding='utf-8-sig')
+    init='   function init()\n   {'
+    if text.count(init)!=1:raise RuntimeError('Native save menu init changed')
+    text=text.replace(init,init+'\n      var pump=this.createEmptyMovieClip("pcPointerPump",this.getNextHighestDepth());\n      pump.onEnterFrame=function() { this._parent._pcMenuTree(this._parent,0); };')
+    text=text[:text.rfind('}')]+pointer.read_text()+text[text.rfind('}'):]
     start=text.index('   function showSavingMessage()')
     end=text.index('   function showAutoSavingMessage()',start)
     body=text[start:end]

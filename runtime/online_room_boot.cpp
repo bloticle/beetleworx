@@ -126,6 +126,8 @@ BootStatus OnlineRoomBoot::status()const{auto s=impl_->status;s.preparation=impl
 RoomState OnlineRoomBoot::room_state()const{return impl_->room?impl_->room->state():RoomState::Idle;}
 uint64_t OnlineRoomBoot::local_peer()const{return impl_->room?impl_->room->local_peer():0;}
 LobbySnapshot OnlineRoomBoot::lobby()const{return impl_->room?impl_->room->lobby():LobbySnapshot{};}
+Room* OnlineRoomBoot::LobbyChatRoom()const{return impl_->room.get();}
+bool OnlineRoomBoot::KickLobbyPeer(uint64_t peer){return impl_->room && impl_->room->KickLobbyPeer(peer);}
 std::vector<RoomCheckpointPeer> OnlineRoomBoot::checkpoint_progress()const{return impl_->room?impl_->room->checkpoint_peers():std::vector<RoomCheckpointPeer>{};}
 LobbyResult OnlineRoomBoot::last_lobby_result()const{return impl_->room?impl_->room->last_lobby_result():LobbyResult::Ok;}
 bool OnlineRoomBoot::profile_pending()const{return impl_->room && impl_->room->profile_pending();}

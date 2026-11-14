@@ -1,8 +1,9 @@
 [CmdletBinding()]
 param(
- [ValidateRange(3,16)][int]$Players=3,
+ [ValidateRange(2,16)][int]$Players=3,
  
  [switch]$CooperativeShutdown,[switch]$WorldMemory,[switch]$TrimSharedUploads,[switch]$ColdShaderStorage,
+ [string]$RelayOrigin='',
  [ValidateRange(0,10)][int]$MovieSkipDelay=0,
  [switch]$DirectMovie,[switch]$MovieSequence,[switch]$AuthoredConversation,[switch]$CutsceneCycle,[switch]$CutsceneBoundaryMovement,[switch]$CutsceneSkipInput,[switch]$CutsceneHeldReturn,[switch]$UnfencedCutsceneReturn,
  [switch]$ExtraOswald,
@@ -28,6 +29,8 @@ param(
  [ValidateRange(120,600)][int]$StartupTimeoutSeconds=360
 )
 $ErrorActionPreference='Stop'
+if($RelayOrigin){$uri=$null;if(![Uri]::TryCreate($RelayOrigin,[UriKind]::Absolute,[ref]$uri) -or $uri.Scheme -ne 'https' -or $uri.UserInfo -or $uri.Query -or $uri.Fragment -or $uri.AbsolutePath -ne '/'){throw 'RelayOrigin requires a plain HTTPS origin without credentials, path, query or fragment.'};if($ReplayInvitationFile){throw 'Hosted relay tests cannot replay a loopback invitation.'}}
+if($Players -eq 2 -and $ButtonTaskProbe){throw 'ButtonTaskProbe compares extra-human tasks and requires at least three players.'}
 if($DirectMovie -and ($MovieSequence -or $AuthoredConversation -or $CutsceneCycle -or $Players -ne 3 -or !$ScriptedInput -or $CheckpointReloadTick -ne 300 -or $CheckpointReloadCount -ne 1 -or $MovieSkipDelay -or $DamagePlayer -or $DamageExtraPeer -or $NativeLevelTarget -or $NativeLevelTargets.Count -or $PolicyCycle -or $ReenterAfterReturn -or $CloseParticipant -or $PartialDeliveryParticipant)){throw 'DirectMovie requires three scripted humans and one original PlayMovieInternal at tick 300, without other fixtures.'}
 if($MovieSkipDelay -and !$MovieSequence){throw 'MovieSkipDelay requires MovieSequence.'}
 if($MovieSequence -and ($DirectMovie -or $AuthoredConversation -or $CutsceneCycle -or $Players -ne 3 -or !$ScriptedInput -or $CheckpointReloadTick -ne 300 -or $CheckpointReloadCount -ne 1 -or $DamagePlayer -or $DamageExtraPeer -or $NativeLevelTarget -or $NativeLevelTargets.Count -or $PolicyCycle -or $ReenterAfterReturn -or $CloseParticipant -or $PartialDeliveryParticipant)){throw 'MovieSequence requires three scripted humans and one original StartSequence call at tick 300, without other fixtures.'}
@@ -98,6 +101,7 @@ $record.native_reload=[bool]$NativeReload
 $record.profile_world_memory=[bool]$WorldMemory
 $record.trim_shared_uploads=[bool]$TrimSharedUploads
 $record.cold_shader_storage=[bool]$ColdShaderStorage
+$record.relay_origin=$RelayOrigin
 $record.button_task_probe=[bool]$ButtonTaskProbe
 $record.policy_cycle=[bool]$PolicyCycle
 $record.checkpoint_reload_count=$CheckpointReloadCount
@@ -221,6 +225,7 @@ try {
   if($WorldMemory){$info.ArgumentList.Add('--em2_profile_world_memory=true')}
   if($TrimSharedUploads){$info.ArgumentList.Add("--em2_trim_shared_upload_cache=true")}
   if($ColdShaderStorage){$info.ArgumentList.Add('--no-em2_persistent_shader_cache')}
+  if($RelayOrigin){$info.ArgumentList.Add('--em2_native_lobby_qa_internet=true');$info.ArgumentList.Add('--em2_online_relay_url='+$RelayOrigin)}
   if($DirectMovie){$info.ArgumentList.Add('--em2_native_lobby_qa_direct_movie=true')}
   if($MovieSequence){$info.ArgumentList.Add('--em2_native_lobby_qa_movie_sequence=true');$info.ArgumentList.Add('--em2_native_lobby_qa_movie_skip_delay='+$MovieSkipDelay)}
   if($AuthoredConversation){$info.ArgumentList.Add('--em2_native_lobby_qa_authored_conversation=true')}

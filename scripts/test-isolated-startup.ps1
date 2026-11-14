@@ -13,7 +13,10 @@ foreach($entry in Get-ChildItem -LiteralPath (Join-Path $runtimeDirectory 'pc-as
     $target=Join-Path $content $entry.Name
     if($entry.PSIsContainer){New-Item -ItemType Junction -Path $target -Target $entry.FullName | Out-Null}
     elseif($entry.Name -eq 'ConfigFiles.ini'){Copy-Item -LiteralPath $entry.FullName -Destination $target}
-    else{New-Item -ItemType HardLink -Path $target -Target $entry.FullName | Out-Null}
+    else{
+        try{New-Item -ItemType HardLink -Path $target -Target $entry.FullName -ErrorAction Stop | Out-Null}
+        catch{if(Test-Path -LiteralPath $target){throw};Copy-Item -LiteralPath $entry.FullName -Destination $target}
+    }
 }
 function ReadUserHashes {
     $result=@{}

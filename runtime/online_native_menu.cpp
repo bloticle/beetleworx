@@ -14,6 +14,7 @@
 #include "online_invite.h"
 #include "online_notice.h"
 #include "online_router.h"
+#include "online_chat.h"
 #include "demo_setup.h"
 #include "allocation_trace.h"
 #include <rex/runtime.h>
@@ -33,6 +34,7 @@
 
 REXCVAR_DEFINE_BOOL(em2_open_native_online_menu,false,"Debug","Open the authored native online page on the title menu (no gameplay input)");
 REXCVAR_DEFINE_STRING(em2_native_lobby_qa_role,"","Debug","Private native-menu loopback test role: host or client");
+REXCVAR_DEFINE_BOOL(em2_native_lobby_qa_internet,false,"Debug","Use the configured hosted relay in a validated private native-menu fixture; no Discord presence, clipboard or discovery");
 REXCVAR_DEFINE_BOOL(em2_native_lobby_qa_extra_oswald,false,"Debug","Private native lobby only: select Oswald for additional players before Ready");
 REXCVAR_DEFINE_INT32(em2_native_lobby_qa_players,2,"Debug","Private native Room menu: wait for exactly 2..16 verified participants before Ready");
 REXCVAR_DEFINE_STRING(em2_native_lobby_qa_invitation_file,"","Debug","Private native-menu loopback invitation file");
@@ -49,7 +51,11 @@ std::atomic<Room*> private_menu_room{nullptr};
 std::atomic<unsigned> qa_reentries{0};
 std::string previous_qa_invitation;
 bool FrontendLevel(std::string_view level){return level=="mainmenu.start" || level.starts_with("mainmenu.");}
-struct QaConfig {int role=0;std::filesystem::path invitation;std::optional<std::array<uint8_t,16>> replay_nonce;unsigned players=2;};
+struct QaConfig {int role=0;std::filesystem::path invitation;std::optional<std::array<uint8_t,16>> replay_nonce;unsigned players=2;bool internet=false;};
+bool ValidQaInvitation(std::string_view text,bool internet){
+    if(internet)return text.size()==8 && std::all_of(text.begin(),text.end(),[](char c){return std::string_view("ABCDEFGHJKLMNPQRSTUVWXYZ23456789").find(c)!=std::string_view::npos;});
+    const auto invite=DecodeInvite(text);return invite && invite->address=="127.0.0.1";
+}
 QaConfig LoadQaConfig(){
     namespace fs=std::filesystem;
     const auto role=REXCVAR_GET(em2_native_lobby_qa_role);
@@ -57,6 +63,8 @@ QaConfig LoadQaConfig(){
     try{
         auto* runtime=rex::Runtime::instance();if(!runtime)return {};
         const auto players=REXCVAR_GET(em2_native_lobby_qa_players);
+        const bool internet=REXCVAR_GET(em2_native_lobby_qa_internet);
+        if(internet && (!REXCVAR_GET(em2_private_profile) || REXCVAR_GET(em2_online_relay_url).empty()))throw std::runtime_error("private relay test requires private profiling and an explicit relay origin");
         if(players<2 || players>16 || (players>2 && !REXCVAR_GET(em2_native_room_lobby)))throw std::runtime_error("invalid participant count");
         if(role!="host" && role!="client"){
             unsigned index=0;const auto suffix=std::string_view(role).substr(std::min<size_t>(7,role.size()));
@@ -78,6 +86,7 @@ QaConfig LoadQaConfig(){
             fs::canonical(invitation.parent_path())!=root || fs::is_symlink(invitation))throw std::runtime_error("invitation outside private pair");
         std::optional<std::array<uint8_t,16>> nonce;
         const auto replay=REXCVAR_GET(em2_native_lobby_qa_replay_invitation_file);
+        if(internet && !replay.empty())throw std::runtime_error("relay QA cannot replay a loopback invitation");
         if(!replay.empty()){
             const fs::path source(replay);const auto folder=fs::canonical(source.parent_path());
             if(role!="host" || !source.is_absolute() || source.filename()!=L"native-menu-invitation.txt" ||
@@ -88,8 +97,8 @@ QaConfig LoadQaConfig(){
             nonce=old->session;
             REXLOG_INFO("Native lobby QA reusing captured nonce from {}; compatibility identities remain freshly measured",source.string());
         }
-        REXLOG_INFO("Native lobby QA enabled: {}, private user data {}, loopback only; discovery/router/clipboard disabled",role,user.string());
-        return {role=="host"?1:2,invitation,nonce,unsigned(players)};
+        REXLOG_INFO("Native lobby QA enabled: {}, private user data {}, {}; discovery/router/clipboard/Discord disabled",role,user.string(),internet?"hosted relay":"loopback only");
+        return {role=="host"?1:2,invitation,nonce,unsigned(players),internet};
     }catch(const std::exception& error){REXLOG_ERROR("Native lobby QA rejected: {}",error.what());return {};}
 }
 const QaConfig& Qa(){static const auto configuration=LoadQaConfig();return configuration;}
@@ -99,8 +108,7 @@ bool QaReentryPageRequested(){
         NativeOnlineTitleRestoreStatus()!=NativeTitleRestoreState::Failed;
 }
 bool PublishQaInvitation(std::string_view invitation){
-    const auto parsed=DecodeInvite(invitation);
-    if(Qa().role!=1 || !parsed || parsed->address!="127.0.0.1")return false;
+    if(Qa().role!=1 || !ValidQaInvitation(invitation,Qa().internet))return false;
     auto temporary=Qa().invitation;temporary+=L".tmp";
     std::ofstream output(temporary,std::ios::binary|std::ios::trunc);output.write(invitation.data(),std::streamsize(invitation.size()));output.close();
     if(!output)return false;
@@ -110,8 +118,7 @@ std::optional<std::string> ReadQaInvitation(){
     if(Qa().role!=2)return {};
     std::error_code error;const auto size=std::filesystem::file_size(Qa().invitation,error);if(error || !size || size>256)return {};
     std::string code(size,'\0');std::ifstream input(Qa().invitation,std::ios::binary);input.read(code.data(),std::streamsize(code.size()));
-    const auto invitation=DecodeInvite(code);
-    if(!input || !invitation || invitation->address!="127.0.0.1")return {};
+    if(!input || !ValidQaInvitation(code,Qa().internet))return {};
     if(NativeOnlineTitleRestoreStatus()==NativeTitleRestoreState::Ready && code==previous_qa_invitation)return {};
     previous_qa_invitation=code;
     return code;
@@ -165,13 +172,13 @@ struct Controller {
     void CollectInternet(){std::erase_if(closing_internet,[](const auto& relay){return relay->finished();});}
     void RetireInternet(){
         if(!internet)return;internet->Stop();
-        ClearDiscordParty(internet->status().code);
+        if(!NativeOnlineMenuQaActive())ClearDiscordParty(internet->status().code);
         if(!internet->finished())closing_internet.push_back(internet);
         internet.reset();
     }
     std::optional<BootPaths> internet_join_paths;
     std::string discord_join_code;
-    bool InternetMode()const{return !NativeOnlineMenuQaActive() && !REXCVAR_GET(em2_online_relay_url).empty();}
+    bool InternetMode()const{return (!NativeOnlineMenuQaActive() || Qa().internet) && !REXCVAR_GET(em2_online_relay_url).empty();}
     std::string ReleaseVersion()const{
         std::array<wchar_t,32768> path{};const auto size=GetModuleFileNameW(nullptr,path.data(),DWORD(path.size()));
         if(!size || size>=path.size())throw std::runtime_error("Executable path unavailable");
@@ -183,12 +190,17 @@ struct Controller {
     size_t selected=0;
     size_t roster_page=0;
     RosterView roster_view;
+    LobbySnapshot full_roster;
+    uint64_t kick_candidate=0;
+    uint64_t kick_revision=0;
     HostCampaignCatalog campaigns;
     size_t selected_campaign=0;
     std::stop_source campaign_cancel;
     std::future<HostCampaignCatalog> campaign_scan;
     bool host=false,start=false,start_requested=false,handoff_available=false,try_router=false,lan_discovery=false;
     bool qa_appearance_reported=false;
+    bool qa_roster_readback=false;
+    std::chrono::steady_clock::time_point qa_lobby_since{};
     std::string error,feedback,advertised,reported_error,message_readback;
     ~Controller(){campaign_cancel.request_stop();}
     bool Busy()const{
@@ -225,11 +237,12 @@ struct Controller {
             }
         }
         boot->Poll();const auto status=boot->status();
+        if(boot->uses_room() && status.state!=BootState::Taken)PumpOnlineChat(boot->LobbyChatRoom());
         if(internet && (status.state==BootState::WaitingForPeer || status.state==BootState::Ready)){
             const auto relay=internet->status();if(relay.ready){
                 const auto roster=boot->lobby();
                 internet->SetJoinable(!roster.locked);
-                SetDiscordParty(relay.code,unsigned(std::max<size_t>(1,roster.players.size())),roster.capacity>=2?roster.capacity:16,!roster.locked);
+                if(!NativeOnlineMenuQaActive())SetDiscordParty(relay.code,unsigned(std::max<size_t>(1,roster.players.size())),roster.capacity>=2?roster.capacity:16,!roster.locked);
             }
         }
         if(host && InternetMode() && !internet && HasShareableInvite(status,boot->uses_room())){
@@ -270,8 +283,10 @@ struct Controller {
         }
         if(host && HasShareableInvite(status,boot->uses_room())){
             if(NativeOnlineMenuQaActive()){
-                if(advertised!=status.invitation && PublishQaInvitation(status.invitation)){
-                    advertised=status.invitation;REXLOG_INFO("Native lobby QA host published private loopback invitation");
+                const auto relay=internet?internet->status():InternetRelayStatus{};
+                const auto& invitation=Qa().internet?relay.code:status.invitation;
+                if((!Qa().internet || relay.ready) && advertised!=invitation && PublishQaInvitation(invitation)){
+                    advertised=invitation;REXLOG_INFO("Native lobby QA host published private {} invitation",Qa().internet?"relay":"loopback");
                 }
             }else{
                 if(host && try_router && !router){
@@ -396,10 +411,12 @@ struct Controller {
         if(Busy())return;
         CollectInternet();
         if(closing_internet.size()>=8){error="Previous connections are still closing. Please try again in a moment.";return;}
-        name_input.End();name_input_state=0;
+        join_input.End();name_input.End();name_input_state=0;
         router.reset();RetireInternet();internet_join_paths.reset();
         error.clear();feedback.clear();start=false;start_requested=false;
         qa_appearance_reported=false;
+        qa_roster_readback=false;qa_lobby_since={};
+        kick_candidate=0;kick_revision=0;full_roster={};
         roster_page=0;roster_view={};
         const auto level=em2::CurrentNativeLoadLevel();auto* runtime=rex::Runtime::instance();
         if(NativeOnlineStatus().state==NativeSessionState::Failed){
@@ -436,6 +453,21 @@ struct Controller {
         }catch(const std::exception&){error="Could not prepare the online session folder. Check disk space and permissions.";}
     }
     LobbyNameInput name_input;int name_input_state=0;
+    LobbyNameInput join_input{8,8};std::string join_error;
+    void BeginJoinInput(){join_error.clear();join_input.Begin("");em2::ClearControlKeys();}
+    void PasteJoinInput(){
+        const auto pasted=ClipboardInvitation();std::string code;
+        if(pasted)for(unsigned char c:*pasted){if(c==' ' || c=='-' || c=='\r' || c=='\n' || c=='\t')continue;if(c>='a' && c<='z')c-=32;code+=char(c);}
+        if(code.size()!=8 || !std::all_of(code.begin(),code.end(),[](char c){return std::string_view("ABCDEFGHJKLMNPQRSTUVWXYZ23456789").find(c)!=std::string_view::npos;})){
+            join_error="Copy the eight-character room code from your friend first.";return;
+        }
+        join_input.Begin(code);join_error.clear();
+    }
+    void FinishJoinInput(){
+        const auto code=join_input.text();
+        if(code.size()!=8){join_error="Enter all eight characters of the room code.";return;}
+        join_input.End();Begin(false,code);
+    }
     std::array<bool,256> name_keys{};
     std::string name_readback;unsigned cursor_readback=0,anchor_readback=0;
     void FinishNameInput(bool commit){
@@ -448,7 +480,7 @@ struct Controller {
         for(const auto& player:roster.players)if(player.peer==peer)return &player;
         return nullptr;
     }
-    bool ProfileEditable()const{return boot && State()==6 && !boot->lobby().locked && !boot->lobby_request_pending();}
+    bool ProfileEditable()const{return boot && (State()==2 || State()==6) && !boot->lobby().locked && !boot->lobby_request_pending();}
     std::string RosterText()const{
         if(!boot)return {};
         const auto roster=boot->lobby();std::string text;
@@ -460,12 +492,12 @@ struct Controller {
         }
         return text;
     }
-    void Cancel(){name_input.End();name_input_state=0;campaign_cancel.request_stop();if(boot)boot->Cancel();RetireInternet();internet_join_paths.reset();router.reset();start=false;start_requested=false;error.clear();feedback.clear();advertiser.Stop();browser.Stop();advertised.clear();}
+    void Cancel(){PumpOnlineChat(nullptr);kick_candidate=0;join_input.End();name_input.End();name_input_state=0;campaign_cancel.request_stop();if(boot)boot->Cancel();RetireInternet();internet_join_paths.reset();router.reset();start=false;start_requested=false;error.clear();feedback.clear();advertiser.Stop();browser.Stop();advertised.clear();}
 };
 Controller& Menu(){static Controller controller;return controller;}
 }
 bool NativeOnlineMenuOption(int id,int choice,int& result){
-    if(id<2700 || id>2745 || (id>2716 && id<2720))return false;
+    if((id<2700 || id>2745 || (id>2716 && id<2720)) && (id<2770 || id>2782))return false;
     if(id==2743){result=choice==1?(!REXCVAR_GET(em2_online_relay_url).empty() && !Em1DemoSession()):OnlineMenuAvailable();return true;}
     struct Restore{unsigned csr=_mm_getcsr();DWORD error=GetLastError();~Restore(){_mm_setcsr(csr);SetLastError(error);}}restore;
     if(!OnlineMenuAvailable()) {
@@ -475,6 +507,44 @@ bool NativeOnlineMenuOption(int id,int choice,int& result){
         return true;
     }
     auto& menu=Menu();std::lock_guard lock(menu.mutex);result=0;
+    if(id>=2780 && id<=2782){
+        if(id==2780){
+            if(choice==1 && menu.InternetMode() && !menu.Busy())menu.BeginJoinInput();
+            else if(choice==0)menu.join_input.End();
+            else if(choice==2 && menu.join_input.active())menu.FinishJoinInput();
+            else if(choice==3 && menu.join_input.active())menu.PasteJoinInput();
+            result=menu.join_input.active();
+        }else result=ByteAt(id==2781?menu.join_input.text():menu.join_error,choice);
+        return true;
+    }
+    if(id>=2770 && id<=2777){
+        if(!menu.boot || !menu.boot->uses_room())return true;
+        if(id==2770){
+            menu.full_roster=menu.boot->lobby();result=int(menu.full_roster.players.size());
+            if(NativeOnlineMenuQaActive() && result>=2 && !menu.qa_roster_readback){menu.qa_roster_readback=true;REXLOG_INFO("Native lobby full roster UI readback: {} players; authored panel initialized",result);}
+        }
+        else if(id==2776){
+            const auto live=menu.boot->lobby();const auto target=std::find_if(live.players.begin(),live.players.end(),[&](const auto& p){return p.peer==menu.kick_candidate;});
+            if(target!=live.players.end())result=ByteAt(target->name,choice);
+        }else if(id==2777){
+            if(choice==1 && menu.host && menu.kick_candidate){
+                if(menu.boot->lobby().revision==menu.kick_revision)result=menu.boot->KickLobbyPeer(menu.kick_candidate);
+                else menu.feedback="The player list changed. Select the player again before removing them.";
+            }
+            menu.kick_candidate=0;
+        }else {
+            const auto index=id==2771?choice/128:choice;
+            if(choice<0 || index<0 || size_t(index)>=menu.full_roster.players.size())return true;
+            const auto& player=menu.full_roster.players[size_t(index)];
+            const bool can_kick=menu.host && !menu.full_roster.locked && player.peer!=menu.boot->local_peer();
+            if(id==2771)result=ByteAt(player.name,choice%128);
+            else if(id==2772)result=int(player.character);
+            else if(id==2773)result=int(kLobbyColors[player.color].rgba>>8);
+            else if(id==2774)result=(player.peer==1?1:0)|(player.peer==menu.boot->local_peer()?2:0)|(player.ready?4:0)|(can_kick?8:0);
+            else if(id==2775 && can_kick){menu.kick_candidate=player.peer;menu.kick_revision=menu.full_roster.revision;result=1;}
+        }
+        return true;
+    }
     if(id==2745){
         const bool available=!NativeOnlineMenuQaActive() && menu.InternetMode() && menu.host && menu.internet && menu.internet->status().ready && CanInviteDiscordFriends();
         if(choice==1 && available){
@@ -509,7 +579,7 @@ bool NativeOnlineMenuOption(int id,int choice,int& result){
             break;
         case 8:case 9:if(!menu.browser.games().empty())menu.selected=(menu.selected+menu.browser.games().size()+(choice==8?1:-1))%menu.browser.games().size();break;
         case 10:if(NativeOnlineMenuQaActive() && Qa().role==2 && !menu.Busy())if(auto invitation=ReadQaInvitation()){
-            REXLOG_INFO("Native GFx online requested Join through private loopback invitation");menu.Begin(false,*invitation);
+            REXLOG_INFO("Native GFx online requested Join through private {} invitation",Qa().internet?"relay":"loopback");menu.Begin(false,*invitation);
         }break;
         case 11:menu.ScanCampaigns();break;
         case 12:if(!menu.Busy() && !menu.campaign_scan.valid() && menu.selected_campaign<menu.campaigns.campaigns.size()){
@@ -545,7 +615,16 @@ bool NativeOnlineMenuOption(int id,int choice,int& result){
     else if(id==2703)result=int(menu.browser.games().size());
     else if(id==2704)result=int(menu.selected);
     else if(id==2705)result=REXCVAR_GET(em2_open_native_online_menu) || NativeOnlineMenuQaActive() || QaReentryPageRequested();
-    else if(id==2706)result=menu.handoff_available && menu.boot && menu.boot->CanRequestLobbyStart();
+    else if(id==2706){
+        result=menu.handoff_available && menu.boot && menu.boot->CanRequestLobbyStart();
+        // Let the authored lobby render and query its roster before private
+        // automation starts the world. Normal player start requests never wait.
+        if(result && NativeOnlineMenuQaActive()){
+            const auto now=std::chrono::steady_clock::now();
+            if(menu.qa_lobby_since==std::chrono::steady_clock::time_point{})menu.qa_lobby_since=now;
+            result=now-menu.qa_lobby_since>=std::chrono::seconds(3);
+        }
+    }
     else if(id==2707)result=NativeOnlineMenuQaActive()?Qa().role:0;
     else if(id==2708)result=int(menu.campaigns.campaigns.size());
     else if(id==2709)result=int(menu.selected_campaign);
@@ -629,6 +708,16 @@ bool NativeOnlineMenuOption(int id,int choice,int& result){
 bool NativeOnlineNameKey(unsigned key,bool down,bool shift,bool control){
     if(!OnlineMenuAvailable())return false;
     auto& menu=Menu();std::lock_guard lock(menu.mutex);
+    if(menu.join_input.active()){
+        if(key<menu.name_keys.size())menu.name_keys[key]=down;
+        if(down){
+            if(key==VK_RETURN)menu.FinishJoinInput();
+            else if(key==VK_ESCAPE)menu.join_input.End();
+            else if(control && key=='V')menu.PasteJoinInput();
+            else menu.join_input.Key(key,shift,control);
+        }
+        return true;
+    }
     if(key<menu.name_keys.size() && menu.name_keys[key]){
         if(!down)menu.name_keys[key]=false;
         // Repeated downs still edit while active, but cannot escape ownership
@@ -657,7 +746,13 @@ bool NativeOnlineNameKey(unsigned key,bool down,bool shift,bool control){
 }
 bool NativeOnlineNameCharacter(uint32_t unit){
     if(!OnlineMenuAvailable())return false;
-    auto& menu=Menu();std::lock_guard lock(menu.mutex);return menu.name_input.Character(unit);
+    auto& menu=Menu();std::lock_guard lock(menu.mutex);
+    if(menu.join_input.active()){
+        if(unit>='a' && unit<='z')unit-=32;
+        if(unit<128 && std::string_view("ABCDEFGHJKLMNPQRSTUVWXYZ23456789").find(char(unit))!=std::string_view::npos)menu.join_input.Character(unit);
+        return true;
+    }
+    return menu.name_input.Character(unit);
 }
 void RestoreNativeOnlineNameFocus(){
     auto& menu=Menu();std::lock_guard lock(menu.mutex);
@@ -674,7 +769,7 @@ std::optional<NativeMenuReady> TakeNativeOnlineMenuReady(){
         if(result->room && menu.internet){
             const auto relay=menu.internet->status();const auto& roster=result->room->lobby();
             menu.internet->SetJoinable(false);
-            SetDiscordParty(relay.code,unsigned(roster.players.size()),roster.capacity,false);
+            if(!NativeOnlineMenuQaActive())SetDiscordParty(relay.code,unsigned(roster.players.size()),roster.capacity,false);
             result->room->KeepInternetRelay(menu.internet);
         }
         if(result->room && menu.boot->uses_room() && REXCVAR_GET(em2_private_profile) && NativeOnlineMenuQaActive())
@@ -732,6 +827,13 @@ bool TestNativeOnlineMenu(){
         !FrontendLevel("notmainmenu.start") && ByteAt("ABC",0)==65 && ByteAt("ABC",3)==0 && ByteAt("ABC",-1)==0 &&
         ByteAt(std::string_view("\xC3\xA9",2),0)==195;
     {
+        Invite invite;invite.address="127.0.0.1";invite.port=23456;invite.session[0]=1;
+        const auto encoded=EncodeInvite(invite);
+        ok=encoded && ValidQaInvitation(*encoded,false) && !ValidQaInvitation(*encoded,true) &&
+            ValidQaInvitation("ABCD2345",true) && !ValidQaInvitation("ABCD2345",false) && ok;
+        for(const auto bad:{"abcd2345","ABCD2340","ABCD234O","ABCD234I","ABCD2345\n"," ABCD2345","ABCD234","ABCD23456"})ok=!ValidQaInvitation(bad,true) && ok;
+    }
+    {
         LobbySnapshot roster;roster.capacity=16;
         for(unsigned i=0;i<16;++i)roster.players.push_back({i+1,"Player "+std::to_string(i+1),LobbyCharacter(i%2),uint8_t(i),i%2==0});
         // Maximum-size UTF-8 name: each four-byte code point remains intact in
@@ -780,6 +882,19 @@ bool TestNativeOnlineMenu(){
             menu.name_input_state=0;
         }
         for(int choice:{-1,65,-2})ok=NativeOnlineMenuOption(2724,choice,result) && result==0 && ok;
+        {
+            auto& menu=Menu();menu.BeginJoinInput();
+            for(char c:std::string_view("abcd2345"))ok=NativeOnlineNameCharacter(uint8_t(c)) && ok;
+            ok=menu.join_input.text()=="ABCD2345" && !menu.boot && !menu.internet && ok;
+            for(int i=0;i<8;++i){NativeOnlineMenuOption(2781,i,result);ok=result==uint8_t(std::string_view("ABCD2345")[i]) && ok;}
+            ok=NativeOnlineNameKey(VK_BACK,true) && NativeOnlineNameKey(VK_BACK,false) && ok;
+            menu.FinishJoinInput();
+            ok=menu.join_input.active() && !menu.join_error.empty() && !menu.boot && !menu.internet && ok;
+            NativeOnlineNameCharacter('0');NativeOnlineNameCharacter('I');
+            ok=menu.join_input.text()=="ABCD234" && ok;
+            ok=NativeOnlineNameKey(VK_ESCAPE,true) && NativeOnlineNameKey(VK_ESCAPE,false) && !menu.join_input.active() && ok;
+            menu.join_error.clear();
+        }
         ok=NativeOnlineMenuOption(2724,-3,result) && result==0 && ok;
         ok=NativeOnlineMenuOption(2725,0,result) && result==0 && ok;
         ok=NativeOnlineMenuOption(2716,-1,result) && result==0 && ok;

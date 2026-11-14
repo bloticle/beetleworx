@@ -16,8 +16,9 @@ SENT = re.compile(r'Native Room private chat sent: peer (\d+);')
 
 
 def verify(root, native_hud=False):
-    active = runpy.run_path(str(Path(__file__).with_name('verify-native-menu-active-input.py')))['verify'](root)
     record = json.loads((root / 'result.json').read_text(encoding='utf-8-sig'))
+    reentry=runpy.run_path(str(Path(__file__).with_name('verify-native-world-reentry.py')))
+    active = reentry['verify'](root,expect_default=not record['native_reload']) if record.get('checkpoint_reload_tick') else runpy.run_path(str(Path(__file__).with_name('verify-native-menu-active-input.py')))['verify'](root)
     if not record.get('chat_probe'):
         raise AssertionError('Chat probe was not enabled')
     count = record['players']
@@ -38,13 +39,16 @@ def verify(root, native_hud=False):
             history = f'Native HUD chat history readback accepted: {count} messages; authored colored name and plain message fields'
             if editor not in text or history not in text:
                 raise AssertionError('Native HUD did not consume the typed draft and complete colored chat history')
-            if sent[0] >= 3:
+            if sent[0] >= 3 or (count==2 and sent[0]==2):
                 source = re.search(r'Private Room SDK input: peer \d+ tick (\d+) elapsed 0 ', text)
                 origin = int(source[1])
                 if "phase 'move after chat'" not in text:
                     raise AssertionError('No physical SDK movement after chat closed')
-                pattern = runpy.run_path(str(Path(__file__).with_name('verify-private-room-input.py')))['TRAJECTORY']
-                rows = {int(row[1]): tuple(map(float, row[2:5])) for row in pattern.findall(text) if int(row[0]) == sent[0]}
+                if count==2:
+                    rows={tick:row[3:6] for tick,row in reentry['retail_positions'](text).items()}
+                else:
+                    pattern = runpy.run_path(str(Path(__file__).with_name('verify-private-room-input.py')))['TRAJECTORY']
+                    rows = {int(row[1]): tuple(map(float, row[2:5])) for row in pattern.findall(text) if int(row[0]) == sent[0]}
                 a, b = rows[origin+479+2], rows[origin+491+2]
                 if math.hypot(b[0]-a[0], b[2]-a[2]) <= .03:
                     raise AssertionError('Native actor did not resume movement after chat')
@@ -53,7 +57,7 @@ def verify(root, native_hud=False):
             raise AssertionError('Missing, duplicated, or reordered chat receipts')
         if {row[1] for row in rows} != set(range(1, count + 1)):
             raise AssertionError('Not every sender reached this native world')
-        if any(color != peer - 1 or body_peer != peer for _, peer, color, body_peer in rows):
+        if any(color != (peer+1 if count==2 else peer-1) or body_peer != peer for _, peer, color, body_peer in rows):
             raise AssertionError('Chat identity/color does not match authoritative roster')
         if authoritative is not None and rows != authoritative:
             raise AssertionError('Native clients disagree on host chat order or identity')

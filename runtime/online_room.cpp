@@ -32,7 +32,7 @@ constexpr auto StartupTimeout=std::chrono::seconds(180);
 constexpr auto TransferTimeout=std::chrono::seconds(120);
 enum class Wire:uint8_t {Hello=1,Welcome,Profile,Snapshot,Start,Input,Frame,Ping,Pong,ProfileReply,WorldReady,Activate,
     CheckpointBegin,CheckpointChunk,CheckpointEnd,CheckpointProgress,CheckpointInstalled,CheckpointReady,CheckpointAck,
-    BootstrapWorldReady,BootstrapBegin,BootstrapPad,BootstrapFrame,BootstrapComplete,BootstrapContinue,BootstrapActivate,GameplayComplete,GameplayVerified,ChatRequest,ChatMessage,VoiceRequest,VoiceOffer,LoadVote,LoadAgreed,ReloadVote,ReloadBegin};
+    BootstrapWorldReady,BootstrapBegin,BootstrapPad,BootstrapFrame,BootstrapComplete,BootstrapContinue,BootstrapActivate,GameplayComplete,GameplayVerified,ChatRequest,ChatMessage,VoiceRequest,VoiceOffer,LoadVote,LoadAgreed,ReloadVote,ReloadBegin,Kicked};
 bool Winsock(){
     struct Startup {bool ok=false;Startup(){WSADATA data{};ok=WSAStartup(MAKEWORD(2,2),&data)==0;}~Startup(){if(ok)WSACleanup();}};
     static Startup startup;return startup.ok;
@@ -476,6 +476,10 @@ struct Room::Impl {
     // individually; a violation by an admitted participant stops every peer.
     bool Message(Connection& c,std::span<const uint8_t> bytes,Clock::time_point now){
         Reader r{bytes};if(r.Number(4)!=0x4257524D || r.Byte()!=WireVersion)return false;const auto kind=Wire(r.Byte());
+        if(kind==Wire::Kicked){
+            if(host || !c.welcomed || !r.Done() || (state!=RoomState::Listening && state!=RoomState::Lobby))return false;
+            Fail("The host removed you from the lobby.");return true;
+        }
         if(kind==Wire::Hello){
             if(!host || c.welcomed || (state!=RoomState::Listening && state!=RoomState::Lobby))return false;
             const auto identity=ReadIdentity(r);const auto mode=r.Byte(),window=r.Byte();auto name=r.String();std::string normalized;
@@ -791,7 +795,7 @@ void Room::Poll(Clock::time_point now){
             auto c=std::make_unique<Connection>();c->socket=socket;c->received=c->pinged=now;p.connections.push_back(std::move(c));}
     }
     for(size_t i=0;i<p.connections.size();){
-        auto& c=*p.connections[i];bool alive=true;
+        auto& c=*p.connections[i];bool alive=true,graceful_eof=false;
         // Record the first failure at its source. A later socket close or
         // deadline check must not replace a useful protocol/transport cause.
         std::string_view failure;int socket_error=0;
@@ -809,7 +813,7 @@ void Room::Poll(Clock::time_point now){
                 // A legal 64-frame sixteen-player V2 burst is larger than
                 // eight 8 KiB packets. Keep it bounded by the queue budget.
                 if(n>0){if(c.incoming.size()+size_t(n)>MaxQueued){stop("receive buffer limit exceeded");break;}c.incoming.insert(c.incoming.end(),buffer.begin(),buffer.begin()+n);}
-                else {if(n==0)stop("connection closed by peer");else {const auto code=WSAGetLastError();if(code!=WSAEWOULDBLOCK)stop("socket receive failed",code);}break;}
+                else {if(n==0)graceful_eof=true;else {const auto code=WSAGetLastError();if(code!=WSAEWOULDBLOCK)stop("socket receive failed",code);}break;}
             }
             unsigned packets=0;
             while(alive && c.incoming.size()>=4 && packets++<128){
@@ -818,6 +822,9 @@ void Room::Poll(Clock::time_point now){
                 Bytes message(c.incoming.begin()+4,c.incoming.begin()+4+size_t(count));c.incoming.erase(c.incoming.begin(),c.incoming.begin()+4+size_t(count));
                 const bool valid=p.Message(c,message,now);if(!p.Active())return;if(!valid){stop("invalid or unauthorized protocol message");break;}c.received=now;
             }
+            // FIN can arrive in the same read batch as a final control packet.
+            // Parse the bounded buffered batch before retiring the connection.
+            if(graceful_eof)stop("connection closed by peer");
             if(alive && c.welcomed && now-c.pinged>=std::chrono::seconds(2)){auto ping=Packet(Wire::Ping);if(!c.Queue(ping))stop("send queue limit exceeded");c.pinged=now;}
             if(alive && p.host && p.checkpoint_mode && !p.PumpCheckpoint(c))stop("checkpoint transfer failed");
             if(alive && !c.Flush())stop("socket send failed",WSAGetLastError());
@@ -884,6 +891,21 @@ bool ValidRoomChatText(std::string_view text){
         while(extra--){if(at==text.size())return false;const auto b=uint8_t(text[at++]);if((b&0xC0)!=0x80)return false;cp=(cp<<6)|(b&63);}
         if(cp<minimum || cp>0x10FFFF || (cp>=0xD800 && cp<=0xDFFF) || cp<32 || (cp>=127 && cp<=159) || cp==0x2028 || cp==0x2029)return false;
     }return true;
+}
+bool Room::KickLobbyPeer(uint64_t peer){
+    auto& p=*impl_;
+    if(!p.host || peer==p.peer || !peer || p.roster.locked() ||
+       (p.state!=RoomState::Listening && p.state!=RoomState::Lobby))return false;
+    const auto found=std::find_if(p.connections.begin(),p.connections.end(),[&](const auto& c){return c->welcomed && c->peer==peer;});
+    if(found==p.connections.end() || !p.roster.Find(peer))return false;
+    if(p.roster.Leave(peer)!=LobbyResult::Ok)return false;
+    // Best-effort explanation before FIN. Removal never waits on a blocked
+    // socket; a stalled/partially transferring guest still disconnects safely.
+    (*found)->Queue(Packet(Wire::Kicked));(*found)->Flush();
+    if(p.voice)p.voice->RemovePeer(unsigned(peer));
+    p.connections.erase(found);
+    p.state=p.roster.players().size()==1?RoomState::Listening:RoomState::Lobby;
+    return p.Publish();
 }
 bool Room::SendChat(std::string_view text){
     auto& p=*impl_;if(!ValidRoomChatText(text) || (p.state!=RoomState::Lobby && p.state!=RoomState::Listening && p.state!=RoomState::Running))return false;
@@ -1088,6 +1110,13 @@ bool TestOnlineRoomChat(){
     for(unsigned i=1;i<16;++i){rooms.push_back(std::make_unique<Room>());if(!check(rooms.back()->Join(id,"127.0.0.1",rooms[0]->port(),"Chat peer "+std::to_string(i)),"guest starts"))return false;}
     auto pump=[&](auto done){const auto end=Clock::now()+std::chrono::seconds(5);do{for(auto& r:rooms)r->Poll();if(done())return true;std::this_thread::sleep_for(std::chrono::milliseconds(1));}while(Clock::now()<end);return false;};
     if(!check(pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& r){return r->lobby().players.size()==16;});}),"sixteen chat participants join"))return false;
+    const auto kicked=rooms.back()->local_peer();
+    check(!rooms[1]->KickLobbyPeer(kicked) && !rooms[0]->KickLobbyPeer(1) && !rooms[0]->KickLobbyPeer(0) && !rooms[0]->KickLobbyPeer(999),"guests, host-self and unknown targets cannot kick");
+    if(!check(rooms[0]->KickLobbyPeer(kicked) && pump([&]{return rooms.back()->state()==RoomState::Error && rooms[1]->lobby().players.size()==15;}),"host removes one participant and broadcasts the remaining roster"))return false;
+    check(rooms.back()->error()=="The host removed you from the lobby.","removed guest receives a clear host-authorized explanation");
+    check(rooms[0]->state()==RoomState::Lobby && !rooms[0]->KickLobbyPeer(kicked),"kicking does not close the lobby or allow duplicate removal");
+    rooms.back()=std::make_unique<Room>();
+    if(!check(rooms.back()->Join(id,"127.0.0.1",rooms[0]->port(),"Replacement guest") && pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& r){return r->lobby().players.size()==16;});}),"freed lobby slot accepts another participant"))return false;
     const auto initial_tick=rooms[0]->next_tick(),initial_submit=rooms[0]->next_submit_tick(),initial_revision=rooms[0]->lobby().revision;
     for(auto& r:rooms)check(r->SendChat("hello from "+std::to_string(r->local_peer())),"each participant queues chat");
     if(!check(pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& r){return r->impl_->chat.size()==16;});}),"host echoes all messages to every participant"))return false;
@@ -1103,6 +1132,7 @@ bool TestOnlineRoomChat(){
     check(rooms[0]->next_tick()==initial_tick && rooms[0]->next_submit_tick()==initial_submit && rooms[0]->lobby().revision==initial_revision,"chat does not advance simulation/readiness");
     for(auto& r:rooms)check(r->SetReady(true),"chat participants ready for independent gameplay fixture");
     if(!check(pump([&]{return std::all_of(rooms[0]->lobby().players.begin(),rooms[0]->lobby().players.end(),[](const auto& p){return p.ready;});}) && rooms[0]->Start(),"fixture starts after chat"))return false;
+    check(!rooms[0]->KickLobbyPeer(rooms.back()->local_peer()),"a frozen gameplay roster cannot be changed through lobby kick");
     if(!check(pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& r){return r->state()==RoomState::Loading;});}),"all enter loading"))return false;
     Hash world{};world[0]=42;for(auto& r:rooms)check(r->WorldReady(world),"fixture explicitly reports matching worlds");
     if(!check(pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& r){return r->state()==RoomState::Running;});}),"fixture running"))return false;

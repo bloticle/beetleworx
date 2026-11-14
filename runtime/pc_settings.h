@@ -6,7 +6,8 @@
 namespace rex::ui {class Presenter;}
 namespace em2 {
 constexpr int kPCOptionBase = 1000;
-constexpr int kPCOptionCount = 40;
+constexpr int kPCOptionCount = 41;
+constexpr int kPCButtonPrompts=40;
 constexpr int kPCRestoredGremlinNames=38;
 constexpr int kPCOriginalInkDrips=39;
 constexpr int kPCCenterOnMouse=29,kPCCenterOnAim=30,kPCConfineMouse=31,kPCHideMouse=32;

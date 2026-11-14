@@ -12,7 +12,7 @@ class em2.options.PlayerControls extends MovieClip
       this.t_bc_body._visible = false; this.t_bc_title._visible = false;
       this.t_sr_body._visible = false; this.t_sr_title._visible = false;
       this.t_c1._visible = false; this.t_title._visible = false;
-      this._definitions = [{title: "Display & Performance", options: [{id: 1000, title: "Display resolution", choices: ["1280 x 720", "1600 x 900", "1920 x 1080", "2560 x 1440", "3840 x 2160"]}, {id: 1001, title: "Window mode", choices: ["Windowed", "Borderless fullscreen"]}, {id: 1002, title: "Frame limit", choices: ["30 FPS", "40 FPS", "50 FPS", "60 FPS", "90 FPS", "120 FPS", "144 FPS", "165 FPS", "240 FPS", "Uncapped"]}, {id: 1003, title: "3D render resolution", choices: ["720p (1x pixels)", "1440p (4x pixels)", "2160p (9x pixels)"]}, {id: 1026, title: "Screen upscaler", choices: ["Bilinear", "CAS (SDR/HDR)", "FSR 1 (SDR/HDR)"]}, {id: 1027, title: "CAS / FSR sharpness", choices: ["Soft", "Balanced", "Sharp"]}, {id: 1011, title: "Variable refresh / tearing", choices: ["Disabled", "Allowed"]}]}, {title: "Rendering & Lighting", options: [{id: 1004, title: "Player shadows", choices: ["128", "256", "512", "1024", "2048"]}, {id: 1005, title: "Environment shadows", choices: ["512", "1024", "2048", "4096 (native cap: 2048)"]}, {id: 1017, title: "Shadow sampling", choices: ["Original (4 taps)", "8 taps (experimental)", "16 taps (experimental)", "Adaptive (20 reads, exp.)"]}, {id: 1028, title: "Distance shadow resolution", choices: ["Fixed", "Quality", "Balanced", "Performance"]}, {id: 1018, title: "Bloom", choices: ["Off (experimental)", "Original sampling", "Smooth sampling"]}, {id: 1025, title: "Scene lighting (experimental)", choices: ["Original", "Material AO", "AO + diffuse bounce"]}, {id: 1006, title: "Texture cache budget", choices: ["256 MB", "512 MB", "768 MB", "1024 MB", "2048 MB"]}, {id: 1007, title: "Stable lighting workaround", choices: ["Off", "On"]}, {id: 1008, title: "Legacy texture bindings", choices: ["Off", "On"]}, {id: 1009, title: "Performance display", choices: ["Off", "On"]}, {id: 1010, title: "Texture cache lifetime", choices: ["5 seconds", "15 seconds", "30 seconds", "60 seconds", "120 seconds"]}, {id: 1012, title: "Anisotropic filtering", choices: ["Original", "2x", "4x", "8x", "16x"]}, {id: 1013, title: "Lighting ray casts", choices: ["Off", "On"]}, {id: 1014, title: "Lighting update detail", choices: ["Original", "High", "Ultra"]}, {id: 1038, title: "Gremlin dialogue names", choices: ["Retail color names", "Original character names"]}, {id: 1039, title: "Mickey ink drips (requires EM1)", choices: ["Off", "On"]}, {id: 1989, title: "Original Mickey ink assets", readOnly: true, choices: ["Not loaded - requires mounted EM1 assets", "Loaded"]}]}, {title: "HDR Calibration", options: [{id: 1021, title: "HDR output (experimental)", choices: ["Off", "On (Windows HDR required)"]}, {id: 1022, title: "HDR paper white", choices: ["80 nits", "120 nits", "160 nits", "200 nits", "250 nits", "300 nits", "400 nits"]}, {id: 1023, title: "HDR display peak", choices: ["400 nits", "600 nits", "800 nits", "1000 nits", "1500 nits", "2000 nits", "4000 nits"]}, {id: 1024, title: "HDR scene exposure", choices: ["-2.0 EV", "-1.0 EV", "-0.5 EV", "0 EV", "+0.5 EV", "+1.0 EV", "+2.0 EV"]}]}, {title: "Camera", options: [{id: 1016, title: "Offline 3D view width (FOV)", choices: ["Original", "110%", "125%", "150%", "175%"]}, {id: 1019, title: "Offline 3D camera response", choices: ["Original smoothing", "Faster smoothing", "No input smoothing"]}, {id: 1020, title: "Offline mouse camera", choices: ["Off", "Raw movement (experimental)"]}, {id: 1029, title: "Cursor on controller-to-mouse switch", choices: ["Keep position", "Center"]}, {id: 1030, title: "Cursor when starting paint / aim", choices: ["Keep position", "Center"]}, {id: 1031, title: "Confine mouse to game window", choices: ["Off", "On"]}, {id: 1032, title: "Hide desktop cursor during mouse camera", choices: ["Off", "On"]}, {id: 1033, title: "Camera input priority", choices: ["Last active device", "Always allow mouse"]}, {id: 1034, title: "Mouse takeover threshold", choices: ["1 count", "2 counts", "4 counts", "8 counts"]}, {id: 1035, title: "Center cursor when resuming mouse capture", choices: ["Off", "On"]}, {id: 1036, title: "Mouse horizontal sensitivity", choices: ["0.25x", "0.5x", "0.75x", "1x", "1.25x", "1.5x", "2x", "3x", "4x"]}, {id: 1037, title: "Mouse vertical sensitivity", choices: ["0.25x", "0.5x", "0.75x", "1x", "1.25x", "1.5x", "2x", "3x", "4x"]}]}, {title: "Movement & Combat", options: [{id: 1015, title: "Gameplay timing", choices: ["30 Hz + interpolation", "Native delta (experimental)"]}, {id: 6000, title: "Sprint", choices: ["Off", "On"]}, {id: 6001, title: "Dash", choices: ["Off", "On"]}, {id: 6002, title: "Ground pound", choices: ["Off", "On"]}, {id: 6003, title: "Air dash", choices: ["Off", "On"]}, {id: 6004, title: "Sprint speed", choices: ["1x", "1.25x", "1.5x", "1.6x", "1.75x", "2x", "2.5x", "3x", "4x"]}, {id: 6005, title: "Dash speed", choices: ["6", "8", "10", "12", "16", "20", "30", "40"]}, {id: 6006, title: "Dash duration", choices: ["0.1 s", "0.15 s", "0.2 s", "0.25 s", "0.3 s", "0.4 s", "0.6 s"]}, {id: 6007, title: "Dash cooldown", choices: ["None", "0.25 s", "0.4 s", "0.65 s", "0.8 s", "1 s", "1.5 s", "2 s"]}, {id: 6008, title: "Ground-pound speed", choices: ["8", "12", "16", "20", "25", "30", "40", "50"]}, {id: 6009, title: "Keyboard sprint", choices: ["Hold", "Toggle"]}, {id: 6010, title: "Controller sprint", choices: ["Hold", "Toggle"]}, {id: 6011, title: "Native movement animations", choices: ["Off", "On"]}, {id: 6012, title: "Ground-pound damage", choices: ["Off", "On"]}, {id: 6013, title: "Ground-pound knockback", choices: ["Off", "On"]}, {id: 6014, title: "Ground-pound damage amount", choices: ["0.5", "1", "2", "3", "5", "10", "25", "50"]}, {id: 6015, title: "Ground-pound radius", choices: ["1", "1.5", "2", "3", "4", "6", "8", "12"]}, {id: 6016, title: "Dash animation", choices: ["Run / fall", "Ability clip"]}, {id: 6017, title: "Ground-pound damage type", choices: ["Spin attack", "Physical"]}]}, {title: "Controls & Camera", options: []}, {title: "Game Library", options: [{id: 7200, title: "Epic Mickey (Wii)", action: true, choices: ["Choose RVZ disc image", "Disc mounted", "Disc moved - locate RVZ", "Invalid disc - choose another", "Choose RVZ disc image", "Disc mounted", "Mounted for this session only"]}, {id: 7201, title: "Epic Mickey 2", readOnly: true, choices: ["Not mounted", "Original game files mounted"]}]}, {title: "Support & Updates", options: [{id: 7300, title: "Review bug / crash report", action: true, choices: ["Open preview"]}, {id: 7301, title: "Save report locally", action: true, choices: ["Export"]}, {id: 7302, title: "Report on GitHub", action: true, choices: ["Open issue draft"]}, {id: 7307, title: "Saved reports", action: true, choices: ["Open folder"]}, {id: 7310, title: "Update status", readOnly: true, choices: ["Not checked", "Checking", "Update available", "Downloading", "Ready to install", "No update available", "Check failed"]}, {id: 7303, title: "Check for updates", action: true, choices: ["Check now"]}, {id: 7304, title: "Download update", action: true, choices: ["Download"]}, {id: 7305, title: "Install downloaded update", action: true, choices: ["When game closes"]}, {id: 7308, title: "Cancel scheduled install", action: true, choices: ["Cancel"]}, {id: 7314, title: "Install when game closes", readOnly: true, choices: ["Off", "On"]}, {id: 7306, title: "Automatic updates", choices: ["Off", "On"]}, {id: 7309, title: "Update details", action: true, choices: ["Show"]}]}];
+      this._definitions = [{title: "Display & Performance", options: [{id: 1000, title: "Display resolution", choices: ["1280 x 720", "1600 x 900", "1920 x 1080", "2560 x 1440", "3840 x 2160"]}, {id: 1001, title: "Window mode", choices: ["Windowed", "Borderless fullscreen"]}, {id: 1002, title: "Frame limit", choices: ["30 FPS", "40 FPS", "50 FPS", "60 FPS", "90 FPS", "120 FPS", "144 FPS", "165 FPS", "240 FPS", "Uncapped"]}, {id: 1003, title: "3D render resolution", choices: ["720p (1x pixels)", "1440p (4x pixels)", "2160p (9x pixels)"]}, {id: 1026, title: "Screen upscaler", choices: ["Bilinear", "CAS (SDR/HDR)", "FSR 1 (SDR/HDR)"]}, {id: 1027, title: "CAS / FSR sharpness", choices: ["Soft", "Balanced", "Sharp"]}, {id: 1011, title: "Variable refresh / tearing", choices: ["Disabled", "Allowed"]}]}, {title: "Rendering & Lighting", options: [{id: 1004, title: "Player shadows", choices: ["128", "256", "512", "1024", "2048"]}, {id: 1005, title: "Environment shadows", choices: ["512", "1024", "2048", "4096 (native cap: 2048)"]}, {id: 1017, title: "Shadow sampling", choices: ["Original (4 taps)", "8 taps (experimental)", "16 taps (experimental)", "Adaptive (20 reads, exp.)"]}, {id: 1028, title: "Distance shadow resolution", choices: ["Fixed", "Quality", "Balanced", "Performance"]}, {id: 1018, title: "Bloom", choices: ["Off (experimental)", "Original sampling", "Smooth sampling"]}, {id: 1025, title: "Scene lighting (experimental)", choices: ["Original", "Material AO", "AO + diffuse bounce"]}, {id: 1006, title: "Texture cache budget", choices: ["256 MB", "512 MB", "768 MB", "1024 MB", "2048 MB"]}, {id: 1007, title: "Stable lighting workaround", choices: ["Off", "On"]}, {id: 1008, title: "Legacy texture bindings", choices: ["Off", "On"]}, {id: 1009, title: "Performance display", choices: ["Off", "On"]}, {id: 1010, title: "Texture cache lifetime", choices: ["5 seconds", "15 seconds", "30 seconds", "60 seconds", "120 seconds"]}, {id: 1012, title: "Anisotropic filtering", choices: ["Original", "2x", "4x", "8x", "16x"]}, {id: 1013, title: "Lighting ray casts", choices: ["Off", "On"]}, {id: 1014, title: "Lighting update detail", choices: ["Original", "High", "Ultra"]}, {id: 1038, title: "Gremlin dialogue names", choices: ["Retail color names", "Original character names"]}, {id: 1039, title: "Mickey ink drips (requires EM1)", choices: ["Off", "On"]}, {id: 1989, title: "Original Mickey ink assets", readOnly: true, choices: ["Not loaded - requires mounted EM1 assets", "Loaded"]}]}, {title: "HDR Calibration", options: [{id: 1021, title: "HDR output (experimental)", choices: ["Off", "On (Windows HDR required)"]}, {id: 1022, title: "HDR paper white", choices: ["80 nits", "120 nits", "160 nits", "200 nits", "250 nits", "300 nits", "400 nits"]}, {id: 1023, title: "HDR display peak", choices: ["400 nits", "600 nits", "800 nits", "1000 nits", "1500 nits", "2000 nits", "4000 nits"]}, {id: 1024, title: "HDR scene exposure", choices: ["-2.0 EV", "-1.0 EV", "-0.5 EV", "0 EV", "+0.5 EV", "+1.0 EV", "+2.0 EV"]}]}, {title: "Camera", options: [{id: 1016, title: "Offline 3D view width (FOV)", choices: ["Original", "110%", "125%", "150%", "175%"]}, {id: 1019, title: "Offline 3D camera response", choices: ["Original smoothing", "Faster smoothing", "No input smoothing"]}, {id: 1020, title: "Offline mouse camera", choices: ["Off", "Raw movement (experimental)"]}, {id: 1029, title: "Cursor on controller-to-mouse switch", choices: ["Keep position", "Center"]}, {id: 1030, title: "Cursor when starting paint / aim", choices: ["Keep position", "Center"]}, {id: 1031, title: "Confine mouse to game window", choices: ["Off", "On"]}, {id: 1032, title: "Hide desktop cursor during mouse camera", choices: ["Off", "On"]}, {id: 1033, title: "Camera input priority", choices: ["Last active device", "Always allow mouse"]}, {id: 1034, title: "Mouse takeover threshold", choices: ["1 count", "2 counts", "4 counts", "8 counts"]}, {id: 1035, title: "Center cursor when resuming mouse capture", choices: ["Off", "On"]}, {id: 1036, title: "Mouse horizontal sensitivity", choices: ["0.25x", "0.5x", "0.75x", "1x", "1.25x", "1.5x", "2x", "3x", "4x"]}, {id: 1037, title: "Mouse vertical sensitivity", choices: ["0.25x", "0.5x", "0.75x", "1x", "1.25x", "1.5x", "2x", "3x", "4x"]}]}, {title: "Movement & Combat", options: [{id: 1015, title: "Gameplay timing", choices: ["30 Hz + interpolation", "Native delta (experimental)"]}, {id: 6000, title: "Sprint", choices: ["Off", "On"]}, {id: 6001, title: "Dash", choices: ["Off", "On"]}, {id: 6002, title: "Ground pound", choices: ["Off", "On"]}, {id: 6003, title: "Air dash", choices: ["Off", "On"]}, {id: 6004, title: "Sprint speed", choices: ["1x", "1.25x", "1.5x", "1.6x", "1.75x", "2x", "2.5x", "3x", "4x"]}, {id: 6005, title: "Dash speed", choices: ["6", "8", "10", "12", "16", "20", "30", "40"]}, {id: 6006, title: "Dash duration", choices: ["0.1 s", "0.15 s", "0.2 s", "0.25 s", "0.3 s", "0.4 s", "0.6 s"]}, {id: 6007, title: "Dash cooldown", choices: ["None", "0.25 s", "0.4 s", "0.65 s", "0.8 s", "1 s", "1.5 s", "2 s"]}, {id: 6008, title: "Ground-pound speed", choices: ["8", "12", "16", "20", "25", "30", "40", "50"]}, {id: 6009, title: "Keyboard sprint", choices: ["Hold", "Toggle"]}, {id: 6010, title: "Controller sprint", choices: ["Hold", "Toggle"]}, {id: 6011, title: "Native movement animations", choices: ["Off", "On"]}, {id: 6012, title: "Ground-pound damage", choices: ["Off", "On"]}, {id: 6013, title: "Ground-pound knockback", choices: ["Off", "On"]}, {id: 6014, title: "Ground-pound damage amount", choices: ["0.5", "1", "2", "3", "5", "10", "25", "50"]}, {id: 6015, title: "Ground-pound radius", choices: ["1", "1.5", "2", "3", "4", "6", "8", "12"]}, {id: 6016, title: "Dash animation", choices: ["Run / fall", "Ability clip"]}, {id: 6017, title: "Ground-pound damage type", choices: ["Spin attack", "Physical"]}]}, {title: "Controls & Camera", options: [{id: 1040, title: "Button prompts", choices: ["Automatic", "Keyboard & mouse", "Xbox", "PlayStation", "Nintendo"]}]}, {title: "Game Library", options: [{id: 7200, title: "Epic Mickey (Wii)", action: true, choices: ["Choose RVZ disc image", "Disc mounted", "Disc moved - locate RVZ", "Invalid disc - choose another", "Choose RVZ disc image", "Disc mounted", "Mounted for this session only"]}, {id: 7201, title: "Epic Mickey 2", readOnly: true, choices: ["Not mounted", "Original game files mounted"]}]}, {title: "Support & Updates", options: [{id: 7300, title: "Review bug / crash report", action: true, choices: ["Open preview"]}, {id: 7301, title: "Save report locally", action: true, choices: ["Export"]}, {id: 7302, title: "Report on GitHub", action: true, choices: ["Open issue draft"]}, {id: 7307, title: "Saved reports", action: true, choices: ["Open folder"]}, {id: 7310, title: "Update status", readOnly: true, choices: ["Not checked", "Checking", "Update available", "Downloading", "Ready to install", "No update available", "Check failed"]}, {id: 7303, title: "Check for updates", action: true, choices: ["Check now"]}, {id: 7304, title: "Download update", action: true, choices: ["Download"]}, {id: 7305, title: "Install downloaded update", action: true, choices: ["When game closes"]}, {id: 7308, title: "Cancel scheduled install", action: true, choices: ["Cancel"]}, {id: 7314, title: "Install when game closes", readOnly: true, choices: ["Off", "On"]}, {id: 7309, title: "Update details", action: true, choices: ["Show"]}]}];
       this._actions = ["Jump", "Interact / co-op", "Spin attack", "Photo mode", "Recenter / lock-on", "Sketch action", "Thinner / electricity", "Paint / electricity", "Aim mode", "Guardian", "Pause / join", "Cursor mode", "Sketch up", "Sketch down", "Sketch left", "Sketch right", "Move left", "Move right", "Move forward", "Move back", "Camera left", "Camera right", "Camera up", "Camera down", "Switch character", "Sprint", "Dash", "Ground pound"];
       this._rows = []; this._list = new em2.shared.ItemList();
       this._list.orientation = em2.Constants.VERTICAL;
@@ -60,7 +60,7 @@ class em2.options.PlayerControls extends MovieClip
       var offset=Number(_global.offsetX); if(isNaN(offset)) offset=0;
       row._x=row.pcBaseX; row._y=row.pcBaseY;
       row.pcLabelWidth=screenWidth*0.84;
-      var split=this._view!=0 && item.id!=undefined && !item.action && !item.readOnly;
+      var split=this._view==1 && item.id!=undefined && !item.action && !item.readOnly;
       if(this._view==0 || this._view==2) {
          row.pcLabelWidth=screenWidth*0.38;
          row._x=offset+screenWidth*(row.pcRow%2==0?0.29:0.71)-row.pcCenter;
@@ -152,6 +152,8 @@ class em2.options.PlayerControls extends MovieClip
          this.pc_heading.text="Choose controls to edit";
          var devices=["Player 1: Keyboard & mouse","Player 1: Controller","Player 2: Keyboard & mouse","Player 2: Controller"];
          i=0; while(i<4) { this._label(this._rows[i],devices[i],{chooseProfile:i}); i++; }
+         var prompts=["Automatic","Keyboard & mouse","Xbox","PlayStation","Nintendo"];
+         this._label(this._rows[4],"Button prompts: "+prompts[_level0.SetOption(1040,-1)],{id:1040,choices:prompts});
          this.pc_help.text="Choose a player and input device. Select an action to rebind it. Changes are saved automatically.";
          this._finishRows(); return;
       }
@@ -206,7 +208,12 @@ class em2.options.PlayerControls extends MovieClip
       if(this._category == 7) this.pc_help.text = "Review and save a report before opening an issue. Verified updates install after normal exit. Downloads require a published Beetleworx release.";
       this._finishRows();
    }
-   function _finishRows() { var i=0; while(i<8) { if(!this._rows[i].pcWanted) this._label(this._rows[i],undefined,undefined); i++; } }
+   function _finishRows() {
+      var i=0; while(i<8) { if(!this._rows[i].pcWanted) this._label(this._rows[i],undefined,undefined); i++; }
+      var failed=_level0.SetOption(2202,-1)==1;
+      this.pc_help.textColor=failed?16755370:16777215;
+      if(failed) this.pc_help.text="Controls changed, but could not be saved to disk. Check that your user_data folder is writable, then change a binding to retry.";
+   }
    function _nativeText(id) {
       var text=""; var escaped=""; var hex="0123456789ABCDEF"; var i=0;
       while(i<768) { var value=_level0.SetOption(id,i++); if(value==undefined || value<=0) break; text+=String.fromCharCode(value); escaped+="%"+hex.charAt(value>>4)+hex.charAt(value&15); }
@@ -257,6 +264,7 @@ class em2.options.PlayerControls extends MovieClip
    }
    function onEnterFrame()
    {
+      if(this._enabled && !this._capturing) this._pcMenuInput();
       if(this._enabled && this._capturing && _level0.SetOption(2200,-1)==0)
       { this._capturing=false; this._refresh(); this._list.activate(this._selected); }
       if(this._enabled && !this._capturing && ++this._refreshTick>=15) { this._refreshTick=0; this._refresh(); }
@@ -275,4 +283,110 @@ class em2.options.PlayerControls extends MovieClip
    function dispose() { this.disable(); this._list.dispose(); }
    function get threeDEnabled() { return false; }
    function set threeDEnabled(value) { this.b_threeDSettings._visible=false; }
+   function _pcPrompt(button,back,style)
+   {
+      if(button==undefined || button.icon==undefined) return;
+      if(button.pcPrompt==undefined) {
+         button.createTextField("pcPrompt",900,button.icon._x-30,button.icon._y,68,30);
+         var format=button.t_label.getTextFormat(); format.size=16; format.align="center";
+         button.pcPrompt.embedFonts=true; button.pcPrompt.setNewTextFormat(format);
+         button.pcPrompt.selectable=false; button.pcPrompt.textColor=16777215;
+      }
+      button.icon._visible=style==2;
+      button.pcPrompt._visible=style==1 || style==4;
+      button.pcPrompt.text=style==1?(back?"Esc":"Enter"):style==3?(back?"Circle":"Cross"):(back?"A":"B");
+      if(button.pcGlyph==undefined) button.createEmptyMovieClip("pcGlyph",899);
+      var glyph=button.pcGlyph; glyph._visible=style!=2;
+      if(button.pcPromptStyle==style) return;
+      button.pcPromptStyle=style; glyph.clear();
+      glyph._x=button.icon._x; glyph._y=button.icon._y+4;
+      glyph.lineStyle(2,style==3?(back?15618642:5213695):13421772,100);
+      if(style==1) {
+         glyph.moveTo(-28,0); glyph.lineTo(36,0); glyph.lineTo(36,25); glyph.lineTo(-28,25); glyph.lineTo(-28,0);
+      } else if(style==3 && !back) {
+         glyph.moveTo(0,2); glyph.lineTo(20,22); glyph.moveTo(20,2); glyph.lineTo(0,22);
+      } else {
+         var i=0; glyph.moveTo(22,12);
+         while(i<=16) { var angle=i++*Math.PI/8; glyph.lineTo(10+Math.cos(angle)*12,12+Math.sin(angle)*12); }
+      }
+   }
+   function _pcMenuInput()
+   {
+      if(!this._visible || _level0.SetOption==undefined) return;
+      var ancestor=this._parent;
+      while(ancestor!=undefined) { if(ancestor._visible==false) return; ancestor=ancestor._parent; }
+      var style=_level0.SetOption(2224,-1);
+      this._pcPrompt(this.b_select,false,style); this._pcPrompt(this.b_back,true,style);
+      var list=this._list;
+      if(list!=undefined && !list._active && (this.tvsettings._enabled || this.playerControls._enabled || this._showingSavingMessage)) list={_active:true,_items:[]};
+      if(list==undefined || !list._active) return;
+      var now=getTimer();
+      if(_level0._pcPointerFrame!=now) {
+         _level0._pcPointerFrame=now;
+         _level0._pcPointerX=_level0.SetOption(2220,-1);
+         _level0._pcPointerY=_level0.SetOption(2221,-1);
+         _level0._pcPointerMove=_level0.SetOption(2223,-1);
+         _level0._pcPointerClick=_level0.SetOption(2225,-1);
+         _level0._pcClickX=_level0.SetOption(2226,-1); _level0._pcClickY=_level0.SetOption(2227,-1);
+         _level0._pcDownX=_level0.SetOption(2228,-1); _level0._pcDownY=_level0.SetOption(2229,-1);
+      }
+      if(this._pcLastClick==undefined) this._pcLastClick=_level0._pcPointerClick;
+      if(this._pcLastMove==undefined) this._pcLastMove=_level0._pcPointerMove;
+      var clicked=this._pcLastClick!=_level0._pcPointerClick;
+      var moved=this._pcLastMove!=_level0._pcPointerMove;
+      this._pcLastClick=_level0._pcPointerClick; this._pcLastMove=_level0._pcPointerMove;
+      if(!moved && !clicked) return;
+      var width=Number(_global.initVars.screenWidth); if(!(width>=640)) width=1280;
+      var height=Number(_global.initVars.screenHeight); if(!(height>=480)) height=720;
+      var offset=Number(_global.offsetX); if(isNaN(offset)) offset=0;
+      var x=offset+_level0._pcPointerX*width/65535;
+      var y=_level0._pcPointerY*height/65535;
+      var cx=offset+_level0._pcClickX*width/65535; var cy=_level0._pcClickY*height/65535;
+      var dx=offset+_level0._pcDownX*width/65535; var dy=_level0._pcDownY*height/65535;
+      var items=[]; var i=0; var j=0;
+      while(i<list._items.length) {
+         var entry=list._items[i++];
+         if(entry instanceof Array) { j=0; while(j<entry.length) { items.push(entry[j++]); } }
+         else items.push(entry);
+      }
+      if(this.b_back!=undefined) items.push(this.b_back);
+      if(this.b_select!=undefined) items.push(this.b_select);
+      if(this._pcMouseItems!=undefined) items=items.concat(this._pcMouseItems);
+      i=0;
+      while(i<items.length) {
+         var item=items[i++];
+         if(item==undefined || !item._visible || (item.isEnabled==false && item!=this.b_back && item!=this.b_select)) continue;
+         var bounds=item.hitarea!=undefined?item.hitarea.getBounds(_level0):item.getBounds(_level0);
+         var hover=_level0._pcPointerX>=0 && _level0._pcPointerY>=0 && x>=bounds.xMin && x<=bounds.xMax && y>=bounds.yMin && y<=bounds.yMax;
+         if(hover && moved && item!=this.b_back && item._rollover!=undefined) item._rollover();
+         if(clicked && _level0._pcConsumedClick!=_level0._pcPointerClick &&
+            _level0._pcClickX>=0 && _level0._pcClickY>=0 && _level0._pcDownX>=0 && _level0._pcDownY>=0 &&
+            cx>=bounds.xMin && cx<=bounds.xMax && cy>=bounds.yMin && cy<=bounds.yMax &&
+            dx>=bounds.xMin && dx<=bounds.xMax && dy>=bounds.yMin && dy<=bounds.yMax) {
+            _level0._pcConsumedClick=_level0._pcPointerClick;
+            if(item._pcClick!=undefined) item._pcClick();
+            else if(item==this.b_back) { if(this._goBack!=undefined) this._goBack(); else item._press(); }
+            else if(item==this.b_select) { if(_level0.APressed!=undefined) _level0.APressed(); }
+            else if(item._sliderWidth!=undefined) {
+               item.position=Math.round((cx-bounds.xMin)/(bounds.xMax-bounds.xMin)*item.max/item.step)*item.step;
+               item.dispatchEvent({type:em2.Events.SLIDER_CHANGED,slider:item});
+            }
+            else if(item.pcRow!=undefined) { list.activeItem=item; this.selectActive(); }
+            else { item._rollover(); if(_level0.APressed!=undefined) _level0.APressed(); }
+            return;
+         }
+      }
+   }
+   function _pcMenuTree(node,depth)
+   {
+      if(node==undefined || !node._visible || depth>5) return;
+      if(node._list!=undefined) {
+         if(node._pcMenuInput==undefined) { node._pcMenuInput=this._pcMenuInput; node._pcPrompt=this._pcPrompt; }
+         node._pcMenuInput();
+      }
+      for(var name in node) {
+         var child=node[name];
+         if(child instanceof MovieClip && child._parent==node) this._pcMenuTree(child,depth+1);
+      }
+   }
 }

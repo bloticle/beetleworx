@@ -25,6 +25,7 @@
 #include "hdr_output.h"
 #include "ppc_context.h"
 #include <rex/cvar.h>
+#include <rex/kernel/kernel_state.h>
 #include <rex/logging.h>
 #include <algorithm>
 #include <array>
@@ -56,9 +57,9 @@ namespace {
 constexpr std::array<const char*, kPCOptionCount> names = {
     "resolution", "window_mode", "frame_limit", "render_scale", "player_shadow",
     "environment_shadow", "texture_budget", "occlusion_workaround", "legacy_textures",
-    "performance_hud", "texture_lifetime", "tearing", "anisotropic_filtering", "lighting_ray_casts", "lighting_update_detail", "gameplay_timing", "gameplay_view_width", "shadow_samples", "bloom_sampling", "camera_response", "mouse_camera", "hdr_output", "hdr_paper_white", "hdr_peak", "hdr_exposure", "material_ambient_occlusion", "screen_upscaler", "upscale_sharpness", "distance_shadow_resolution", "center_cursor_mouse_switch", "center_cursor_aim", "confine_mouse", "hide_mouse_cursor", "mouse_input_priority", "mouse_takeover_threshold", "center_cursor_capture", "mouse_gain_x", "mouse_gain_y", "restored_gremlin_names", "original_ink_drips"};
-constexpr std::array<int, kPCOptionCount> sizes = {5,2,10,3,5,4,5,2,2,2,5,2,5,2,3,2,5,4,3,3,2,2,7,7,7,3,3,3,4,2,2,2,2,2,4,2,9,9,2,2};
-constexpr std::array<int, kPCOptionCount> defaults = {0,0,0,0,0,1,1,1,0,1,2,1,4,1,0,0,0,0,2,0,1,0,3,3,3,0,2,1,0,1,1,1,1,0,1,1,3,3,0,0};
+    "performance_hud", "texture_lifetime", "tearing", "anisotropic_filtering", "lighting_ray_casts", "lighting_update_detail", "gameplay_timing", "gameplay_view_width", "shadow_samples", "bloom_sampling", "camera_response", "mouse_camera", "hdr_output", "hdr_paper_white", "hdr_peak", "hdr_exposure", "material_ambient_occlusion", "screen_upscaler", "upscale_sharpness", "distance_shadow_resolution", "center_cursor_mouse_switch", "center_cursor_aim", "confine_mouse", "hide_mouse_cursor", "mouse_input_priority", "mouse_takeover_threshold", "center_cursor_capture", "mouse_gain_x", "mouse_gain_y", "restored_gremlin_names", "original_ink_drips", "button_prompts"};
+constexpr std::array<int, kPCOptionCount> sizes = {5,2,10,3,5,4,5,2,2,2,5,2,5,2,3,2,5,4,3,3,2,2,7,7,7,3,3,3,4,2,2,2,2,2,4,2,9,9,2,2,5};
+constexpr std::array<int, kPCOptionCount> defaults = {0,0,0,0,0,1,1,1,0,1,2,1,4,1,0,0,0,0,2,0,1,0,3,3,3,0,2,1,0,1,1,1,1,0,1,1,3,3,0,0,0};
 std::array<int, kPCOptionCount> choices = defaults;
 std::array<uint64_t,kPCOptionCount> revisions{};
 constexpr std::array<int,10> caps = {30,40,50,60,90,120,144,165,240,0};
@@ -221,16 +222,17 @@ void SetPCSupportActionCallback(std::function<void(int,int)> callback) {
     std::lock_guard lock(settings_mutex);support_action=std::move(callback);
 }
 bool NativePCSupportOption(int id,int command,int& result) {
-    if(id<7300 || id>7314)return false;
+    if(id<7300 || id>7319)return false;
     result=0;
     if(command==-1){
         const auto state=SnapshotDemoSupport();
         if(id==7310)result=int(state.state);
         else if(id==7314)result=state.install_on_exit?1:0;
         else if(id==7306)result=state.auto_update?1:0;
+        else if(id==7315)result=state.update_prompt_pending?1:0;
         return true;
     }
-    if((id<=7309 && id!=7306 && command==1) || (id==7306 && (command==0 || command==1))){
+    if((id<=7309 && id!=7306 && command==1) || ((id==7306 || id==7316) && (command==0 || command==1)) || (id==7318 && command==1)){
         std::function<void(int,int)> callback;
         {std::lock_guard lock(settings_mutex);callback=support_action;}
         if(callback){callback(id,command);result=1;}
@@ -709,7 +711,11 @@ PPC_FUNC_IMPL(sub_82B0D118) {
                     ctx.f1.f64=result;sub_8295FEA8(ctx,base);return;
                 }
             }
-            if(std::isfinite(raw_id) && raw_id>=7300 && raw_id<=7314 && std::floor(raw_id)==raw_id &&
+            if((raw_id==7313 || raw_id==7319) && std::isfinite(raw_choice) && raw_choice>=0 && raw_choice<1024 && std::floor(raw_choice)==raw_choice){
+                const auto state=em2::SnapshotDemoSupport();const auto& text=raw_id==7313?state.update_version:state.status;
+                ctx.f1.f64=size_t(raw_choice)<text.size()?uint8_t(text[size_t(raw_choice)]):0;sub_8295FEA8(ctx,base);return;
+            }
+            if(std::isfinite(raw_id) && raw_id>=7300 && raw_id<=7319 && std::floor(raw_id)==raw_id &&
                (raw_choice==-1 || raw_choice==0 || raw_choice==1)) {
                 int result=0;em2::NativePCSupportOption(int(raw_id),int(raw_choice),result);
                 ctx.f1.f64=result;sub_8295FEA8(ctx,base);return;
@@ -720,8 +726,8 @@ PPC_FUNC_IMPL(sub_82B0D118) {
                 }
             }
             if(raw_id==1989 && raw_choice==-1){ctx.f1.f64=em2::em1::OriginalInkPakMounted()?1:0;sub_8295FEA8(ctx,base);return;}
-            if(std::isfinite(raw_id) && raw_id>=2700 && raw_id<=2745 && std::floor(raw_id)==raw_id &&
-               std::isfinite(raw_choice) && raw_choice>=-3 && raw_choice<=1024 && std::floor(raw_choice)==raw_choice){
+            if(std::isfinite(raw_id) && ((raw_id>=2700 && raw_id<=2745) || (raw_id>=2770 && raw_id<=2782)) && std::floor(raw_id)==raw_id &&
+               std::isfinite(raw_choice) && raw_choice>=-3 && raw_choice<=2048 && std::floor(raw_choice)==raw_choice){
                 int result=0;if(em2::net::NativeOnlineMenuOption(int(raw_id),int(raw_choice),result)){
                     ctx.f1.f64=result;sub_8295FEA8(ctx,base);return;
                 }
@@ -762,6 +768,10 @@ PPC_FUNC_IMPL(sub_82B0D118) {
             if(std::isfinite(raw_id) && raw_id>=2000 && raw_id<=2331 && std::floor(raw_id)==raw_id &&
                std::isfinite(raw_choice) && raw_choice>=-5 && raw_choice<=1000 && std::floor(raw_choice)==raw_choice) {
                 int result=0;
+                if(raw_id==2200) {
+                    auto* kernel=rex::kernel::KernelState::shared();
+                    if(kernel && kernel->input_system())em2::PollControlCapture(*kernel->input_system());
+                }
                 if(em2::ControlOption(int(raw_id),int(raw_choice),result)) {
                     ctx.f1.f64=result;
                     sub_8295FEA8(ctx,base);

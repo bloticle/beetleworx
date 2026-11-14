@@ -138,6 +138,7 @@
 #include "physics_timing.h"
 #include "camera_timing.h"
 #include "mouse_look.h"
+#include "native_engine.h"
 #include "camera_projection.h"
 #include "allocation_trace.h"
 #include "gpu_interrupt_lifetime.h"
@@ -883,6 +884,14 @@ public:
             app_context().CallInUIThreadDeferred([this,action,command] {
                 if(shutting_down_.load(std::memory_order_acquire) || !window_)return;
                 std::string output;bool success=true;
+                if(action==7318){
+                    const auto state=em2::SnapshotDemoSupport();
+                    if(state.clean_release && state.state==em2::DemoSupportState::Ready && em2::SupportOption(7305,"",output)){
+                        restart_after_update_=true;window_->RequestClose();
+                    }
+                    return;
+                }
+                if(action==7316){em2::SupportOption(7316,command?"accept":"later",output);return;}
                 if(action==7300)success=em2::ShowDemoSupportPreview(nullptr,output);
                 else if(action==7309){
                     success=em2::SupportOption(7312,"",output);
@@ -1017,14 +1026,20 @@ public:
     void OnKeyChar(rex::ui::KeyEvent& e) override {if(em2::net::NativeOnlineNameCharacter(unsigned(e.virtual_key())) || em2::net::OnlineChatCharacter(unsigned(e.virtual_key())))e.set_handled(true);}
     void OnKeyUp(rex::ui::KeyEvent& e) override { if(em2::net::NativeRoomRecoveryKey(unsigned(e.virtual_key()),false) || em2::net::OnlineVoiceKey(unsigned(e.virtual_key()),false) || em2::net::NativeOnlineNameKey(unsigned(e.virtual_key()),false,e.is_shift_pressed(),e.is_ctrl_pressed()) || em2::net::OnlineChatKey(unsigned(e.virtual_key()),false,e.is_shift_pressed(),e.is_ctrl_pressed())){e.set_handled(true);return;} if(!em2::EngineWorkbenchKey(unsigned(e.virtual_key()),false))em2::ControlKey(unsigned(e.virtual_key()),false); }
     void OnMouseDown(rex::ui::MouseEvent& e) override { MouseKey(e,true); }
+    void OnMouseMove(rex::ui::MouseEvent& e) override {
+        if(!window_ || !window_->HasFocus())return;
+        em2::UpdateMenuPointer(e.x(),e.y(),window_->GetActualPhysicalWidth(),window_->GetActualPhysicalHeight());
+        if(em2::ControlBindingsOpen() || !em2::NativeConsoleWorldReady())em2::NotifyMouseKeyboardInput();
+    }
     void OnMouseUp(rex::ui::MouseEvent& e) override { MouseKey(e,false); }
     void OnMouseWheel(rex::ui::MouseEvent& e) override {
         if(window_ && window_->HasFocus())em2::ControlWheel(e.scroll_x(),e.scroll_y());
     }
     void OnGotFocus(rex::ui::UISetupEvent&) override {em2::net::SetOnlineVoiceFocused(true);em2::net::RestoreNativeOnlineNameFocus();em2::SetEngineWorkbenchFocused(true);}
-    void OnLostFocus(rex::ui::UISetupEvent&) override { em2::net::SetOnlineVoiceFocused(false);em2::net::CancelNativeOnlineNameInput();em2::net::CloseOnlineChat();em2::ClearControlKeys();em2::SetEngineWorkbenchFocused(false); }
+    void OnLostFocus(rex::ui::UISetupEvent&) override { em2::net::SetOnlineVoiceFocused(false);em2::net::CancelNativeOnlineNameInput();em2::net::CloseOnlineChat();em2::ClearControlKeys();em2::ClearMenuPointer();em2::SetEngineWorkbenchFocused(false); }
     void MouseKey(rex::ui::MouseEvent& e,bool down) {
         using Button=rex::ui::MouseEvent::Button;
+        if(window_ && window_->HasFocus())em2::UpdateMenuPointer(e.x(),e.y(),window_->GetActualPhysicalWidth(),window_->GetActualPhysicalHeight(),e.button()==Button::kLeft?1:e.button()==Button::kRight?2:0,down);
         const auto key=e.button()==Button::kLeft?VK_LBUTTON:e.button()==Button::kRight?VK_RBUTTON:
             e.button()==Button::kMiddle?VK_MBUTTON:e.button()==Button::kX1?VK_XBUTTON1:e.button()==Button::kX2?VK_XBUTTON2:0;
         if(key && em2::net::NativeOnlineNameKey(unsigned(key),down)){e.set_handled(true);return;}
@@ -1075,7 +1090,7 @@ public:
         runtime_.reset();
         em2::net::ReleaseNativeOnlineSession();
         std::string support_result;
-        const auto support_ok=em2::ShutdownDemoSupport(false,support_result);
+        const auto support_ok=em2::ShutdownDemoSupport(restart_after_update_,support_result);
         if(!support_result.empty())REXLOG_INFO("Beetleworx update shutdown {}: {}",support_ok?"complete":"deferred",support_result);
     }
 
@@ -1157,6 +1172,7 @@ private:
     std::thread module_thread_;
     std::atomic<bool> shutting_down_{false};
     std::atomic<bool> title_stop_requested_{false};
+    bool restart_after_update_=false;
     std::unique_ptr<rex::ui::ImmediateDrawer> immediate_drawer_;
     std::unique_ptr<rex::ui::ImGuiDrawer> imgui_drawer_;
     std::unique_ptr<DebugOverlayDialog> debug_overlay_;

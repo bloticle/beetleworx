@@ -2,6 +2,7 @@
 namespace em2 {
 struct EngineSettingRow {int index,page;const char* title;const char* choices;};
 inline constexpr EngineSettingRow kEngineSettings[]={
+    {40,5,"Button prompts","Automatic|Keyboard & mouse|Xbox|PlayStation|Nintendo"},
     {0,0,"Display resolution","1280 x 720|1600 x 900|1920 x 1080|2560 x 1440|3840 x 2160"},
     {1,0,"Window mode","Windowed|Borderless fullscreen"},
     {2,0,"Frame limit","30 FPS|40 FPS|50 FPS|60 FPS|90 FPS|120 FPS|144 FPS|165 FPS|240 FPS|Uncapped"},
@@ -43,5 +44,5 @@ inline constexpr EngineSettingRow kEngineSettings[]={
     {38,1,"Gremlin dialogue names","Retail color names|Original character names"},
     {39,1,"Mickey ink drips (requires EM1)","Off|On"},
 };
-static_assert(sizeof(kEngineSettings)/sizeof(kEngineSettings[0])==40);
+static_assert(sizeof(kEngineSettings)/sizeof(kEngineSettings[0])==41);
 }

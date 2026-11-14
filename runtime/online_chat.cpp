@@ -1,4 +1,6 @@
 #include "online_chat.h"
+#include <rex/kernel/kernel_state.h>
+#include <rex/input/input_system.h>
 #include "online_room.h"
 #include "online_lobby.h"
 #include "online_native_menu.h"
@@ -28,6 +30,7 @@ std::mutex mutex;
 std::deque<RoomChatMessage> history;
 std::deque<std::string> outgoing;
 std::atomic<bool> connected{false},opened{false};
+std::atomic<bool> in_lobby{false};
 LobbyNameInput input(240,240);
 std::array<bool,256> held{};
 bool opening_character=false;
@@ -41,11 +44,11 @@ std::chrono::steady_clock::time_point last_message{};
 Room* owner=nullptr;unsigned probe_stage=0,expected_peers=0;
 bool probe_editor_seen=false;
 std::chrono::steady_clock::time_point probe_opened{},probe_submitted{};
-void OpenLocked(bool value){opened.store(value);em2::SetChatControlCapture(value);if(value){input.Begin("");em2::ClearControlKeys();}else input.End();status.clear();++draft_revision;}
+void OpenLocked(bool value){opened.store(value);em2::SetChatControlCapture(value);if(value){input.Begin("");if(in_lobby.load())pad_held=0xFFFF;em2::ClearControlKeys();}else input.End();status.clear();++draft_revision;}
 bool CanOpen(){
     if(!connected.load() || !REXCVAR_GET(em2_online_text_chat))return false;
     int binding=0,panel=0;em2::ControlOption(2200,-1,binding);em2::EngineWorkbenchOption(2500,-1,panel);
-    return !binding && !panel && !em2::ControlBindingsOpen();
+    return !binding && !panel && (in_lobby.load() || !em2::ControlBindingsOpen());
 }
 void SendLocked(){
     std::string text=input.text();const auto first=text.find_first_not_of(' '),last=text.find_last_not_of(' ');
@@ -87,7 +90,7 @@ bool OnlineChatKey(unsigned key,bool down,bool shift,bool control){
 bool OnlineChatCharacter(uint32_t unit){std::lock_guard lock(mutex);if(!opened.load())return false;if(opening_character){opening_character=false;if(unit=='t' || unit=='T')return true;}input.Character(unit);++draft_revision;return true;}
 bool OnlineChatPad(uint16_t buttons){
     std::lock_guard lock(mutex);const auto edge=uint16_t(buttons&~pad_held);pad_held=buttons;
-    if(!opened.load()){if((edge&1) && CanOpen())OpenLocked(true);return opened.load();}
+    if(!opened.load()){if(!in_lobby.load() && (edge&1) && CanOpen())OpenLocked(true);return opened.load();}
     if(edge&0x2000){OpenLocked(false);return true;}
     if(edge&1)keyboard_index=unsigned((keyboard_index+keyboard.size()-10)%keyboard.size());
     if(edge&2)keyboard_index=unsigned((keyboard_index+10)%keyboard.size());
@@ -101,10 +104,15 @@ bool OnlineChatPad(uint16_t buttons){
 }
 void PumpOnlineChat(Room* room){
     if(owner!=room){std::lock_guard lock(mutex);history.clear();outgoing.clear();owner=room;probe_stage=0;expected_peers=0;probe_editor_seen=false;++revision;}
-    const bool active=room && room->state()==RoomState::Running;connected.store(active);
+    const bool lobby=room && (room->state()==RoomState::Lobby || room->state()==RoomState::Listening);
+    const bool active=room && (lobby || room->state()==RoomState::Running);in_lobby.store(lobby);connected.store(active);
     if(!active && opened.load())CloseOnlineChat();
     if(!room)return;
-    const bool private_probe=active && REXCVAR_GET(em2_probe_online_chat) && PrivateNativeMenuRoom()==room;
+    if(lobby && opened.load())if(auto* kernel=rex::kernel::KernelState::shared())if(auto* devices=kernel->input_system()){
+        rex::input::X_INPUT_STATE pad{};
+        if(devices->GetState(0,&pad)==0)OnlineChatPad(uint16_t(pad.gamepad.buttons));
+    }
+    const bool private_probe=active && !lobby && REXCVAR_GET(em2_probe_online_chat) && PrivateNativeMenuRoom()==room;
     if(private_probe){
         {std::lock_guard lock(mutex);expected_peers=unsigned(room->lobby().players.size());}
         const auto tick=room->next_tick();
@@ -228,7 +236,17 @@ bool TestOnlineChatControls(){
         physical->raw.buttons=0x1000;ok=em2::SampleLocalControls(source,0,4,sampled) && (sampled.buttons&0x1000) && ok;
         em2::EndSynchronizedControls();
     }else ok=false;
-    CloseOnlineChat();connected.store(false);REXCVAR_SET(em2_online_text_chat,enabled);
+    CloseOnlineChat();in_lobby.store(true);em2::SetControlUIContext(true);
+    OnlineChatPad(0);ok=!OnlineChatPad(1) && !opened.load() && ok;
+    int option=0;NativeOnlineChatOption(2759,0,option);
+    ok=option==1 && opened.load() && ok;
+    OnlineChatPad(0x1000);
+    {std::lock_guard lock(mutex);ok=input.text().empty() && ok;}
+    OnlineChatPad(0);OnlineChatPad(0x1000);
+    {std::lock_guard lock(mutex);ok=input.text()=="a" && ok;}
+    CloseOnlineChat();ok=em2::ControlBindingsOpen() && ok;
+    em2::SetControlUIContext(false);in_lobby.store(false);
+    connected.store(false);REXCVAR_SET(em2_online_text_chat,enabled);
     if(ok)REXLOG_INFO("Chat controls passed offline gating, T/open, typing capture, independent console capture, Escape release and controller keyboard/send/close; visual typing acceptance separate");
     else REXLOG_ERROR("Chat control ownership regression failed");return ok;
 }

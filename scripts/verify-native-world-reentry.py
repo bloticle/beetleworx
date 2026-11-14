@@ -1,8 +1,8 @@
 """Validate scheduled original native loads across the actual participating worlds.
 
 This does not establish arbitrary level transitions, campaign completion,
-rollback/state correction or Internet multiplayer. A result covers only its
-actual participant count and destinations.
+rollback/state correction or general Internet reliability. A result covers
+only its actual participant count, destinations and recorded transport.
 """
 import argparse
 import json
@@ -10,17 +10,23 @@ import math
 from pathlib import Path
 import re
 import runpy
+import struct
 
 OBS = runpy.run_path(str(Path(__file__).with_name('verify-native-room-menu-roster.py')))['OBS']
 HISTORY = runpy.run_path(str(Path(__file__).with_name('verify-native-input-history.py')))['HISTORY']
 TRAJECTORY = runpy.run_path(str(Path(__file__).with_name('verify-private-room-input.py')))['TRAJECTORY']
 CALL = runpy.run_path(str(Path(__file__).with_name('verify-private-room-multi-actors.py')))['CALL']
 
+def retail_positions(text):
+    return {int(tick): tuple(struct.unpack('>f',bytes.fromhex(value))[0] for value in bits.split('/'))
+            for tick,bits in re.findall(r'Native gameplay observation v5:[^\r\n]*?tick (\d+), modes [^,]+, bits ([0-9A-F]{8}(?:/[0-9A-F]{8}){5}),',text)}
+
 
 def verify(root, expect_default=False):
     result = json.loads((root / 'result.json').read_text(encoding='utf-8-sig'))
     players = result['players']
-    assert 3 <= players <= 16 and result['checkpoint_reload_tick'] == 700
+    assert 2 <= players <= 16 and result['checkpoint_reload_tick'] == 700
+    relay = bool(result.get('relay_origin'))
     assert len(result['processes']) == players
     extra_peers = range(3, players+1)
     full_mask = (1 << players)-1
@@ -56,8 +62,18 @@ def verify(root, expect_default=False):
         local = re.findall(r'Native Room menu QA appearance accepted: peer (\d+) color (\d+);', text)
         assert len(local) == 1
         peer_id, color = map(int, local[0])
-        assert 1 <= peer_id <= players and peer_id not in observed_peers and color == peer_id-1
+        assert 1 <= peer_id <= players and peer_id not in observed_peers and color == (peer_id+1 if players==2 else peer_id-1)
         observed_peers.add(peer_id)
+        if relay:
+            role='host' if peer_id==1 else 'guest'
+            assert 'hosted relay; discovery/router/clipboard/Discord disabled' in text
+            assert f'Internet relay {role}: opening TLS WebSocket' in text and f'Internet relay {role}: bridging native Room stream' in text
+            assert f'Internet relay {role} failed:' not in text, 'Relay failed before the capture requested normal shutdown'
+            if peer_id!=1:
+                opening = text.index('Internet relay guest: opening TLS WebSocket')
+                assert text.index('Internet relay guest: waiting for prepared local game') < opening and text.index('Online guest game files verified in ') < opening, 'Relay admission began before native file preparation'
+            assert ('Native lobby QA host published private relay invitation' if peer_id==1 else 'Native GFx online requested Join through private relay invitation') in text
+            assert 'published private loopback invitation' not in text and 'Join through private loopback invitation' not in text
         for failure in ('Native Room gameplay stopped:', 'Retained native Room stopped:', 'Native room initialization stopped:'):
             assert failure not in text, failure
         requests = re.findall(r'Native lobby QA restart requested: tick (\d+), attempted true, status 0, stack true', text)
@@ -83,7 +99,7 @@ def verify(root, expect_default=False):
         firsts = starts
         assert text.count("phase 'complete' reads") == epochs, 'Every native input program must complete'
         admissions = re.findall(r'Native Room extra humans admitted: count (\d+) mask ([0-9A-F]+);', text)
-        assert admissions == [(str(players-2), f'{extra_mask:04X}')]*epochs, admissions
+        assert admissions == ([(str(players-2), f'{extra_mask:04X}')]*epochs if players>2 else []), admissions
         frames = HISTORY.findall(text)
         assert len(frames) == epochs
         frame_scopes = [(int(first), int(last), int(mask, 16), digest) for _, first, last, mask, digest in frames]
@@ -104,10 +120,22 @@ def verify(root, expect_default=False):
         scoped_worlds = []
         activity = []
         all_rows, all_calls = TRAJECTORY.findall(text), CALL.findall(text)
+        retail_rows = retail_positions(text) if players==2 else {}
         for epoch, origin in enumerate(starts):
             end = reloads[epoch] if epoch < count else float('inf')
             scoped_worlds.append({tick: digest for tick, digest in updates.items() if origin <= tick < end})
             trajectories, movement = {}, []
+            if players==2:
+                # The existing two-player SDK fixture scripts retail Oswald;
+                # Mickey remains neutral. Require actual native body movement,
+                # not just successful submission/history/digest agreement.
+                retail={tick: row[3:6] for tick,row in retail_rows.items() if origin<=tick<end}
+                assert len(retail)>=512 and all(all(map(math.isfinite,row)) for row in retail.values())
+                deltas=[(retail[origin+b][0]-retail[origin+a][0],retail[origin+b][2]-retail[origin+a][2]) for a,b in ((61,73),(91,103))]
+                assert all(math.hypot(*delta)>.03 for delta in deltas) and sum(a*b for a,b in zip(*deltas))<0, f'Epoch {epoch}: retail Oswald did not move and reverse'
+                height=max(row[1] for tick,row in retail.items() if origin+132<=tick<=origin+212)-retail[origin+129][1]
+                assert height>1 and abs(retail[origin+212][1]-retail[origin+129][1])<.5, f'Epoch {epoch}: retail Oswald did not jump and land'
+                movement.append({'peer':2,'retail':True,'jump_height':height,'post_reload_samples':len(retail)})
             for peer in extra_peers:
                 rows = {int(row[1]): tuple(map(float, row[2:8]))+(int(row[8]),)
                         for row in all_rows if int(row[0]) == peer and origin <= int(row[1]) < end
@@ -180,7 +208,7 @@ def verify(root, expect_default=False):
     if result.get('button_task_probe'):
         assert policy_checks and any(row['allowed'] for row in policy_checks), 'No unrestricted native electric-stream acceptance'
         assert any(not row['allowed'] for row in policy_checks), 'No authored tool restriction exercised'
-    return {'passed': True, 'players': players, 'extra_oswald': bool(result.get('extra_oswald')), 'native_policy_checks': policy_checks, 'binary_sha256': result['exe_sha256'], 'reload_ticks': reloads,
+    return {'passed': True, 'players': players, 'transport':'hosted-https-relay' if relay else 'loopback', 'extra_oswald': bool(result.get('extra_oswald')), 'native_policy_checks': policy_checks, 'binary_sha256': result['exe_sha256'], 'reload_ticks': reloads,
             'native_level_target': target, 'native_level_targets': targets,
             'matching_updates_by_epoch': matching, 'post_reload_matching_updates': matching[-1],
             'captures': captures, 'scope': __doc__.strip()}

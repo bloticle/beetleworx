@@ -27,6 +27,11 @@ void SetChatControlCapture(bool captured);
 // Ends before canonical session input attaches; never alters saved bindings.
 void SetOnlineJoinControls(bool enabled,bool press_start=false);
 bool ControlOption(int id,int command,int& result);
+// Menu capture must keep sampling even while native gameplay input is paused.
+void PollControlCapture(rex::input::InputSystem& input);
+// Host client coordinates are normalized independently of internal render scale.
+void UpdateMenuPointer(int x,int y,unsigned width,unsigned height,int button=0,bool down=false);
+void ClearMenuPointer();
 bool TestControls(const std::filesystem::path& directory);
 // Internal online adapter: publish canonical, already-remapped controller
 // frames only after the simulation barrier agrees on the next exact tick.

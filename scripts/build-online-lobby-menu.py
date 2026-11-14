@@ -39,7 +39,10 @@ def main():
     snippet=ROOT/'assets/pc-menu/OnlineLobby.as'
     destination=ROOT/'private/pc-assets/packfiles/UIMainMenu.pak'
     manifest=ROOT/'private/pc-assets/online-lobby-manifest.json'
-    fingerprint=hashlib.sha256(Path(__file__).read_bytes()+snippet.read_bytes()+(ROOT/'scripts/game-pak.py').read_bytes()+original.read_bytes()).hexdigest()
+    pointer=ROOT/'assets/pc-menu/NativeMenuInput.as'
+    panels=ROOT/'assets/pc-menu/OnlineLobbyPanels.as'
+    updates=ROOT/'assets/pc-menu/NativeUpdateNotice.as'
+    fingerprint=hashlib.sha256(Path(__file__).read_bytes()+snippet.read_bytes()+pointer.read_bytes()+panels.read_bytes()+updates.read_bytes()+(ROOT/'scripts/game-pak.py').read_bytes()+original.read_bytes()).hexdigest()
     if destination.exists() and manifest.exists():
         old=json.loads(manifest.read_text())
         if old.get('fingerprint')==fingerprint and old.get('sha256')==hashlib.sha256(destination.read_bytes()).hexdigest():
@@ -64,7 +67,15 @@ def main():
       {
          if(_level0.SetOption == undefined) return;
          var owner = this._parent;
+         owner._pcUpdateTick();
+         owner._pcMenuTree(owner._parent,0);
          if(owner._visible == false) return;
+         if(!owner._em2Online)
+         {
+            var available = _level0.SetOption(2743,-1) == 1;
+            owner.b_5._visible = available;
+            if(available) owner.b_5.enable(); else owner.b_5.disable();
+         }
          if(_level0.SetOption(2744,-1) == 1 && !owner._em2Online)
          {
             owner._em2OnlineOpen(); return;
@@ -74,11 +85,13 @@ def main():
             owner._em2OnlineOpenedOnce = true; owner._em2OnlineOpen();
          }
       };''')
-    text=text[:text.rfind('}')]+snippet.read_text()+text[text.rfind('}'):]
+    text=text[:text.rfind('}')]+snippet.read_text()+pointer.read_text()+panels.read_text()+updates.read_text()+text[text.rfind('}'):]
     target=work/'import'/relative;target.parent.mkdir(parents=True,exist_ok=True);target.write_text(text,encoding='utf-8')
     modified=work/'modified.gfx';run('java','-jar',jar,'-importScript',source,modified,work/'import')
     run('java','-jar',jar,'-export','script',work/'roundtrip',modified)
     result=(work/'roundtrip/scripts'/relative).read_text(encoding='utf-8-sig')
+    if 'owner.b_5._visible = available' not in result:
+        raise RuntimeError('Late native callback registration cannot refresh the Online entry')
     for marker in ('Online Multiplayer','function _em2OnlineOpen()','function _em2OnlineBeginName()','_level0.SetOption(2727,2)','_level0.SetOption(2727,-1)','_level0.SetOption(2725,0)','_level0.SetOption(2700,2)','_level0.SetOption(2701,-1)', '_level0.SetOption(2743,-1) != 1', '_level0.SetOption(2743,-1) == 1', 'Auto Internet port: On', 'Copy Internet invite', '_level0.SetOption(2715,1)', 'Visibility: Invite only', '_level0.SetOption(2700,16)', '_level0.SetOption(2716,-1)', 'Pants / name color:', '_level0.SetOption(2734,0)', '_level0.SetOption(2735,0)', '_level0.SetOption(2737,-1)', 'Next players (', 'function _em2OnlineBack()', '_level0.SetOption(2742,2)'):
         if marker not in result:raise RuntimeError('Native lobby bridge lost during ActionScript compilation: '+marker)
     before=work/'export/scripts';after=work/'roundtrip/scripts'

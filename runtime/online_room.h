@@ -79,6 +79,8 @@ public:
     bool Rename(std::string_view);
     bool SetAppearance(LobbyCharacter,uint8_t color);
     bool SetReady(bool);
+    // Host-only, before the roster is frozen. Removes exactly this peer.
+    bool KickLobbyPeer(uint64_t peer);
     // Owner thread only. Host supplies sender/name/color; never simulation data.
     // Four-message burst, one token/second; bounded 64-message receive history.
     bool SendChat(std::string_view);
