@@ -10,7 +10,8 @@ The current experimental native Room uses deterministic input lockstep and
 completed-world verification. It has separate UDP voice delivery and native
 text chat. Prediction, rollback/replay, authoritative correction and general
 world resynchronization are not implemented. A verified gameplay mismatch
-currently stops the session. Public demo online remains hidden.
+currently stops the session. Online demo packages enable the native lobby through
+the supplied hosted-relay configuration. The EM1 preview remains offline.
 
 Native checkpoint-memory reload now coordinates unload and fresh actor/input/
 camera admission across the frozen Room. Two four-process native captures
