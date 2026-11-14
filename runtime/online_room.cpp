@@ -1,6 +1,7 @@
 #include "online_address.h"
 #include "online_internet_relay.h"
 #include "online_room.h"
+#include "online_gameover_input.h"
 #include "online_checkpoint.h"
 #include "online_room_load.h"
 #include <rex/logging.h>
@@ -211,7 +212,7 @@ struct Room::Impl {
     std::map<uint64_t,std::map<uint64_t,RoomCommand>> inputs;
     std::map<uint64_t,RoomCommand> echoes;
     std::deque<RoomFrame> frames;
-    std::array<RoomJumpStream,kOnlineRoomCapacity> submitted_jumps{},received_jumps{};
+    std::array<RoomTransportInputStream,kOnlineRoomCapacity> submitted_jumps{},received_jumps{};
     // Updated only by completed-world consensus, never received input/frames.
     Clock::time_point progress=Clock::now();
     uint64_t gameplay_tick=0;
@@ -692,7 +693,7 @@ struct Room::Impl {
             if(!host || state!=RoomState::Running)return false;
             const auto tick=r.Number(8);const auto command=ReadCommand(r);
             if(!r.Done() || !ValidCommandTick(command,tick,id.input_delay) || c.wire_exhausted || tick!=c.wire_next || tick<consume_next || tick-consume_next>=Window || inputs[tick].contains(c.peer))return false;
-            auto jump_state=submitted_jumps[c.peer-1];if(!AdvanceRoomJumpStream(jump_state,command))return false;
+            auto jump_state=submitted_jumps[c.peer-1];if(!AdvanceRoomTransportInput(jump_state,command))return false;
             submitted_jumps[c.peer-1]=jump_state;
             inputs[tick][c.peer]=command;if(c.wire_next==UINT64_MAX)c.wire_exhausted=true;else ++c.wire_next;return true;
         }
@@ -706,7 +707,7 @@ struct Room::Impl {
             const auto echo=echoes.find(frame.tick);
             if(!r.Done() || echo==echoes.end() || !(frame.players_mask&(1u<<(peer-1))) || frame.players[peer-1]!=echo->second)return false;
             auto jump_states=received_jumps;
-            for(const auto& player:lobby.players)if(!AdvanceRoomJumpStream(jump_states[player.peer-1],frame.players[player.peer-1]))return false;
+            for(const auto& player:lobby.players)if(!AdvanceRoomTransportInput(jump_states[player.peer-1],frame.players[player.peer-1]))return false;
             received_jumps=jump_states;
             echoes.erase(echo);frames.push_back(std::move(frame));if(frame_next==UINT64_MAX)frame_exhausted=true;else ++frame_next;return true;
         }
@@ -941,7 +942,7 @@ bool Room::CompleteBootstrap(uint64_t tick,bool ready,const Hash& digest){
 bool Room::SubmitLocal(uint64_t tick,const RoomCommand& command){
     if(command.pad.menu_pause)return false;
     auto& p=*impl_;if(p.state!=RoomState::Running || p.submit_exhausted || tick!=p.submit_next || tick<p.consume_next || tick-p.consume_next>=Window || !ValidCommandTick(command,tick,p.id.input_delay))return false;
-    auto jump_state=p.submitted_jumps[p.peer-1];if(!AdvanceRoomJumpStream(jump_state,command))return false;
+    auto jump_state=p.submitted_jumps[p.peer-1];if(!AdvanceRoomTransportInput(jump_state,command))return false;
     if(p.host)p.inputs[tick][p.peer]=command;
     else {auto packet=Packet(Wire::Input);U64(packet,tick);WriteCommand(packet,command);if(!p.Queue(*p.connections.front(),packet))return false;p.echoes[tick]=command;}
     p.submitted_jumps[p.peer-1]=jump_state;
@@ -1328,6 +1329,13 @@ bool TestOnlineRoom(){
             expected.players[i].button_actions.fired[31]==255 && expected.players[i].button_actions.fired[32]==0,"V3 schema, delayed source tick and full bitmap preserve each peer's identity");
         for(unsigned i=1;i<16;++i){RoomFrame actual;check(rooms[i]->TakeFrame(actual) && actual==expected,"maximum native button/Jump payload remains bit-exact across all sixteen peers");}
         check(complete_fixture_tick(tick),"full receive window drains only through per-tick completion barriers");}
+    const auto terminal_tick=111+Window;const auto terminal=NativeGameOverCommand();
+    for(auto& room:rooms)check(room->SubmitLocal(terminal_tick,terminal),"sixteen peers submit explicit terminal native no-action commands");
+    check(pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& r){RoomFrame frame;return r->PeekFrame(frame);});}),"terminal command reaches every TCP peer");
+    RoomFrame terminal_frame;terminal_frame.tick=terminal_tick;terminal_frame.players_mask=0xFFFF;
+    for(auto& command:terminal_frame.players)command=terminal;
+    for(auto& room:rooms){RoomFrame actual;check(room->TakeFrame(actual) && actual==terminal_frame,"terminal source and all neutral fields echo exactly across sixteen peers");}
+    check(complete_fixture_tick(terminal_tick),"terminal transport fixture retains proof barriers; not a native gameplay test");
     Room late;const auto late_connect=late.Join(id,"127.0.0.1",rooms[0]->port(),"Late guest");
     if(late_connect)late.Poll(Clock::now()+Timeout+std::chrono::seconds(1));
     check(!late_connect || late.state()==RoomState::Error,"closed listener cannot admit late participants");

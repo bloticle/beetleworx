@@ -97,3 +97,10 @@ This is a reproduced failure, not a successful checkpoint recovery test.
 Normal user files were unchanged. The synchronized game-over input lifecycle
 and recovery remain unfinished; no binary release accompanies this source
 publication.
+
+
+The follow-up [native GameOver lifecycle](online-party-gameover.md) fixes the
+reproduced whole-party input failure. Its separate three-world verifier now
+passes native checkpoint loading and restored controls, while the failed
+baseline above remains rejected. This does not extend the survivor test's
+scope to every checkpoint or a full campaign.

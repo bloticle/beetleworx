@@ -295,8 +295,9 @@ try {
    if(!(OwnedProcess $entry) -or $entry.process.HasExited){throw 'A native menu test process exited before observation completed.'}
    $text=if(Test-Path -LiteralPath $entry.record.log){(Get-Content -LiteralPath $entry.record.log -Raw) ?? ''}else{''}
    if(!$PartialDeliveryParticipant){foreach($failure in @('Native online lobby handoff failed:','Native online menu preparation failed:','Native lobby QA rejected:','Retained native Room stopped:','Native Room gameplay stopped:','Native room initialization stopped:')){if($text.Contains($failure)){if($ReenterAfterReturn -and (ObserveControlledDisconnect 4)){continue};throw ($entry.record.role+' reported '+$failure)}}}
-   $expectedWorlds=1+$(if($CheckpointReloadTick -and !$DamagePlayer -and !$DamageExtraPeer){$CheckpointReloadCount}else{0})
-   if([regex]::Matches($text,"phase 'complete' reads").Count -ge $expectedWorlds){++$programs}
+   $expectedWorlds=1+$(if($DamagePlayer -eq 4){1}elseif($CheckpointReloadTick -and !$DamagePlayer -and !$DamageExtraPeer){$CheckpointReloadCount}else{0})
+   $expectedPrograms=if($DamagePlayer -eq 4){1}else{$expectedWorlds}
+   if([regex]::Matches($text,"phase 'complete' reads").Count -ge $expectedPrograms){++$programs}
    if([regex]::Matches($text,'Native Room gameplay first frame consumed:').Count -ge $expectedWorlds){++$reentries}
    if($text.Contains('Native lobby completed authored save reload and accepted native Continue') -and $text.Contains('Native Room gameplay first frame consumed:')){++$ready}
   }

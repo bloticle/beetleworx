@@ -1,4 +1,5 @@
 #include "online_room_gameplay.h"
+#include "online_gameover_input.h"
 #include "online_room_bootstrap.h"
 #include "online_room_runtime.h"
 #include "online_native_menu.h"
@@ -137,6 +138,19 @@ struct NativeRoomGameplay::Impl {
     bool history_probe_done=false;
     bool native_buttons=false,button_delivery_enabled=false;
     std::optional<uint64_t> native_completed;
+    // Frozen for the rest of this native world. Only its original load and a
+    // new bootstrap may re-arm gameplay sources after terminal GameOver.
+    std::optional<uint64_t> game_over_entry;
+    std::array<std::array<uint8_t,32>,kOnlineRoomCapacity> game_over_schemas{};
+    bool GameOver(PPCContext& ctx,uint8_t* base)const{
+        NativeGameOverState state;
+        return game_over_entry && ReadNativeGameOverState(ctx,base,state) &&
+            state.registry==registry && state.dead<=roster.players.size();
+    }
+    bool GameOverFrame(const RoomFrame& frame,PPCContext& ctx,uint8_t* base)const{
+        return GameOver(ctx,base) && ValidNativeGameOverFrame(frame,roster_mask,
+            *game_over_entry,identity.input_delay,game_over_schemas,native_buttons);
+    }
     bool native_unwind=false;
     std::optional<uint64_t> first_game_tick;
     std::optional<uint64_t> camera_tick;
@@ -460,6 +474,34 @@ RoomGameplayAdmission NativeRoomGameplay::Prepare(PPCContext& ctx,uint8_t* base,
     }
     gameplay_waiting.store(true,std::memory_order_release);
     if(s.pending || s.room->gameplay_frame_blocked())return RoomGameplayAdmission::Waiting;
+    NativeGameOverState terminal;
+    if(!s.game_over_entry && s.started && s.native_completed && ReadNativeGameOverState(ctx,base,terminal)){
+        const auto count=s.roster.players.size();
+        bool owned=count>=2 && count<=kOnlineRoomCapacity && terminal.dead==count &&
+            terminal.registry==s.registry && s.actors->ready() && s.actors->actors().size()==count-2 &&
+            *s.native_completed!=UINT64_MAX && s.room->next_tick()==*s.native_completed+1;
+        for(const auto& actor:s.actors->actors()){OwnedActorInput current;owned=OwnedActorForPeer(actor.room_peer,ctx,base,current) && owned;}
+        if(!owned){s.Stop("Native GameOver lost its admitted all-human death ownership");return RoomGameplayAdmission::Stopped;}
+        for(const auto& player:s.roster.players)s.game_over_schemas[player.peer-1]=s.button_schemas[player.character==LobbyCharacter::Mickey?0:1];
+        s.game_over_entry=*s.native_completed;
+        REXLOG_INFO("Native Room terminal GameOver admitted: entry tick {}, participants {}; original state 7, all humans dead, gameplay callbacks frozen until original load",*s.game_over_entry,count);
+    }
+    if(s.game_over_entry){
+        if(!s.GameOver(ctx,base)){s.Stop("Terminal native GameOver changed without an original world transition");return RoomGameplayAdmission::Stopped;}
+        if(s.prepared){output=*s.prepared;return RoomGameplayAdmission::Ready;}
+        const auto tick=s.room->next_tick();
+        if(!s.submitted){
+            if(tick>UINT64_MAX-s.identity.input_delay || s.room->next_submit_tick()!=tick+s.identity.input_delay ||
+               !s.room->SubmitLocal(s.room->next_submit_tick(),NativeGameOverCommand())){
+                s.Stop("Native GameOver no-action command submission failed");return RoomGameplayAdmission::Stopped;}
+            s.submitted=tick;
+        }
+        if(*s.submitted!=tick){s.Stop("Native GameOver source crossed native ticks");return RoomGameplayAdmission::Stopped;}
+        RoomFrame frame;if(!s.room->PeekFrame(frame))return RoomGameplayAdmission::Waiting;
+        if(frame.tick!=tick || !s.GameOverFrame(frame,ctx,base)){
+            s.Stop("Native GameOver authoritative frame failed phase admission");return RoomGameplayAdmission::Stopped;}
+        s.prepared=frame;output=frame;gameplay_waiting.store(false,std::memory_order_release);return RoomGameplayAdmission::Ready;
+    }
     if(!RefreshOwnedActorTaskPermissions(ctx,base)){s.Stop("Could not refresh authored extra-human ability policy");return RoomGameplayAdmission::Stopped;}
     if(s.prepared){output=*s.prepared;return RoomGameplayAdmission::Ready;}
     const auto tick=s.room->next_tick();
@@ -548,11 +590,14 @@ RoomGameplayAdmission NativeRoomGameplay::Prepare(PPCContext& ctx,uint8_t* base,
 bool NativeRoomGameplay::Commit(const RoomFrame& frame,PPCContext& ctx,uint8_t* base){
     Environment environment;Context context(ctx);auto& s=*impl_;Impl::FaultOnThrow fault{s};
     if(!s.Owner() || s.stopped || s.pending || !s.prepared || frame!=*s.prepared)return false;
-    if(!s.Canonical() || !s.World(base) || !s.actor_frames || s.actor_frames->Preflight(frame,ctx,base)!=OwnedFrameResult::Ready ||
-        !s.ButtonFrame(frame,ctx,base) || !s.Actions(frame,ctx,base))return s.Stop("Native retail admission changed before frame consumption");
+    if(!s.Canonical() || !s.World(base) || (s.game_over_entry?!s.GameOverFrame(frame,ctx,base):
+        (!s.actor_frames || s.actor_frames->Preflight(frame,ctx,base)!=OwnedFrameResult::Ready ||
+        !s.ButtonFrame(frame,ctx,base) || !s.Actions(frame,ctx,base))))return s.Stop("Native retail admission changed before frame consumption");
     RoomFrame actual;
     if(!s.room->PeekFrame(actual) || actual!=frame || !s.room->TakeFrame(actual) || actual!=frame)return s.Stop("The authoritative gameplay frame changed before consumption");
-    Frame retail;retail.tick=frame.tick;retail.players[0]=frame.players[0].pad;retail.players[1]=frame.players[1].pad;
+    Frame retail;retail.tick=frame.tick;
+    // Keep delayed commands in history without routing them to dead actors.
+    if(!s.game_over_entry){retail.players[0]=frame.players[0].pad;retail.players[1]=frame.players[1].pad;}
     uint64_t generation=0;Frame published;
     if(em2::SynchronizedControlsGeneration()!=s.controls || !em2::PublishSynchronizedControls(retail) ||
         !em2::ReadPublishedSynchronizedControls(generation,published) || generation!=s.controls || published!=retail)
@@ -566,6 +611,10 @@ bool NativeRoomGameplay::Deliver(PPCContext& ctx,uint8_t* base){
     if(!s.Owner() || s.stopped || !s.pending || s.delivered || !s.consumed ||
         !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed)return false;
     if(const auto reason=s.WorldFailure(base))return s.Stop(std::string("Native world changed before input delivery: ")+reason);
+    if(s.game_over_entry){
+        if(!s.GameOverFrame(*s.consumed,ctx,base))return s.Stop("Native GameOver phase changed before native update");
+        s.delivered=true;return true; // No gameplay callbacks are promised.
+    }
     if(!s.Actions(*s.consumed,ctx,base))return s.Stop("Native retail action bindings changed before delivery");
     if(!s.ButtonFrame(*s.consumed,ctx,base))return s.Stop("Native retail button frame failed delivery admission");
     if(!s.actor_frames)return s.Stop("Native owned actor frame coordinator is missing at delivery");
@@ -598,17 +647,21 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
     if(!s.Owner() || s.stopped || !s.pending || !s.delivered || !s.consumed ||
         !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed)return false;
     if(const auto failure=s.WorldFailure(base))return s.Stop(std::string("Native gameplay completion rejected: ")+failure);
-    const auto finished=s.consumed->players[0].source==RoomMovementSource::NativeActionV3?
-        FinishRetailButtonTick(tick,ctx,base):FinishRetailJumpTick(tick,ctx,base);
-    if(finished!=ActorInputResult::Applied)return s.Stop("Native retail button/jump completion rejected (result "+std::to_string(int(finished))+")");
-    if(!FinishRetailInputTick(tick,ctx,base))return s.Stop("Native retail movement tick was not completed by its current receiver");
-    if(!s.actor_frames)return s.Stop("Native owned actor frame coordinator is missing at completion");
-    const auto owned_finished=s.actor_frames->Finish(tick,base);
-    if(owned_finished!=OwnedFrameResult::Ready)return s.Stop("Native owned actor completion rejected (result "+std::to_string(int(owned_finished))+")");
+    if(!s.game_over_entry){
+        const auto finished=s.consumed->players[0].source==RoomMovementSource::NativeActionV3?
+            FinishRetailButtonTick(tick,ctx,base):FinishRetailJumpTick(tick,ctx,base);
+        if(finished!=ActorInputResult::Applied)return s.Stop("Native retail button/jump completion rejected (result "+std::to_string(int(finished))+")");
+        if(!FinishRetailInputTick(tick,ctx,base))return s.Stop("Native retail movement tick was not completed by its current receiver");
+        if(!s.actor_frames)return s.Stop("Native owned actor frame coordinator is missing at completion");
+        const auto owned_finished=s.actor_frames->Finish(tick,base);
+        if(owned_finished!=OwnedFrameResult::Ready)return s.Stop("Native owned actor completion rejected (result "+std::to_string(int(owned_finished))+")");
+    }
+    if(s.game_over_entry && (tick==*s.game_over_entry+1 || tick%30==0))
+        REXLOG_INFO("Native Room GameOver native update completed: tick {}; original world update and real digest, no gameplay callbacks dispatched",tick);
     ObservePrivateRoomActors(tick,s.actors->actors(),base);
     ObservePrivateExtraDamage(tick,ctx,base);
-    // Original post-update, observation, retail input and every owned actor
-    // completion succeeded. Proof consensus may still fail or be unavailable.
+    // The original post-update and phase-specific completion succeeded.
+    // GameOver promises no gameplay callbacks. Proof consensus may still fail.
     // This is only a physical update boundary, never authoritative agreement.
     s.native_completed=tick;
     if(!s.room->CompleteGameplay(tick,digest))return s.Stop("Native gameplay world verification failed");

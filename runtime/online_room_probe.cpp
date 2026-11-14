@@ -345,7 +345,7 @@ std::unique_ptr<rex::input::InputSystem> MakePrivateRoomInput(Room& room){
             const auto extra_damage=REXCVAR_GET(em2_probe_extra_damage_peer);
             const bool damage_fixture=damage_player || extra_damage;
             const bool damage_target=damage_player==4 || room_.local_peer()==(damage_player?damage_player:extra_damage);
-            const bool active=room_.lobby().players.size()>2?room_.local_peer()>=3:room_.local_peer()==2;
+            const bool active=damage_player!=4 && (room_.lobby().players.size()>2?room_.local_peer()>=3:room_.local_peer()==2);
             const int direction=room_.lobby().players.size()>2 && !(room_.local_peer()&1)?-1:1;
             if(active){
                 if(elapsed>=60 && elapsed<72){state->gamepad.thumb_ly=int16_t(direction*16000);phase=direction>0?"forward":"backward";}
@@ -367,10 +367,10 @@ std::unique_ptr<rex::input::InputSystem> MakePrivateRoomInput(Room& room){
                 if(elapsed>=800 && elapsed<804){state->gamepad.buttons=0x1000;phase="survivor jump";}
             }
             if(damage_target){
-                if(extra_damage && elapsed>=720 && elapsed<760){state->gamepad.thumb_ly=16000;phase="movement while dead";}
-                if(extra_damage && elapsed>=740 && elapsed<744){state->gamepad.buttons=0x1000;phase="jump while dead";}
-                if(elapsed>=1000 && elapsed<1012){state->gamepad.thumb_ly=16000;phase="forward after respawn";}
-                if(elapsed>=1040 && elapsed<1052){state->gamepad.thumb_ly=-16000;phase="backward after respawn";}
+                if(extra_damage && damage_player!=4 && elapsed>=720 && elapsed<760){state->gamepad.thumb_ly=16000;phase="movement while dead";}
+                if(extra_damage && damage_player!=4 && elapsed>=740 && elapsed<744){state->gamepad.buttons=0x1000;phase="jump while dead";}
+                if(elapsed>=1000 && elapsed<(damage_player==4?1006u:1012u)){state->gamepad.thumb_ly=16000;phase="forward after respawn";}
+                if(elapsed>=1040 && elapsed<(damage_player==4?1046u:1052u)){state->gamepad.thumb_ly=-16000;phase="backward after respawn";}
                 if(elapsed>=1080 && elapsed<1084){state->gamepad.buttons=0x1000;phase="jump after respawn";}
             }
             const auto complete=damage_fixture?1200u:REXCVAR_GET(em2_probe_native_policy_cycle)?560u:360u;

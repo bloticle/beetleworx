@@ -13,7 +13,7 @@ inline constexpr std::size_t kOnlineRoomCapacity=16;
 // movement values until the original native action interpreter has run.
 // NativeActionV1 identifies post-interpreter x/y, including explicit neutral;
 // neither transport nor the actor coordinator may infer it from Pad values.
-enum class RoomMovementSource : uint8_t { UnconvertedPad=0, NativeActionV1=1, NativeActionV2=2, NativeActionV3=3 };
+enum class RoomMovementSource : uint8_t { UnconvertedPad=0, NativeActionV1=1, NativeActionV2=2, NativeActionV3=3, NativeGameOverV4=4 };
 // Digital interpreter outputs are booleans, ordered default context then active
 // context and original ordinal. No guest address or guessed semantic ID travels.
 struct RoomButtonActions {
@@ -61,6 +61,12 @@ struct RoomMovement {
 
 // One admission rule shared by the network decoder and native coordinator.
 inline bool ValidRoomMovement(const RoomMovement& value){
+    // Terminal no-gameplay phase: native state admission belongs to the world
+    // owner, not the transport. No input or stale schema may hide in this type.
+    if(value.source==RoomMovementSource::NativeGameOverV4){
+        RoomMovement expected;expected.actor_epoch=value.actor_epoch;expected.source=value.source;
+        return value.actor_epoch!=0 && value==expected;
+    }
     if(value.source!=RoomMovementSource::NativeActionV1 && value.source!=RoomMovementSource::NativeActionV2 && value.source!=RoomMovementSource::NativeActionV3)return false;
     if(value.source==RoomMovementSource::NativeActionV3){
         if(value.button_actions.schema==std::array<uint8_t,32>{})return false;
@@ -95,7 +101,7 @@ struct RoomJumpStream {
     bool operator==(const RoomJumpStream&)const=default;
 };
 inline bool AdvanceRoomJumpStream(RoomJumpStream& state,const RoomMovement& value){
-    if(!ValidRoomMovement(value))return false;
+    if(value.source==RoomMovementSource::NativeGameOverV4 || !ValidRoomMovement(value))return false;
     if(value.source==RoomMovementSource::NativeActionV1)return !state.native;
     auto next=state;
     if(next.buttons && value.source!=RoomMovementSource::NativeActionV3)return false;

@@ -102,3 +102,11 @@ incorrectly classified as the death of the whole online party. That test now
 passes without entering CutScene, including normal retail recovery. It does
 not claim that legitimate CutScene input-definition changes can now rearm
 sources and receivers; that broader lifecycle remains unfinished.
+
+
+The terminal all-human GameOver case now has a separate
+[native lifecycle and verified checkpoint recovery](online-party-gameover.md).
+It freezes gameplay callbacks only after the original state-7/all-human-death
+admission and resumes through a fresh native world bootstrap. It does not
+rearm gameplay bindings inside an arbitrary story CutScene or solve that
+remaining context-epoch lifecycle.

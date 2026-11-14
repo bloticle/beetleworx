@@ -1,4 +1,7 @@
 #include "guest_shutdown.h"
+#include "ppc_context.h"
+#include <cstring>
+#include <immintrin.h>
 #include <rex/kernel/kernel_state.h>
 #include <rex/kernel/xthread.h>
 #include <rex/logging.h>
@@ -137,10 +140,41 @@ bool em2::JoinGuestShutdown(rex::kernel::KernelState& kernel,Duration timeout){
  }while(deadline.remaining()>0ms);
  return false;
 }
+namespace {
+template<class Forward> void NativeBusyWaitBoundary(PPCContext& ctx,uint8_t* base,Forward&& forward){
+ // Preserve the native caller's host environment around the cancellation
+ // probe. The original helper retains every normal return/side effect.
+ {const auto error=GetLastError();const auto fp=_mm_getcsr();
+  try{em2::PollGuestShutdown();}catch(...){_mm_setcsr(fp);SetLastError(error);throw;}
+  _mm_setcsr(fp);SetLastError(error);}
+ std::forward<Forward>(forward)(ctx,base);
+}
+}
+PPC_EXTERN_FUNC(__imp__sub_8269FAC8);
+PPC_FUNC_IMPL(sub_8269FAC8){
+ // 826B57A8's native GPU-fence loop can otherwise spin forever after GPU
+ // interrupts have drained. Cancel only during owned cooperative shutdown.
+ NativeBusyWaitBoundary(ctx,base,__imp__sub_8269FAC8);
+}
 bool em2::TestGuestShutdown(){
  auto reset=[](){Stop().requested=false;Stop().event->Reset();};
  struct Reset{decltype(reset)& fn;~Reset(){fn();}} reset_at_exit{reset};
  auto check=[](bool value,const char* why){if(!value)REXLOG_ERROR("Guest shutdown regression: {}",why);return value;};
+ reset();
+ {
+  PPCContext ctx{};ctx.r3.u64=0x12345678;ctx.lr=0x826B5840;const auto before=ctx;
+  GuestExecutionScope guest(true);RequestGuestShutdown();bool cancelled=false;
+  const auto error=GetLastError();const auto fp=_mm_getcsr();
+  try{sub_8269FAC8(ctx,nullptr);}catch(const GuestShutdown&){cancelled=true;}
+  if(!check(cancelled && !std::memcmp(&ctx,&before,sizeof(ctx)) && GetLastError()==error && _mm_getcsr()==fp,
+      "actual native GPU-fence poll cancels before any guest access and preserves context/host environment"))return false;
+  reset();unsigned forwarded=0;
+  NativeBusyWaitBoundary(ctx,nullptr,[&](PPCContext& c,uint8_t* base){++forwarded;c.r3.u64=77;c.lr=88;});
+  if(!check(forwarded==1 && ctx.r3.u64==77 && ctx.lr==88,"normal native busy-wait callback forwards exactly once with original outputs"))return false;
+  {GuestExecutionScope inactive(false);RequestGuestShutdown();
+   NativeBusyWaitBoundary(ctx,nullptr,[&](PPCContext& c,uint8_t*){++forwarded;c.r3.u64=99;});}
+  if(!check(forwarded==2 && ctx.r3.u64==99,"non-guest busy-wait callback remains unchanged despite a stop request"))return false;
+ }
  reset();
  const auto configured=REXCVAR_GET(em2_cooperative_title_shutdown);
  const bool startup=CooperativeGuestShutdownEnabled();
