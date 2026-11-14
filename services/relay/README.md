@@ -7,9 +7,9 @@ over the relay and real Discord invitations still need end-to-end testing.
 
 The current live deployment still carries gameplay/text only. The source also
 contains a separate media endpoint, verified in the local Cloudflare runtime.
-That media endpoint is not deployed. The native adapter compiles, but its
-queue fixtures and actual encrypted/audio relay path have not run yet.
-Demo.4 still cannot relay voice.
+That media endpoint is not deployed. The native adapter compiles and its
+queue fixtures plus existing voice regressions pass. The encrypted internet
+media path remains unverified. Demo.4 still cannot relay voice.
 
 The service accepts outbound HTTPS/WebSocket connections from the host and up
 to fifteen guests. Players do not open inbound ports or configure routers.

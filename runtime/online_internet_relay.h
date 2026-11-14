@@ -28,5 +28,5 @@ public:
     bool finished()const noexcept;
     InternetRelayStatus status()const;
 };
-bool TestOnlineInternetVoiceRelay();
+bool TestOnlineInternetVoiceRelay(std::string https_test_origin={});
 }

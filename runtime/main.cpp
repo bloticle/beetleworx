@@ -184,6 +184,7 @@ REXCVAR_DEFINE_BOOL(em2_online_menu,false,"Online","Show experimental direct-con
 REXCVAR_DEFINE_BOOL(em2_test_pc_settings,false,"Debug","Run PC menu settings tests without opening the game");
 REXCVAR_DEFINE_BOOL(em2_test_online_input,false,"Debug","Run online room/native-slot and sealed local-source regressions headlessly in the canonical executable");
 REXCVAR_DEFINE_BOOL(em2_test_online_voice,false,"Debug","Test native voice codec/mixing; SDL dummy backend only for device tests, never real microphone hardware");
+REXCVAR_DEFINE_STRING(em2_test_voice_relay_origin,"","Debug","Optional explicit HTTPS relay for headless native encrypted voice integration; never opens audio devices");
 REXCVAR_DEFINE_BOOL(em2_test_demo_support,false,"Debug","Run isolated report and update transaction regressions without starting the game");
 REXCVAR_DEFINE_STRING(em2_test_live_update_path,"","Debug","Explicit headless diagnostic: verify a live published demo update inside this new isolated directory");
 REXCVAR_DEFINE_BOOL(em2_test_update_swap,false,"Debug","Verify and restore the running canonical executable rename primitive without starting the game");
@@ -518,7 +519,7 @@ public:
         }
         if(REXCVAR_GET(em2_test_online_voice)){
             const auto voice_preferences_test=exe_dir/("online-voice-settings-test-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-            bool success=false;try{success=em2::net::TestOnlineInternetVoiceRelay() && em2::net::TestOnlineVoiceAudio() && em2::net::TestOnlineVoiceTransport() && em2::net::TestOnlineRoomVoice() && em2::net::TestOnlineVoicePreferences(voice_preferences_test) && em2::net::TestOnlineVoiceSettings(voice_preferences_test) && em2::net::TestOnlineVoiceDevices() && em2::net::TestOnlineVoiceRuntime();}catch(const std::exception& e){REXLOG_ERROR("Voice regression threw: {}",e.what());}
+            bool success=false;try{success=em2::net::TestOnlineInternetVoiceRelay(REXCVAR_GET(em2_test_voice_relay_origin)) && em2::net::TestOnlineVoiceAudio() && em2::net::TestOnlineVoiceTransport() && em2::net::TestOnlineRoomVoice() && em2::net::TestOnlineVoicePreferences(voice_preferences_test) && em2::net::TestOnlineVoiceSettings(voice_preferences_test) && em2::net::TestOnlineVoiceDevices() && em2::net::TestOnlineVoiceRuntime();}catch(const std::exception& e){REXLOG_ERROR("Voice regression threw: {}",e.what());}
             spdlog::shutdown();ExitProcess(success?0:1);
         }
         if (REXCVAR_GET(em2_test_online_input)) {

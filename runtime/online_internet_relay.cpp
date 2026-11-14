@@ -501,7 +501,64 @@ std::shared_ptr<VoiceDatagramChannel> InternetRelay::VoiceChannel(){
     auto worker=std::make_unique<MediaWorker>(p.host,p.media_routes,p.media_hostname,p.media_port,p.media_code,p.media_version,p.media_credential,proxy);
     p.media_workers.push_back(std::move(worker));return proxy;
 }
-bool TestOnlineInternetVoiceRelay(){return MediaWorker::TestQueues();}
+bool TestOnlineInternetVoiceRelay(std::string origin){
+    if(!MediaWorker::TestQueues())return false;
+    if(origin.empty())return true;
+    try{
+        WSADATA data{};Need(WSAStartup(MAKEWORD(2,2),&data)==0,"Fixture Winsock failed");
+        struct Cleanup{~Cleanup(){WSACleanup();}}cleanup;
+        struct Sockets{
+            SOCKET listener=INVALID_SOCKET,host=INVALID_SOCKET,guest=INVALID_SOCKET;
+            ~Sockets(){Close(listener);Close(host);Close(guest);}
+        }sockets;
+        using Clock=std::chrono::steady_clock;
+        const auto wait=[](auto condition){const auto end=Clock::now()+15s;do{if(condition())return true;std::this_thread::sleep_for(2ms);}while(Clock::now()<end);return false;};
+        sockets.listener=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);Need(sockets.listener!=INVALID_SOCKET && Nonblocking(sockets.listener),"Fixture listener failed");
+        sockaddr_in address{};address.sin_family=AF_INET;address.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+        Need(bind(sockets.listener,reinterpret_cast<sockaddr*>(&address),sizeof(address))==0 && listen(sockets.listener,1)==0,"Fixture bind failed");
+        int length=sizeof(address);Need(getsockname(sockets.listener,reinterpret_cast<sockaddr*>(&address),&length)==0,"Fixture listener port failed");
+        Invite invite;invite.address="127.0.0.1";invite.port=ntohs(address.sin_port);Need(NewSessionNonce(invite.session),"Fixture nonce failed");
+        auto encoded=EncodeInvite(invite);Need(encoded.has_value(),"Fixture invitation failed");
+        InternetRelay host,guest;
+        Need(host.Host(origin,"0.1.0-demo.4",*encoded) && wait([&]{auto s=host.status();Need(!s.failed,"Native relay host creation failed");return s.ready;}),"Native relay host timed out");
+        Need(guest.Join(origin,"0.1.0-demo.4",host.status().code) && wait([&]{auto s=guest.status();Need(!s.failed,"Native relay guest join failed");return s.ready;}),"Native relay guest timed out");
+        auto local=DecodeInvite(guest.status().invitation);Need(local.has_value(),"Fixture local invitation invalid");
+        sockets.guest=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);Need(sockets.guest!=INVALID_SOCKET && Nonblocking(sockets.guest),"Fixture guest socket failed");
+        address.sin_port=htons(local->port);
+        const auto result=connect(sockets.guest,reinterpret_cast<sockaddr*>(&address),sizeof(address));Need(result==0 || WSAGetLastError()==WSAEWOULDBLOCK,"Fixture local connect failed");
+        Need(wait([&]{sockets.host=accept(sockets.listener,nullptr,nullptr);return sockets.host!=INVALID_SOCKET;}),"Native relay host admission timed out");
+        Need(Nonblocking(sockets.host),"Fixture accepted socket failed");
+        length=sizeof(address);Need(getpeername(sockets.host,reinterpret_cast<sockaddr*>(&address),&length)==0 && host.BindVoicePeer(2,ntohs(address.sin_port)),"Native admitted channel mapping failed");
+        const auto game_transfer=[&](SOCKET from,SOCKET to){
+            std::array<char,4> bytes{'t','e','s','t'},received{};
+            Need(send(from,bytes.data(),int(bytes.size()),0)==int(bytes.size()),"Fixture gameplay send failed");
+            size_t at=0;Need(wait([&]{auto n=recv(to,received.data()+at,int(received.size()-at),0);if(n>0)at+=size_t(n);else Need(n<0 && WSAGetLastError()==WSAEWOULDBLOCK,"Fixture gameplay disconnected");return at==received.size();}),"Fixture gameplay transfer timed out");
+            Need(bytes==received,"Native gameplay bytes changed");
+        };
+        game_transfer(sockets.guest,sockets.host);game_transfer(sockets.host,sockets.guest);
+        host.SetJoinable(false);
+        for(unsigned generation=0;generation<2;++generation){
+            VoiceTransport host_voice,guest_voice;auto host_channel=host.VoiceChannel(),guest_channel=guest.VoiceChannel();
+            Need(host_channel && guest_channel,"Private native media credentials unavailable");
+            Need(host_voice.UseDatagramChannel(std::move(host_channel)) && guest_voice.UseDatagramChannel(std::move(guest_channel)),"Native media channel install failed");
+            Need(host_voice.Host("127.0.0.1",invite.session),"Fixture voice host failed");
+            VoiceKeys keys;Need(host_voice.AddPeer(2,"127.0.0.1",keys) && guest_voice.Join("127.0.0.1",host_voice.port(),2,invite.session,keys),"Fixture voice key offer failed");
+            host_voice.SetRoster(3);guest_voice.SetRoster(3);
+            Need(wait([&]{host_voice.Poll();guest_voice.Poll();return host_voice.peer_ready(2) && guest_voice.ready();}),"Encrypted native media handshake timed out");
+            VoicePcm pcm{};VoiceEncoder encoder;VoicePacket host_packet,guest_packet;
+            Need(encoder.Encode(100+generation,pcm,host_packet) && encoder.Encode(200+generation,pcm,guest_packet),"Fixture Opus encode failed");
+            Need(host_voice.Send(host_packet) && guest_voice.Send(guest_packet),"Encrypted native media send failed");
+            std::vector<ReceivedVoice> at_host,at_guest;
+            Need(wait([&]{host_voice.Poll();guest_voice.Poll();auto h=host_voice.TakeReceived(),g=guest_voice.TakeReceived();at_host.insert(at_host.end(),h.begin(),h.end());at_guest.insert(at_guest.end(),g.begin(),g.end());return !at_host.empty() && !at_guest.empty();}),"Encrypted native media delivery timed out");
+            Need(at_host.size()==1 && at_guest.size()==1 && at_host[0].peer==2 && at_guest[0].peer==1 && at_host[0].packet.sequence==guest_packet.sequence && at_guest[0].packet.sequence==host_packet.sequence && at_host[0].packet.data==guest_packet.data && at_guest[0].packet.data==host_packet.data,"Native encrypted audio identity/payload changed");
+            REXLOG_INFO("Native internet media fixture generation {}: encrypted handshake and Opus payloads PASS",generation);
+        }
+        std::this_thread::sleep_for(300ms);
+        game_transfer(sockets.guest,sockets.host);game_transfer(sockets.host,sockets.guest);
+        REXLOG_INFO("Native internet media fixture: PASS; game admission, channel binding, two encrypted voice generations after join lock, game stream retained after media retirement; no devices or native worlds exercised");
+        return true;
+    }catch(const std::exception& error){REXLOG_ERROR("Native internet media fixture: FAIL: {}",error.what());return false;}
+}
 bool InternetRelay::finished()const noexcept{return impl_->completed.load(std::memory_order_acquire);}
 bool InternetRelay::Host(std::string origin,std::string version,std::string invitation){return impl_->Start(true,std::move(origin),std::move(version),std::move(invitation));}
 bool InternetRelay::Join(std::string origin,std::string version,std::string code){return impl_->Start(false,std::move(origin),std::move(version),std::move(code));}
