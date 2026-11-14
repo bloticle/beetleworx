@@ -545,7 +545,7 @@ bool TestNativeRetailInput(){
     OwnedMovementFrames button_frames;
     if(!check(button_frames.Configure(3,3,frame_epochs,10,registry,ValidateRetailMovementFrame),
         "shared actor transaction requires actual armed native retail admission"))return false;
-    auto button_drive=[&](const RoomFrame& input){
+    auto button_drive=[&](const RoomFrame& input,const std::function<void()>& native_update){
         if(button_frames.Preflight(input,ctx,base)!=OwnedFrameResult::Ready || ValidateRetailButtonFrame(input,ctx,base)!=Result::Applied)return false;
         Frame pads;pads.tick=input.tick;for(unsigned i=0;i<2;++i)pads.players[i]=input.players[i].pad;
         fixture_tick=input.tick;
@@ -556,6 +556,7 @@ bool TestNativeRetailInput(){
         for(unsigned i=0;i<2;++i)if(ReplayRetailButtonBatch(i,input,ctx,base)!=Result::Applied ||
             ReplayRetailButtonBatch(i,input,ctx,base)==Result::Applied)return false;
         for(unsigned i=0;i<2;++i){auto call=context();call.r3.u64=controllers[i]+24;UpdateRetailBasisController(call,base,FixtureBoundedController);}
+        if(native_update)native_update();
         return FinishRetailButtonTick(input.tick,ctx,base)==Result::Applied && FinishRetailInputTick(input.tick,ctx,base) &&
             button_frames.Finish(input.tick,base)==OwnedFrameResult::Ready;
     };

@@ -190,11 +190,12 @@ ActorInputResult FinishRetailButtonTick(uint64_t tick,PPCContext& ctx,uint8_t* b
         if(REXCVAR_GET(em2_private_profile))REXLOG_ERROR("Native button completion header rejected: tick {} expected {} active {} delivered {}/{}",tick,delivery.frame.tick,delivery.active,delivery.delivered[0],delivery.delivered[1]);
         return ActorInputResult::InvalidTick;
     }
-    const auto admitted=ValidateRetailButtonFrame(delivery.frame,ctx,base);
-    if(admitted!=ActorInputResult::Applied){
-        if(REXCVAR_GET(em2_private_profile))REXLOG_ERROR("Native button completion revalidation rejected: tick {} result {} faulted {} started {} next {}",tick,int(admitted),delivery.faulted,delivery.started,delivery.next);
-        return ActorInputResult::InvalidTick;
-    }
+    // Preflight and each dispatch already validated these exact definitions.
+    // The native update may deliberately change its input context. Completion
+    // verifies the delivered transaction and live actor ownership, not whether
+    // the next frame could still use the previous gameplay definitions.
+    if(button_permit || delivery.faulted || delivery.frame.players_mask!=3 ||
+       tick==UINT64_MAX || (delivery.started && delivery.next!=tick))return ActorInputResult::InvalidTick;
     for(unsigned i=0;i<2;++i){RetailActorInput actor;bool moved=false;RoomMovement prepared;
         if(!RetailInputTickFor(i,tick,ctx,base,actor,moved,&prepared) || !moved || prepared!=delivery.frame.players[i]){
             delivery.faulted=true;return ActorInputResult::InvalidContext;}}
@@ -221,7 +222,7 @@ RetailButtonFilter FilterRetailButtonInput(PPCContext& ctx,uint8_t* base,bool ba
     }
     return RetailButtonFilter::Unowned;
 }
-bool TestRetailButtonReceivers(PPCContext& ctx,uint8_t* base,const std::function<bool(const RoomFrame&)>& drive){
+bool TestRetailButtonReceivers(PPCContext& ctx,uint8_t* base,const std::function<bool(const RoomFrame&,const std::function<void()>&)>& drive){
     Preserve preserve;
     struct Restore {
         uint8_t* base;std::vector<uint8_t> bytes;uint32_t threshold;
@@ -315,7 +316,7 @@ bool TestRetailButtonReceivers(PPCContext& ctx,uint8_t* base,const std::function
             "later-slot schema mismatch rejects before either native callback"))return false;
         if(!check(ReplayRetailButtonBatch(0,frame,ctx,base)==ActorInputResult::InvalidTick && observed.calls==std::array<unsigned,2>{},
             "a valid packet without both actual staged native movements cannot dispatch"))return false;
-        const bool first_driven=drive(frame);
+        const bool first_driven=drive(frame,{});
         if(!first_driven || observed.calls!=std::array<unsigned,2>{1,1} || !observed.nested_blocked)
             REXLOG_ERROR("Native button fixture drive={} calls={}/{} nested={} active={} faulted={}",first_driven,observed.calls[0],observed.calls[1],observed.nested_blocked,delivery.active,delivery.faulted);
         if(!check(first_driven && observed.calls==std::array<unsigned,2>{1,1} && observed.nested_blocked,
@@ -328,10 +329,23 @@ bool TestRetailButtonReceivers(PPCContext& ctx,uint8_t* base,const std::function
         ++frame.tick;for(auto& c:frame.players)if(c.source==RoomMovementSource::NativeActionV3)++c.button_actions.source_tick;
         // Clear both actions to exercise a real neutral batch, not missing input.
         frame.players[0].button_actions.fired={};frame.players[1].button_actions.fired={};
-        if(!check(drive(frame) && observed.calls==std::array<unsigned,2>{1,1},"explicit neutral next tick completes without repeating held actions"))return false;
+        RetailButtonReceiver changed_receiver;
+        if(!ArmRetailButtons(changed_receiver,0,definitions[0],ctx,base))return false;
+        if(!check(drive(frame,[&]{PPC_STORE_U32(0x54000+92,0x01400011);}) && observed.calls==std::array<unsigned,2>{1,1},
+            "completed neutral native update may change input definitions without invalidating already delivered actions"))return false;
+        auto changed=frame;++changed.tick;for(auto& c:changed.players)++c.button_actions.source_tick;
+        std::vector<NativeActorAction> changed_actions;
+        if(!check(!PrepareRetailButtons(changed_receiver,changed.players[0],ctx,base,changed_actions),
+            "changed definition rejects next-frame receiver preflight before native callbacks"))return false;
+        PPC_STORE_U32(0x54000+92,0x01400010);
+        if(!check(!PrepareRetailButtons(changed_receiver,changed.players[0],ctx,base,changed_actions),
+            "restoring changed metadata does not resurrect a retired button receiver"))return false;
+        if(!check(ResetRetailButtons(changed_receiver) && ArmRetailButtons(changed_receiver,0,definitions[0],ctx,base) &&
+            PrepareRetailButtons(changed_receiver,changed.players[0],ctx,base,changed_actions),
+            "only explicit fresh receiver capture re-arms a definition retired at admission"))return false;
         ++frame.tick;frame.players[0]=commands[0];frame.players[1]=commands[1];
         frame.players[0].button_actions.source_tick=frame.players[1].button_actions.source_tick=12;
-        observed.throw_on_call=true;bool threw=false;try{drive(frame);}catch(const std::runtime_error&){threw=true;}
+        observed.throw_on_call=true;bool threw=false;try{drive(frame,{});}catch(const std::runtime_error&){threw=true;}
         if(!check(threw && observed.calls==std::array<unsigned,2>{2,1} && delivery.faulted && !button_permit &&
             ValidateRetailButtonFrame(frame,ctx,base)!=ActorInputResult::Applied,
             "native callback exception retires the partial frame and clears permission without calling the second actor"))return false;

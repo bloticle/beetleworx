@@ -64,3 +64,32 @@ python .\scripts\verify-native-retail-pair-survivor.py <capture-directory>
 ```
 
 This source work does not create or replace a public binary release.
+
+## Completed-frame validation separated from next-frame admission
+
+`FinishRetailButtonTick` now validates the delivered frame header, owner thread,
+active transaction, fault state, native tick and unchanged retail actor/movement
+leases. It no longer reruns definition admission after the native world update.
+Those definitions were already validated in complete preflight and before every
+actual native action callback. A native callback exception or partial delivery
+still faults the transaction. Subsequent frames still require current producer
+and receiver definitions; completing a previous frame does not rearm anything.
+
+The focused canonical-executable online suite passed (exit 0), including the
+extended original-callback fixture with 31 retail button receiver checks. That
+fixture changes a button definition after the native update, proves the
+already-delivered neutral frame completes, rejects next-frame preflight on an
+independent receiver that observes the changed definition, rejects resurrection
+when the bytes are restored, and requires explicit fresh receiver capture.
+Existing duplicate delivery, malformed schemas, quarantine and native callback
+exception checks remain. This does not implement in-place global delivery
+rearming after gameplay starts; the existing lifecycle restriction remains.
+
+In the real three-world capture
+`analysis/native-lobby-20261114-101148-c9edaeda`, tick 701 completed with the
+survivor's native health still 5 after entering CutScene. The next source
+production failed because it retained the old gameplay Movement/Jump binding.
+The capture remains rejected as playable survivor/cutscene evidence. This
+isolates the next required work to context-aware source/receiver lifecycle,
+including delayed frames and control-return rearming, rather than completion
+of the already delivered native update. No new binary release was created.
