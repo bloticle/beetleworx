@@ -20,7 +20,7 @@ class em2.options.TVSettings extends MovieClip
       var screenWidth=Number(_global.initVars.screenWidth); if(!(screenWidth>=640)) screenWidth=1280;
       var screenHeight=Number(_global.initVars.screenHeight); if(!(screenHeight>=480)) screenHeight=720;
       var offset=Number(_global.offsetX); if(isNaN(offset)) offset=0;
-      var labelWidth=screenWidth*0.84;
+      var labelWidth=screenWidth*0.48;
       var i = 0;
       while(i < 8)
       {
@@ -32,23 +32,23 @@ class em2.options.TVSettings extends MovieClip
          row.hitarea._height=36; row.pcLabelWidth=labelWidth;
          row.pcTextX=nativeCenter-row.labelclip._x-labelWidth/2+16;
          row.pcBaseX=row._x; row.pcBaseY=row._y; row.pcCenter=nativeCenter;
-         this.createTextField("pc_info_"+i,300+i,offset+screenWidth*0.08,row._y,labelWidth,40);
-         var info=this["pc_info_"+i]; var infoFormat=row.t_label.getTextFormat();
+         this.createTextField("pc_info_"+i,300+i,offset+screenWidth*0.26,row._y,labelWidth,40);
+         var info=this["pc_info_"+i]; var infoFormat=row.t_label.getNewTextFormat();
          infoFormat.size=18; infoFormat.align="center";
-         info.embedFonts=true; info.setNewTextFormat(infoFormat); info.textColor=13421772;
+         info.embedFonts=false; info.setNewTextFormat(infoFormat); info.textColor=13421772;
          info.selectable=false; info.multiline=false; info.autoSize="none"; info._visible=false;
          row.pcRow = i;
          row.addEventListener(em2.Events.PRESS,mx.utils.Delegate.create(this,this._mouseSelect));
          this._rows.push(row); i++;
       }
       this._list.items = this._rows;
-      this.createTextField("pc_help",400,offset+screenWidth*0.08,screenHeight*0.765,labelWidth,screenHeight*0.08);
-      var format=this._rows[0].t_label.getTextFormat(); format.size=18; format.align="center";
-      this.pc_help.embedFonts=true; this.pc_help.setNewTextFormat(format);
+      this.createTextField("pc_help",400,offset+screenWidth*0.26,screenHeight*0.765,labelWidth,screenHeight*0.08);
+      var format=this._rows[0].t_label.getNewTextFormat(); format.size=18; format.align="center";
+      this.pc_help.embedFonts=false; this.pc_help.setNewTextFormat(format);
       this.pc_help.textColor = 16777215; this.pc_help.multiline = true;
       this.pc_help.wordWrap = true; this.pc_help.selectable = false;
-      this.createTextField("pc_heading",401,offset+screenWidth*0.08,screenHeight*0.17,labelWidth,36);
-      format.size=24; this.pc_heading.embedFonts=true; this.pc_heading.setNewTextFormat(format);
+      this.createTextField("pc_heading",401,offset+screenWidth*0.26,screenHeight*0.17,labelWidth,36);
+      format.size=24; this.pc_heading.embedFonts=false; this.pc_heading.setNewTextFormat(format);
       this.pc_heading.textColor=16777215; this.pc_heading.selectable=false;
       this._refresh();
    }
@@ -59,34 +59,35 @@ class em2.options.TVSettings extends MovieClip
       var screenHeight=Number(_global.initVars.screenHeight); if(!(screenHeight>=480)) screenHeight=720;
       var offset=Number(_global.offsetX); if(isNaN(offset)) offset=0;
       row._x=row.pcBaseX; row._y=row.pcBaseY;
-      row.pcLabelWidth=screenWidth*0.84;
+      row.pcLabelWidth=screenWidth*0.48;
       var split=this._view==1 && item.id!=undefined && !item.action && !item.readOnly;
       if(this._view==0 || this._view==2) {
-         row.pcLabelWidth=screenWidth*0.38;
-         row._x=offset+screenWidth*(row.pcRow%2==0?0.29:0.71)-row.pcCenter;
+         row.pcLabelWidth=screenWidth*0.23;
+         row._x=offset+screenWidth*(row.pcRow%2==0?0.375:0.625)-row.pcCenter;
          row._y=screenHeight*(0.30+Math.floor(row.pcRow/2)*0.105);
       } else {
          if(row.pcRow<2 && !item.readOnly) {
-            row.pcLabelWidth=screenWidth*0.38;
-            row._x=offset+screenWidth*(row.pcRow==0?0.29:0.71)-row.pcCenter;
+            row.pcLabelWidth=screenWidth*0.23;
+            row._x=offset+screenWidth*(row.pcRow==0?0.375:0.625)-row.pcCenter;
             row._y=screenHeight*0.235;
          } else if(row.pcRow>=2 && row.pcRow<=6) row._y=screenHeight*(0.34+(row.pcRow-2)*0.075);
          else if(row.pcRow==7) row._y=screenHeight*0.72;
          if(split) {
-            row.pcLabelWidth=screenWidth*0.34;
-            row._x=offset+screenWidth*0.75-row.pcCenter;
+            row.pcLabelWidth=screenWidth*0.21;
+            row._x=offset+screenWidth*0.645-row.pcCenter;
          }
       }
       row.hitarea._x=row.pcCenter-row.pcLabelWidth/2;
       row.hitarea._width=row.pcLabelWidth;
+      row.hitarea._y=row.labelclip._y+row.t_label._y-4; row.hitarea._height=40;
       row.pcTextX=row.pcCenter-row.labelclip._x-row.pcLabelWidth/2+16;
-      info._x=offset+screenWidth*0.08; info._y=row._y;
-      info._width=screenWidth*(split?0.48:0.84);
+      info._x=offset+screenWidth*0.26; info._y=row._y;
+      info._width=screenWidth*(split?0.265:0.48);
       info._visible=label!=undefined && item.readOnly==true;
       if(info._visible) info.text=label;
       row._visible = label != undefined && !info._visible;
       if(!row._visible) row.disable(); else row.enable();
-      if(split && label!=undefined) { info._visible=true; info.text=item.title; }
+      if(split && label!=undefined) { info._visible=true; var labelFormat=info.getNewTextFormat(); labelFormat.align="left"; labelFormat.size=18; info.setTextFormat(labelFormat); info.text=item.title; }
       row.pcWanted = label != undefined;
       row.pcItem = item;
       if(row._visible) {
@@ -94,8 +95,8 @@ class em2.options.TVSettings extends MovieClip
          var field=row.t_label; field.autoSize="none"; field._xscale=100;
          field._x=row.pcTextX; field._width=row.pcLabelWidth-32;
          field._height=36;
-         field.multiline=false; field.wordWrap=false;
-         var format=field.getTextFormat(); format.align="center"; format.size=22;
+         field.embedFonts=false; field.multiline=false; field.wordWrap=false;
+         var format=field.getNewTextFormat(); format.align="center"; format.size=22;
          field.setTextFormat(format);
          while(field.textWidth>field._width-8 && format.size>16) { format.size--; field.setTextFormat(format); }
          if(field.textWidth>field._width-8) {
@@ -288,8 +289,8 @@ class em2.options.TVSettings extends MovieClip
       if(button==undefined || button.icon==undefined) return;
       if(button.pcPrompt==undefined) {
          button.createTextField("pcPrompt",900,button.icon._x-30,button.icon._y,68,30);
-         var format=button.t_label.getTextFormat(); format.size=16; format.align="center";
-         button.pcPrompt.embedFonts=true; button.pcPrompt.setNewTextFormat(format);
+         var format=button.t_label.getNewTextFormat(); format.size=16; format.align="center";
+         button.pcPrompt.embedFonts=false; button.pcPrompt.setNewTextFormat(format);
          button.pcPrompt.selectable=false; button.pcPrompt.textColor=16777215;
       }
       button.icon._visible=style==2;
@@ -352,13 +353,18 @@ class em2.options.TVSettings extends MovieClip
       if(this.b_back!=undefined) items.push(this.b_back);
       if(this.b_select!=undefined) items.push(this.b_select);
       if(this._pcMouseItems!=undefined) items=items.concat(this._pcMouseItems);
+      var hovered=undefined;
       i=0;
       while(i<items.length) {
          var item=items[i++];
          if(item==undefined || !item._visible || (item.isEnabled==false && item!=this.b_back && item!=this.b_select)) continue;
          var bounds=item.hitarea!=undefined?item.hitarea.getBounds(_level0):item.getBounds(_level0);
          var hover=_level0._pcPointerX>=0 && _level0._pcPointerY>=0 && x>=bounds.xMin && x<=bounds.xMax && y>=bounds.yMin && y<=bounds.yMax;
-         if(hover && moved && item!=this.b_back && item._rollover!=undefined) item._rollover();
+         if(hover && hovered==undefined) hovered=item;
+         if(hover && moved && item!=this.b_back && item._rollover!=undefined && this._pcHovered!=item) {
+            if(this._pcHovered!=undefined && this._pcHovered._rollout!=undefined) this._pcHovered._rollout();
+            this._pcHovered=item; item._rollover();
+         }
          if(clicked && _level0._pcConsumedClick!=_level0._pcPointerClick &&
             _level0._pcClickX>=0 && _level0._pcClickY>=0 && _level0._pcDownX>=0 && _level0._pcDownY>=0 &&
             cx>=bounds.xMin && cx<=bounds.xMax && cy>=bounds.yMin && cy<=bounds.yMax &&
@@ -375,6 +381,10 @@ class em2.options.TVSettings extends MovieClip
             else { item._rollover(); if(_level0.APressed!=undefined) _level0.APressed(); }
             return;
          }
+      }
+      if(moved && hovered==undefined && this._pcHovered!=undefined) {
+         if(this._pcHovered._rollout!=undefined) this._pcHovered._rollout();
+         this._pcHovered=undefined;
       }
    }
    function _pcMenuTree(node,depth)

@@ -15,18 +15,20 @@
    function _em2OnlineButton(index,label,enabled)
    {
       var button = this._items[index];
-      if(button._em2SavedLayout == undefined) button._em2SavedLayout={y:button._y,x:button.t_label._x,width:button.t_label._width,autoSize:button.t_label.autoSize,format:button.t_label.getTextFormat(),hitX:button.hitarea._x,hitWidth:button.hitarea._width,hitY:button.hitarea._y,hitHeight:button.hitarea._height};
+      if(button._em2SavedLayout == undefined) button._em2SavedLayout={buttonX:button._x,y:button._y,x:button.t_label._x,width:button.t_label._width,autoSize:button.t_label.autoSize,format:button.t_label.getNewTextFormat(),hitX:button.hitarea._x,hitWidth:button.hitarea._width,hitY:button.hitarea._y,hitHeight:button.hitarea._height};
       {
          var width=Number(_global.initVars.screenWidth); if(!(width>=640)) width=1280;
          var height=Number(_global.initVars.screenHeight); if(!(height>=480)) height=720;
          var offset=Number(_global.offsetX); if(isNaN(offset)) offset=0;
          var rect=this._em2ActionRect(index);
-         button._y=height*rect.y-button.labelclip._y-button.t_label._y;
-         var left={x:offset+width*rect.x,y:0}; var right={x:offset+width*(rect.x+rect.width),y:0};
-         this.localToGlobal(left); this.localToGlobal(right);
-         button.labelclip.globalToLocal(left); button.labelclip.globalToLocal(right);
-         button._em2LabelWidth=right.x-left.x;
-         button._em2LabelX=left.x;
+         var saved=button._em2SavedLayout;
+         var center=button.labelclip._x+(saved.x+saved.width/2)*button.labelclip._xscale/100;
+         var target={x:offset+width*(rect.x+rect.width/2),y:height*rect.y};
+         this.localToGlobal(target); button._parent.globalToLocal(target);
+         button._x=target.x-center*button._xscale/100;
+         button._y=target.y-(button.labelclip._y+button.t_label._y)*button._yscale/100;
+         button._em2LabelWidth=width*rect.width/(button._xscale/100)/(button.labelclip._xscale/100);
+         button._em2LabelX=saved.x+saved.width/2-button._em2LabelWidth/2;
       }
       button._visible = enabled; button._alpha = 100; button.label = label;
       if(enabled) button.enable(); else button.disable();
@@ -35,11 +37,9 @@
       button.hitarea._x=button.labelclip._x+field._x*button.labelclip._xscale/100;
       button.hitarea._width=field._width*button.labelclip._xscale/100;
       button.hitarea._y=button.labelclip._y+field._y-4; button.hitarea._height=40;
-      if(button.pcCard==undefined) button.createEmptyMovieClip("pcCard",0);
-      button.pcCard._x=button.hitarea._x; button.pcCard._y=button.labelclip._y+field._y-4;
-      this._em2Rect(button.pcCard,button.hitarea._width,40,this._list.activeItem==button?3422782:2106152);
-      button.pcCard._visible=true;
-      var format=field.getTextFormat(); format.size=24; format.align="center"; field.setTextFormat(format);
+      // Keep the authored EM2 button artwork and rollover timeline.
+      field.embedFonts=false;
+      var format=field.getNewTextFormat(); format.size=24; format.align="center"; field.setTextFormat(format);
       while(field.textWidth>field._width-8 && format.size>16) { format.size--; field.setTextFormat(format); }
       var full=label;
       while(field.textWidth>field._width-8 && full.length>1) { full=full.substr(0,full.length-1); field.text=full+"..."; }
@@ -48,12 +48,12 @@
          var point={x:button._em2LabelX,y:field._y};
          button.labelclip.localToGlobal(point); this.globalToLocal(point);
          this.createTextField(name,this.getNextHighestDepth(),point.x,point.y,button._em2LabelWidth,40);
-         this[name].embedFonts=true; this[name].selectable=false;
+         this[name].embedFonts=false; this[name].selectable=false;
       }
       var info=this[name]; info._visible=!enabled; info.setNewTextFormat(format);
       var infoPoint={x:button._em2LabelX,y:field._y}; button.labelclip.localToGlobal(infoPoint); this.globalToLocal(infoPoint);
       info._x=infoPoint.x; info._y=infoPoint.y; info._width=button._em2LabelWidth;
-      info.textColor=13421772; info.text=field.text;
+      info.textColor=16777215; info.text=field.text;
    }
    function _em2OnlineOpen()
    {
@@ -70,8 +70,8 @@
       {
          var width = _global.initVars.screenWidth;
          this.createTextField("_em2OnlineHelp",this.getNextHighestDepth(),_global.offsetX + width*0.1,this.b_select._y - 86,width*0.8,76);
-         var format = this.b_main.t_label.getTextFormat(); format.size = 16; format.align = "center";
-         this._em2OnlineHelp.embedFonts = true; this._em2OnlineHelp.setNewTextFormat(format);
+         var format = this.b_main.t_label.getNewTextFormat(); format.size = 16; format.align = "center";
+         this._em2OnlineHelp.embedFonts = false; this._em2OnlineHelp.setNewTextFormat(format);
          this._em2OnlineHelp.multiline = true; this._em2OnlineHelp.wordWrap = true;
          this._em2OnlineHelp.selectable = false;
       }
@@ -447,8 +447,8 @@
       if(this._em2OnlineNameInput == undefined)
       {
          this.createTextField("_em2OnlineNameInput",this.getNextHighestDepth(),this._em2OnlineHelp._x,this._em2OnlineHelp._y,this._em2OnlineHelp._width,32);
-         var format = this._em2OnlineHelp.getTextFormat(); format.align = "left";
-         this._em2OnlineNameInput.embedFonts = true;
+         var format = this._em2OnlineHelp.getNewTextFormat(); format.align = "left";
+         this._em2OnlineNameInput.embedFonts = false;
          this._em2OnlineNameInput.setNewTextFormat(format);
          this._em2OnlineNameInput.type = "input";
          this._em2OnlineNameInput.selectable = true;
@@ -461,8 +461,8 @@
       if(this._em2OnlineNameHint == undefined)
       {
          this.createTextField("_em2OnlineNameHint",this.getNextHighestDepth(),this._em2OnlineHelp._x,this._em2OnlineHelp._y+36,this._em2OnlineHelp._width,32);
-         var hintFormat = this._em2OnlineHelp.getTextFormat(); hintFormat.size = 14; hintFormat.align = "center";
-         this._em2OnlineNameHint.embedFonts = true;
+         var hintFormat = this._em2OnlineHelp.getNewTextFormat(); hintFormat.size = 14; hintFormat.align = "center";
+         this._em2OnlineNameHint.embedFonts = false;
          this._em2OnlineNameHint.setNewTextFormat(hintFormat);
          this._em2OnlineNameHint.selectable = false;
          this._em2OnlineNameHint.textColor = 16777215;

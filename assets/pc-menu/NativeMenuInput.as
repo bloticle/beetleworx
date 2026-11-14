@@ -3,8 +3,8 @@
       if(button==undefined || button.icon==undefined) return;
       if(button.pcPrompt==undefined) {
          button.createTextField("pcPrompt",900,button.icon._x-30,button.icon._y,68,30);
-         var format=button.t_label.getTextFormat(); format.size=16; format.align="center";
-         button.pcPrompt.embedFonts=true; button.pcPrompt.setNewTextFormat(format);
+         var format=button.t_label.getNewTextFormat(); format.size=16; format.align="center";
+         button.pcPrompt.embedFonts=false; button.pcPrompt.setNewTextFormat(format);
          button.pcPrompt.selectable=false; button.pcPrompt.textColor=16777215;
       }
       button.icon._visible=style==2;
@@ -67,13 +67,18 @@
       if(this.b_back!=undefined) items.push(this.b_back);
       if(this.b_select!=undefined) items.push(this.b_select);
       if(this._pcMouseItems!=undefined) items=items.concat(this._pcMouseItems);
+      var hovered=undefined;
       i=0;
       while(i<items.length) {
          var item=items[i++];
          if(item==undefined || !item._visible || (item.isEnabled==false && item!=this.b_back && item!=this.b_select)) continue;
          var bounds=item.hitarea!=undefined?item.hitarea.getBounds(_level0):item.getBounds(_level0);
          var hover=_level0._pcPointerX>=0 && _level0._pcPointerY>=0 && x>=bounds.xMin && x<=bounds.xMax && y>=bounds.yMin && y<=bounds.yMax;
-         if(hover && moved && item!=this.b_back && item._rollover!=undefined) item._rollover();
+         if(hover && hovered==undefined) hovered=item;
+         if(hover && moved && item!=this.b_back && item._rollover!=undefined && this._pcHovered!=item) {
+            if(this._pcHovered!=undefined && this._pcHovered._rollout!=undefined) this._pcHovered._rollout();
+            this._pcHovered=item; item._rollover();
+         }
          if(clicked && _level0._pcConsumedClick!=_level0._pcPointerClick &&
             _level0._pcClickX>=0 && _level0._pcClickY>=0 && _level0._pcDownX>=0 && _level0._pcDownY>=0 &&
             cx>=bounds.xMin && cx<=bounds.xMax && cy>=bounds.yMin && cy<=bounds.yMax &&
@@ -90,6 +95,10 @@
             else { item._rollover(); if(_level0.APressed!=undefined) _level0.APressed(); }
             return;
          }
+      }
+      if(moved && hovered==undefined && this._pcHovered!=undefined) {
+         if(this._pcHovered._rollout!=undefined) this._pcHovered._rollout();
+         this._pcHovered=undefined;
       }
    }
    function _pcMenuTree(node,depth)

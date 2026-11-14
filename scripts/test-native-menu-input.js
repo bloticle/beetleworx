@@ -17,6 +17,7 @@ const owner = { ...context.methods,_visible:true,_list:{_active:true,_items:[but
 const tick = () => { ++clock; owner._pcMenuInput(); };
 tick(); assert.equal(rollovers,0,'opening a page does not treat a parked cursor as new mouse input');
 pointer[2223]++; tick(); assert.equal(rollovers,1);
+pointer[2223]++; tick(); assert.equal(rollovers,1,'moving within a button must not restart its rollover timeline');
 tick(); assert.equal(rollovers,1,'parked mouse must not steal controller selection');
 pointer[2225]++; tick(); assert.equal(selected,1);
 tick(); assert.equal(selected,1,'one mouse release activates once');

@@ -16,6 +16,10 @@ In the online demo, open **Online Multiplayer** at the Epic Mickey 2 title menu.
 
 Use **Support & Updates** to review and save a diagnostic report before opening a [GitHub issue](https://github.com/Bloticle/beetleworx/issues). Nothing is submitted automatically. The menu can also check for and download newer releases. Verified updates install on normal exit, preserving your saves and game files.
 
+## Demo.8 menu hotfix
+
+Demo.8 fixes missing text glyphs, brings settings content inside the center panel, and repositions whole native EM2 online buttons so their artwork and clickable areas move together. It removes the added online button cards, makes lobby panel backgrounds opaque, and avoids restarting hover animations for every mouse movement. Held keyboard keys are blocked at the transition into the pause menu, preventing Pause from immediately becoming Back. Flash compilation and focused input checks cover these changes; live visual confirmation is still pending.
+
 ## Demo.7 changes
 
 The source adds mouse support for native menu controls, a category grid for settings, separate input-device selection, and automatic or manual keyboard/mouse, Xbox, PlayStation and Nintendo menu prompts. Online starts with Host Game and Join Game, including typed room codes. The lobby shows the player roster and text chat, with a host-only kick action.

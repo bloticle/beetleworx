@@ -1,14 +1,14 @@
    function _em2Field(parent,name,x,y,width,height,size)
    {
       parent.createTextField(name,parent.getNextHighestDepth(),x,y,width,height);
-      var field=parent[name]; var format=this.b_main.t_label.getTextFormat();
-      format.size=size; format.align="left"; field.embedFonts=true;
+      var field=parent[name]; var format=this.b_main.t_label.getNewTextFormat();
+      format.size=size; format.align="left"; field.embedFonts=false;
       field.setNewTextFormat(format); field.selectable=false; field.textColor=16777215;
       field.multiline=true; field.wordWrap=true; return field;
    }
    function _em2Rect(clip,width,height,color)
    {
-      clip.clear(); clip.lineStyle(1,6710886,100); clip.beginFill(color,94);
+      clip.clear(); clip.lineStyle(1,6710886,100); clip.beginFill(color,100);
       clip.moveTo(0,0); clip.lineTo(width,0); clip.lineTo(width,height);
       clip.lineTo(0,height); clip.lineTo(0,0); clip.endFill();
    }
@@ -151,7 +151,7 @@
       var i=0; while(i<this._items.length) {
          var button=this._items[i++]; var saved=button._em2SavedLayout;
          if(saved!=undefined) {
-            button._y=saved.y; button.t_label._x=saved.x; button.t_label._width=saved.width;
+            button._x=saved.buttonX; button._y=saved.y; button.t_label._x=saved.x; button.t_label._width=saved.width;
             button.t_label.autoSize=saved.autoSize; button.t_label.setTextFormat(saved.format);
             button.hitarea._x=saved.hitX; button.hitarea._width=saved.hitWidth;
             button.hitarea._y=saved.hitY; button.hitarea._height=saved.hitHeight;

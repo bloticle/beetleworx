@@ -559,7 +559,10 @@ void SetControlUIContext(bool active){std::lock_guard lock(controls_mutex);if(ui
     companion_buttons={};
     for(auto& buttons:mod_buttons)buttons.store(0,std::memory_order_relaxed);
     for(auto& pending:pending_keys)pending.fill(false);for(auto& valid:latched_valid)valid.fill(false);
-    if(!active){wait_for_pad_release.fill(true);for(unsigned key=0;key<keys.size();++key)if(keys[key])blocked_keys[key]=true;}
+    // A held gameplay Pause key must not become menu Back on the next poll.
+    // Require release at both UI boundaries before reusing any keyboard input.
+    for(unsigned key=0;key<keys.size();++key)if(keys[key])blocked_keys[key]=true;
+    if(!active)wait_for_pad_release.fill(true);
 }
 GameplayModInput ReadGameplayModInput(unsigned user){
     if(user>=2 || ControlBindingsOpen())return {};
