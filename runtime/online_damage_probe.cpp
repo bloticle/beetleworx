@@ -92,6 +92,15 @@ bool em2::net::TickPrivateNativeExtraDamage(PPCContext& ctx,uint8_t* base){
  return true;
 }
 void em2::net::ObservePrivateExtraDamage(uint64_t tick,PPCContext& ctx,uint8_t* base){
+ if(REXCVAR_GET(em2_native_lobby_qa_damage_player)==3 && tick>=700 && REXCVAR_GET(em2_private_profile) && NativeOnlineMenuQaActive()){
+  auto* game=CurrentNativeRoomGameplay();auto* room=PrivateNativeMenuRoom();if(!game || !room)return;
+  Actor actor;uint32_t life=0;
+  if(!game->OwnedActorForPeer(3,ctx,base,actor) || !Health(actor,ctx,base,life)){
+   REXLOG_ERROR("Private retail-pair survivor health unavailable: tick {}",tick);game->ObservationFailed();return;
+  }
+  REXLOG_INFO("Private retail-pair survivor health: tick {} peer 3 generation {} entity {:08X} life {}; original native property query, no damage dispatched to survivor",tick,actor.generation,actor.entity,life);
+ }
+
  if(!REXCVAR_GET(em2_probe_extra_damage_peer) || !probe.sent || !REXCVAR_GET(em2_private_profile) || !NativeOnlineMenuQaActive())return;
  auto* game=CurrentNativeRoomGameplay();if(!game || PrivateNativeMenuRoom()!=probe.room)return;
  Actor current;uint32_t life=0;

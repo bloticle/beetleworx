@@ -55,7 +55,7 @@ struct Calls {
 }
 struct NativeRoomActors::Impl {
     struct Actor {uint8_t peer=0;unsigned character=0;uint32_t handle=0,entity=0;std::array<float,3> spawn{};bool admission_entered=false,destruction_queued=false;
-        uint32_t camera=0,output=0,tracker=0;bool camera_constructed=false,camera_destroyed=false,camera_entities_queued=false,look_delivered=false;};
+        uint32_t camera=0,output=0,tracker=0;bool camera_constructed=false,camera_destroyed=false,camera_entities_queued=false,look_delivered=false,look_fixed=false;};
     LobbySnapshot roster;OwnedActorRoster bindings;std::vector<Actor> actors;
     std::array<uint32_t,2> retail_handles{},retail_entities{};
     uint32_t thread=0,registry=0,manager=0;uint64_t load=0;uint16_t mask=0;
@@ -309,10 +309,14 @@ bool NativeRoomActors::OwnsCameraMode(uint32_t mode,uint8_t* base)const{const au
 bool NativeRoomActors::UpdateCameras(const RoomFrame& frame,PPCContext& ctx,uint8_t* base){Environment environment;auto& s=*impl_;if(!s.Owner() || !s.active || !s.RetailUnchanged(base) || (frame.players_mask&s.mask)!=s.mask)return false;
     const auto arguments=ctx;Calls calls(ctx,base);if(!calls.stack)return false;
     // Prepare every normal-camera action before dispatching any of them.
-    struct Look {uint32_t mode=0;em2::NativeCameraLookResult result;em2::NativeCameraLookBinding binding;bool ready=false;};
+    struct Look {uint32_t mode=0;em2::NativeCameraLookResult result;em2::NativeCameraLookBinding binding;bool ready=false,fixed=false;};
     std::vector<Look> looks;
     for(const auto& actor:s.actors){Look look;const auto mode=PPC_LOAD_U32(actor.camera+24);const auto& pad=frame.players[actor.peer-1].pad;
-        if(mode==PPC_LOAD_U32(actor.camera+392)){
+        const bool fixed=mode==PPC_LOAD_U32(actor.camera+392) && em2::NativeOwnedCameraLookFixedByCutscene(mode,ctx,base);
+        if(fixed!=actor.look_fixed){
+            REXLOG_INFO("Native Room owned camera input context: peer {} fixed {}; native CutScene/RotationFixed gate, original camera update retained",actor.peer,fixed);
+        }
+        if(mode==PPC_LOAD_U32(actor.camera+392) && !fixed){
             em2::NativeCameraLookBinding binding;
             if(em2::NativeOwnedCameraLookBindingFor(mode,ctx,base,binding,actor.character)){
                 look.binding=binding;look.mode=mode;look.ready=em2::ReplayNativeOwnedCameraLookAction(binding,{pad.right_x,pad.right_y},ctx,base,look.result);
@@ -322,9 +326,10 @@ bool NativeRoomActors::UpdateCameras(const RoomFrame& frame,PPCContext& ctx,uint
                 REXLOG_ERROR("Native Room owned look binding unavailable: peer {} mode {:08X} table {:08X} profile {} axes {}/{}",actor.peer,mode,Readable(mode,4,base)?PPC_LOAD_U32(mode):0,actor.character,pad.right_x,pad.right_y);return false;
             }
         }
-        looks.push_back(look);
+        look.fixed=fixed;looks.push_back(look);
     }
     for(size_t i=0;i<s.actors.size();++i){auto& actor=s.actors[i];const auto& look=looks[i];
+        actor.look_fixed=look.fixed;
         if(look.ready){
             if(!em2::DispatchNativeOwnedCameraLook(look.binding,look.result,ctx,base))return false;
             if(!actor.look_delivered)REXLOG_INFO("Native Room owned look admitted: peer {} mode {:08X} action {:08X} profile {}; original action math and original OnLook",actor.peer,look.mode,look.result.action,actor.character);

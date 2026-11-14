@@ -6,7 +6,7 @@ param(
  [switch]$ScriptedInput,[switch]$ChatProbe,[switch]$VoiceProbe,[switch]$ButtonTaskProbe,[switch]$PolicyCycle,[switch]$CaptureShutdownHang,
  [switch]$NavigationTrace,[switch]$FaceTargetPoison,[switch]$UnfixedFaceTarget,[switch]$NativeReload,
  [ValidateRange(0,100000)][int]$CheckpointReloadTick=0,
- [ValidateSet(0,1,2)][int]$DamagePlayer=0,
+ [ValidateSet(0,1,2,3)][int]$DamagePlayer=0,
  [ValidateRange(0,16)][int]$DamageExtraPeer=0,
  [ValidateRange(-1,16)][int]$PipelineCreationThreads=-1,
  [ValidateRange(1,4)][int]$CheckpointReloadCount=1,

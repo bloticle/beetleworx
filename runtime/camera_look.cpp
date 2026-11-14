@@ -214,6 +214,26 @@ bool em2::ReplayNativeCameraLookAction(const Binding& binding,const LiveLookInpu
     if(!ConvertNativeDeviceLook(input,ReadFloat(0x833B65FC,base),axes))return false;
     return RunMath(binding,axes,ctx,base,output);
 }
+bool em2::NativeOwnedCameraLookFixedByCutscene(uint32_t mode,PPCContext& ctx,uint8_t* base){
+    Environment preserve;
+    if(!net::NativeRoomOwnsCameraMode(mode,base) || !Readable(mode,24,base) || PPC_LOAD_U32(mode)!=0x82126C98)return false;
+    const auto controller=PPC_LOAD_U32(mode+20);
+    if(!Readable(controller,28,base) || PPC_LOAD_U32(controller)!=0x82112778 || PPC_LOAD_U32(controller+24)!=mode)return false;
+    const auto manager=PPC_LOAD_U32(0x833DBAD8),players=PPC_LOAD_U32(0x833DAB60);
+    if(!Readable(manager,76,base) || !Readable(players,712,base))return false;
+    const auto named=[&](uint32_t address,const char* name){
+        const auto size=std::strlen(name);
+        return address>=4098 && Readable(address-2,size+3,base) && PPC_LOAD_U16(address-2)==size && !std::memcmp(base+address,name,size+1);
+    };
+    // Never infer a missing binding is an intentional restriction. Require
+    // both the native active context and native fixed-rotation selection.
+    if(!named(PPC_LOAD_U32(manager+16),"CutScene"))return false;
+    DiscoveryScratch scratch(ctx,base);if(!scratch.stack)return false;
+    ctx.r3.u64=manager;ctx.r4.u64=manager+16;__imp__sub_827C3D78(ctx,base);
+    if(!Readable(ctx.r3.u32,24,base) || !named(PPC_LOAD_U32(ctx.r3.u32),"CutScene"))return false;
+    ctx.r3.u64=players;ctx.r4.s64=-1;__imp__sub_82769490(ctx,base);
+    return Readable(ctx.r3.u32,4,base) && named(PPC_LOAD_U32(ctx.r3.u32),"RotationFixed");
+}
 bool em2::NativeOwnedCameraLookBindingFor(uint32_t mode,PPCContext& ctx,uint8_t* base,Binding& output,unsigned user){
     Environment preserve;output={};
     for(const auto& binding:owned_bindings)if(binding.mode==mode && binding.user==user && ValidateOwned(binding,ctx,base)){output=binding;return true;}
@@ -269,6 +289,13 @@ void em2::TraceNativeOwnedLookDefinitions(uint32_t mode,PPCContext& ctx,uint8_t*
     ctx.r3.u64=players;ctx.r4.s64=-1;__imp__sub_82769490(ctx,base);const auto selected=Readable(ctx.r3.u32,4,base)?PPC_LOAD_U32(ctx.r3.u32):0;
     ctx.r3.u64=manager;ctx.r4.u64=manager+16;__imp__sub_827C3D78(ctx,base);const auto active=ctx.r3.u32;
     REXLOG_WARN("Owned look definition scan: mode {:08X} user {} manager {:08X} active {:08X} selected UID {:08X}",mode,user,manager,active,selected);
+    const auto label=[&](uint32_t address){
+        if(address<4098 || !Readable(address-2,2,base))return std::string("<unreadable>");
+        const auto size=PPC_LOAD_U16(address-2);
+        if(!size || size>96 || !Readable(address,size+1,base) || PPC_LOAD_U8(address+size))return std::string("<unreadable>");
+        return std::string(reinterpret_cast<const char*>(base+address),size);
+    };
+    REXLOG_WARN("Owned look context names: selected '{}' base '{}' active '{}' requested '{}'",label(selected),label(PPC_LOAD_U32(manager+24)),Readable(active,4,base)?label(PPC_LOAD_U32(active)):"<missing>",label(PPC_LOAD_U32(manager+16)));
     for(auto event:{manager+24,active}){if(!Readable(event,24,base))continue;const auto list=PPC_LOAD_U32(event+16),count=PPC_LOAD_U32(event+20);
         if(count>256 || (count && !Readable(list,size_t(count)*4,base)))continue;
         for(unsigned i=0;i<count;++i){const auto action=PPC_LOAD_U32(list+i*4);if(!Readable(action,436,base) || PPC_LOAD_U32(action+80)!=4)continue;

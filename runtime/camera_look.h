@@ -19,6 +19,8 @@ bool ReplayNativeCameraLookAction(const NativeCameraLookBinding&,const LiveLookI
 // Explicit native Room extra-camera capability. Keeps the ordinary primary
 // replay contract unchanged; validates live owned mode and native profile0/1.
 bool NativeOwnedCameraLookBindingFor(uint32_t mode,PPCContext&,uint8_t*,NativeCameraLookBinding&,unsigned user);
+// Exact native CutScene/RotationFixed context: original camera updates continue, analog OnLook is disabled.
+bool NativeOwnedCameraLookFixedByCutscene(uint32_t mode,PPCContext&,uint8_t*);
 bool ReplayNativeOwnedCameraLookAction(const NativeCameraLookBinding&,const LiveLookInput&,PPCContext&,uint8_t*,NativeCameraLookResult&);
 bool DispatchNativeOwnedCameraLook(const NativeCameraLookBinding&,const NativeCameraLookResult&,PPCContext&,uint8_t*);
 void TraceNativeOwnedLookDefinitions(uint32_t mode,PPCContext&,uint8_t*,unsigned user);
