@@ -77,12 +77,23 @@ export class Admission extends DurableObject {
   async fetch(request) {
     const kind = await request.text(), now = Date.now();
     return this.ctx.blockConcurrencyWhile(async () => {
-      const state = await this.ctx.storage.get('limits') || { hour: now, minute: now, creates: 0, connects: 0 };
-      if (now - state.hour >= 3600000) { state.hour = now; state.creates = 0; }
-      if (now - state.minute >= 60000) { state.minute = now; state.connects = 0; }
-      if ((kind === 'create' && state.creates >= 6) || state.connects >= 120) return reply({ error: 'Too many attempts. Try again shortly.' }, 429);
-      if (kind === 'create') ++state.creates;
-      ++state.connects; await this.ctx.storage.put('limits', state);
+      // Short token buckets allow ordinary retries and shared-NAT groups.
+      // Versioning discards the old six-per-hour lockout immediately.
+      let state = await this.ctx.storage.get('limits');
+      if (!state || state.format !== 2) state = { format: 2, at: now, creates: 12, connects: 120 };
+      const elapsed = Math.max(0, now - state.at) / 1000;
+      state.creates = Math.min(12, state.creates + elapsed / 5);
+      state.connects = Math.min(120, state.connects + elapsed * 4);
+      state.at = now;
+      const retry = Math.ceil(Math.max((kind === 'create' ? Math.max(0, 1 - state.creates) * 5 : 0), Math.max(0, 1 - state.connects) / 4));
+      if (retry > 0) {
+        await this.ctx.storage.put('limits', state);
+        return Response.json({ error: `Too many attempts. Try again in ${retry} seconds.`, retryAfterSeconds: retry }, {
+          status: 429, headers: { 'Cache-Control': 'no-store', 'Retry-After': String(retry) },
+        });
+      }
+      if (kind === 'create') --state.creates;
+      --state.connects; await this.ctx.storage.put('limits', state);
       await this.ctx.storage.setAlarm(now + 25 * 3600000);
       return reply({ allowed: true });
     });

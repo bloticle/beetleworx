@@ -2,10 +2,8 @@
 
 The relay is deployed at https://beetleworx-relay.ryanckoop1.workers.dev.
 A live component check verified host/guest WebSockets, unchanged payloads in
-both directions and rejection of new joins after a room starts. Two native
-game processes on one PC now have [hosted-relay gameplay, native HUD chat and
-a level-transition check](../../docs/online-relay-gameplay.md). Separate-machine
-play, longer campaigns and real Discord invitations remain unverified.
+both directions and rejection of new joins after a room starts. Native gameplay
+over the relay and real Discord invitations still need end-to-end testing.
 
 The live service carries gameplay/text and a separate authenticated media
 endpoint. Demo.5 includes the native voice adapter and proximity settings.
@@ -33,7 +31,7 @@ demo keeps online hidden.
 
 The implementation follows Cloudflare's [WebSocket Hibernation API](https://developers.cloudflare.com/durable-objects/best-practices/websockets/).
 Raw IP addresses, invite contents, host keys and game packets are not logged.
-Per-address creation/lookup admission is bounded; daily hashed admission records
+Per-address admission allows twelve immediate room creations, replenishing one every five seconds, plus a separate connection bucket. Exhaustion returns a short Retry-After delay. Daily hashed admission records
 expire. Rooms expire after six hours. A host disconnect closes all guests.
 This does not provide gameplay reconnect or public matchmaking. Voice uses
 the separate media connection described below.
@@ -52,8 +50,8 @@ this service is deployed.
 - Host upgrades `/v1/rooms/CODE/host` using `Authorization: Bearer HOSTKEY`.
 - Guests upgrade `/v1/rooms/CODE/join`. Capacity includes the host and is 16.
 - Binary WebSocket messages start with kind and channel bytes. Kind 1 announces
-  a guest channel (1–255, never reused during a room) to the host; kind 2 carries an ordered TCP stream chunk
-  of 1–65536 bytes; kind 3 closes a channel. Guests always send channel 0; only
+  a guest channel (1â€“255, never reused during a room) to the host; kind 2 carries an ordered TCP stream chunk
+  of 1â€“65536 bytes; kind 3 closes a channel. Guests always send channel 0; only
   the service assigns their host-side channel. Clients send text `ping` for an
   automatic `pong`, without touching game messages.
 - The native host bridges each announced channel to its loopback Room listener.
@@ -79,7 +77,7 @@ key, while guests use their media tokens. Existing players can reconnect media
 after the native game locks new joins. Replacing or closing media does not
 close gameplay. Leaving gameplay closes its media socket and revokes its token.
 
-Media frames are `[2, channel, encrypted datagram...]`, with 1–512 opaque payload
+Media frames are `[2, channel, encrypted datagram...]`, with 1â€“512 opaque payload
 bytes. Guests send channel 0; the service supplies their actual admitted game
 channel to the host. Host packets name that channel; the receiving guest sees
 channel 0. The native adapter maps host-side game channels to actual native

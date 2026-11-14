@@ -32,7 +32,7 @@ constexpr auto StartupTimeout=std::chrono::seconds(180);
 constexpr auto TransferTimeout=std::chrono::seconds(120);
 enum class Wire:uint8_t {Hello=1,Welcome,Profile,Snapshot,Start,Input,Frame,Ping,Pong,ProfileReply,WorldReady,Activate,
     CheckpointBegin,CheckpointChunk,CheckpointEnd,CheckpointProgress,CheckpointInstalled,CheckpointReady,CheckpointAck,
-    BootstrapWorldReady,BootstrapBegin,BootstrapPad,BootstrapFrame,BootstrapComplete,BootstrapContinue,BootstrapActivate,GameplayComplete,GameplayVerified,ChatRequest,ChatMessage,VoiceRequest,VoiceOffer,LoadVote,LoadAgreed,ReloadVote,ReloadBegin,Kicked};
+    BootstrapWorldReady,BootstrapBegin,BootstrapPad,BootstrapFrame,BootstrapComplete,BootstrapContinue,BootstrapActivate,GameplayComplete,GameplayVerified,ChatRequest,ChatMessage,VoiceRequest,VoiceOffer,LoadVote,LoadAgreed,ReloadVote,ReloadBegin,Kicked,Rejected};
 bool Winsock(){
     struct Startup {bool ok=false;Startup(){WSADATA data{};ok=WSAStartup(MAKEWORD(2,2),&data)==0;}~Startup(){if(ok)WSACleanup();}};
     static Startup startup;return startup.ok;
@@ -79,6 +79,18 @@ bool ValidIdentity(const Identity& id){
         uint8_t(id.initialization_policy)<=1 && nonzero(id.session) && nonzero(id.build) && nonzero(id.content) && nonzero(id.checkpoint);
 }
 bool CompatibleCheckpoint(Identity a,Identity b){a.checkpoint={};b.checkpoint={};return a==b;}
+constexpr const char* rejection_messages[]={
+    "The host rejected an invalid lobby request.",
+    "Host and guest are using different Beetleworx versions.",
+    "Host and guest have different mounted game files. Check game region, installed patches and mods.",
+    "The invitation belongs to a different lobby. Ask the host for the current room code.",
+    "Host and guest have different online startup settings.",
+    "Host and guest have different gameplay verification settings.",
+    "This player name is invalid or already in use.",
+    "The lobby is full.",
+    "Host and guest have different starting saves."
+};
+
 bool BundleHeader(std::span<const uint8_t> bytes,const std::array<uint8_t,32>& digest){
     if(bytes.size()<52 || bytes.size()>kMaxCheckpointBundle)return false;
     Reader r{bytes};if(r.Number(4)!=0x454D3243 || r.Number(2)!=1 || r.Number(2)!=0)return false;
@@ -476,6 +488,11 @@ struct Room::Impl {
     // individually; a violation by an admitted participant stops every peer.
     bool Message(Connection& c,std::span<const uint8_t> bytes,Clock::time_point now){
         Reader r{bytes};if(r.Number(4)!=0x4257524D || r.Byte()!=WireVersion)return false;const auto kind=Wire(r.Byte());
+        if(kind==Wire::Rejected){
+            const auto reason=r.Byte();
+            if(host || c.welcomed || !r.Done() || reason>=std::size(rejection_messages))return false;
+            Fail(rejection_messages[reason]);return true;
+        }
         if(kind==Wire::Kicked){
             if(host || !c.welcomed || !r.Done() || (state!=RoomState::Listening && state!=RoomState::Lobby))return false;
             Fail("The host removed you from the lobby.");return true;
@@ -483,7 +500,20 @@ struct Room::Impl {
         if(kind==Wire::Hello){
             if(!host || c.welcomed || (state!=RoomState::Listening && state!=RoomState::Lobby))return false;
             const auto identity=ReadIdentity(r);const auto mode=r.Byte(),window=r.Byte();auto name=r.String();std::string normalized;
-            if(!r.Done() || window!=gameplay_window || mode!=uint8_t(checkpoint_mode) || (checkpoint_mode?!CompatibleCheckpoint(identity,id):identity!=id) || !Name(name,normalized) || !UniqueName(Snapshot(roster),0,normalized) || roster.players().size()>=roster.capacity())return false;
+            auto reject=[&](uint8_t reason){
+                auto response=Packet(Wire::Rejected);U8(response,reason);c.Queue(response);c.Flush();
+                REXLOG_WARN("Online lobby rejected pending guest: {}",rejection_messages[reason]);return false;
+            };
+            if(!r.Done())return reject(0);
+            if(window!=gameplay_window)return reject(5);
+            if(mode!=uint8_t(checkpoint_mode))return reject(4);
+            if(identity.build!=id.build)return reject(1);
+            if(identity.content!=id.content)return reject(2);
+            if(identity.session!=id.session || identity.first_tick!=id.first_tick || identity.input_delay!=id.input_delay)return reject(3);
+            if(identity.startup_policy!=id.startup_policy || identity.initialization_policy!=id.initialization_policy)return reject(4);
+            if(!checkpoint_mode && identity.checkpoint!=id.checkpoint)return reject(8);
+            if(!Name(name,normalized) || !UniqueName(Snapshot(roster),0,normalized))return reject(6);
+            if(roster.players().size()>=roster.capacity())return reject(7);
             uint64_t assigned=2;while(assigned<=roster.capacity() && roster.Find(assigned))++assigned;
             if(assigned>roster.capacity() || roster.Join(assigned,normalized)!=LobbyResult::Ok)return false;
             c.peer=assigned;c.welcomed=true;state=RoomState::Lobby;
@@ -1725,6 +1755,8 @@ bool TestOnlineRoom(){
         auto wrong=id;if(field==0)++wrong.build[0];else if(field==1)++wrong.content[0];else if(field==2)++wrong.checkpoint[0];else ++wrong.session[0];
         rooms.push_back(std::make_unique<Room>());check(rooms[1]->Join(wrong,"127.0.0.1",rooms[0]->port(),"Guest"),"mismatching identity connects for rejection");
         check(pump([&]{return rooms[1]->state()==RoomState::Error;}) && rooms[0]->state()==RoomState::Listening && rooms[0]->lobby().players.size()==1,"build/content/checkpoint/session mismatch rejected before roster admission");
+        const auto expected=field==0?1:field==1?2:field==2?8:3;
+        check(rooms[1]->error()==rejection_messages[expected],"guest receives specific host rejection before socket EOF");
     }
     for(unsigned field=0;field<4;++field){
         auto missing=id;if(field==0)missing.build={};else if(field==1)missing.content={};else if(field==2)missing.checkpoint={};else missing.session={};

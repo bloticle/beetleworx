@@ -332,13 +332,21 @@ struct InternetRelay::Impl {
         if(bytes.size()>2 && bytes[0]==2)sent_payload.fetch_add(bytes.size()-2,std::memory_order_relaxed);
     }
     void Pump(HINTERNET handle,uint16_t host_port){
+        std::atomic<bool> remote_closed=false;
+        std::string remote_close_reason;
         std::jthread receiver([&,this]{
             try{
                 Bytes frame;std::array<uint8_t,65538> buffer{};
                 while(!stopping){
                     DWORD count=0;WINHTTP_WEB_SOCKET_BUFFER_TYPE type{};
                     Need(WinHttpWebSocketReceive(handle,buffer.data(),DWORD(buffer.size()),&count,&type)==NO_ERROR,"The internet game connection closed");
-                    Need(type!=WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE,"The host closed the internet lobby");
+                    if(type==WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE){
+                        USHORT code=0;std::array<char,256> reason{};DWORD length=0;
+                        WinHttpWebSocketQueryCloseStatus(handle,&code,reason.data(),DWORD(reason.size()),&length);
+                        remote_close_reason="Internet lobby connection closed";
+                        if(length && length<=reason.size())remote_close_reason+=" ("+std::string(reason.data(),length)+")";
+                        remote_closed.store(true,std::memory_order_release);return;
+                    }
                     if(type==WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE){Need(count==4 && std::equal(buffer.begin(),buffer.begin()+4,"pong"),"Invalid internet heartbeat");continue;}
                     Need(type==WINHTTP_WEB_SOCKET_BINARY_FRAGMENT_BUFFER_TYPE || type==WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE,"Invalid internet game frame");
                     Need(frame.size()+count<=65538,"Internet game frame exceeds limit");frame.insert(frame.end(),buffer.begin(),buffer.begin()+count);
@@ -373,6 +381,7 @@ struct InternetRelay::Impl {
         try{
             auto heartbeat=std::chrono::steady_clock::now();std::array<uint8_t,8192> buffer{};
             bool published_joinable=true;
+            auto close_deadline=std::chrono::steady_clock::time_point::max();bool eof_forwarded=false;
             while(!stopping){
                 CollectMedia();
                 std::deque<Bytes> output;
@@ -393,7 +402,7 @@ struct InternetRelay::Impl {
                             else if(count<0 && WSAGetLastError()==WSAEWOULDBLOCK)break;
                             else{
                                 CloseChannel(channel,id);channel.incoming.clear();channel.sent=0;
-                                if(host)output.push_back(Bytes{3,uint8_t(id)});else throw std::runtime_error("The local game left the internet session");
+                                if(host)output.push_back(Bytes{3,uint8_t(id)});else if(!remote_closed.load(std::memory_order_acquire))throw std::runtime_error("The local game left the internet session");
                                 break;
                             }
                         }
@@ -402,8 +411,22 @@ struct InternetRelay::Impl {
                         const auto count=recv(channel.socket,reinterpret_cast<char*>(buffer.data()),int(buffer.size()),0);
                         if(count>0){Bytes bytes{2,uint8_t(id)};bytes.insert(bytes.end(),buffer.begin(),buffer.begin()+count);output.push_back(std::move(bytes));}
                         else if(count==0 || WSAGetLastError()!=WSAEWOULDBLOCK){CloseChannel(channel,id);channel.incoming.clear();channel.sent=0;
-                            if(host)output.push_back(Bytes{3,uint8_t(id)});else throw std::runtime_error("The local game left the internet session");}
+                            if(host)output.push_back(Bytes{3,uint8_t(id)});else if(!remote_closed.load(std::memory_order_acquire))throw std::runtime_error("The local game left the internet session");}
                     }
+                }
+                if(remote_closed.load(std::memory_order_acquire)){
+                    // A rejection/kick may be buffered immediately before the
+                    // relay's close. Forward it and EOF to the native Room
+                    // before publishing a generic transport error.
+                    const auto now=std::chrono::steady_clock::now();
+                    if(close_deadline==std::chrono::steady_clock::time_point::max())close_deadline=now+500ms;
+                    bool pending=false;
+                    {std::lock_guard lock(mutex);
+                        for(auto& channel:channels)if(channel.socket!=INVALID_SOCKET && channel.sent<channel.incoming.size())pending=true;
+                        if(!pending && !eof_forwarded){for(auto& channel:channels)if(channel.socket!=INVALID_SOCKET)shutdown(channel.socket,SD_SEND);eof_forwarded=true;}
+                    }
+                    if(now>=close_deadline){Fail(remote_close_reason);stopping=true;}
+                    std::this_thread::sleep_for(1ms);continue;
                 }
                 for(const auto& bytes:output)Send(handle,bytes);
                 if(!stopping && std::chrono::steady_clock::now()-heartbeat>=5s){

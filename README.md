@@ -16,9 +16,13 @@ In the online demo, open **Online Multiplayer** at the Epic Mickey 2 title menu.
 
 Use **Support & Updates** to review and save a diagnostic report before opening a [GitHub issue](https://github.com/Bloticle/beetleworx/issues). Nothing is submitted automatically. The menu can also check for and download newer releases. Verified updates install on normal exit, preserving your saves and game files.
 
+## Demo.11 connection fixes
+
+The relay's old six-created-lobbies-per-hour restriction has been replaced by short token buckets with explicit retry times; this server change also benefits older demos. Public-release connections now use the matching Beetleworx version for executable and content compatibility, allowing different regional or patched presentation files. Local files are still fingerprinted; session, shared-checkpoint and runtime world-consensus checks remain enabled. Unversioned development builds retain strict file matching. Buffered rejection/kick messages are preserved across internet socket closure, with specific admission errors rather than a misleading host-closed message.
+
 ## Demo.10 host/join fix
 
-Host, Join and resume requests from the desktop window now execute on the original game-menu thread. This fixes the incorrect ìReturn to the title menuî error caused by checking thread-local game state on the desktop UI thread. The title-menu validation remains enabled.
+Host, Join and resume requests from the desktop window now execute on the original game-menu thread. This fixes the incorrect ‚ÄúReturn to the title menu‚Äù error caused by checking thread-local game state on the desktop UI thread. The title-menu validation remains enabled.
 
 ## Demo.9 online menu replacement
 

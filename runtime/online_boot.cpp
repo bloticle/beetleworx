@@ -7,6 +7,7 @@
 #include "online_world_random.h"
 #include <rex/cvar.h>
 #include "online_identity.h"
+#include "demo_support.h"
 #include "online_invite.h"
 #include <windows.h>
 #include <rex/logging.h>
@@ -51,6 +52,16 @@ Prepared Prepare(const BootPaths& paths,const fs::path& source,bool host,uint8_t
         std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count(),program.value->bytes,
         program.value->read_bytes,program.value->reused_files,program.value->reused_content_digest);
     Prepared prepared;prepared.identity.build=program.value->build;prepared.identity.content=program.value->content;prepared.identity.input_delay=delay;
+    // Public releases negotiate their declared version, not byte-identical
+    // regional archives, patched UI assets or local rendering catalogs. Keep
+    // full local file verification/cache above and strict development checks.
+    // The host's checkpoint, session and world-consensus proofs stay separate.
+    const auto release=em2::OnlineReleaseVersion(paths.executable.parent_path());
+    if(!release.empty()){
+        prepared.identity.content=prepared.identity.build;
+        REXLOG_INFO("Online {} compatibility: release {}; local content fingerprint retained independently",host?"host":"guest",release);
+    }
+
     prepared.identity.startup_policy=paths.startup_policy;prepared.identity.initialization_policy=initialization;
     if(host) {
         step->store(PreparationStep::PackingSave);auto packed=PackCheckpoint(source,stop);

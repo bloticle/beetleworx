@@ -295,13 +295,18 @@ bool TestOnlineRoomBoot(const fs::path& root){
         };
         auto release_host=paths("version-host-save");release_host.executable=versioned("version-host","0.1.0-demo.3","host executable");
         auto release_guest=paths("version-guest-save");release_guest.executable=versioned("version-guest","0.1.0-demo.3","different guest executable");
+        // Independent regional/patched presentation archives must not reject
+        // the same public release before it can install the host checkpoint.
+        write(base/"regional-content"/"configfiles.ini","Gravity=9.81\n");
+        write(base/"regional-content"/"packfiles"/"localized-ui.pak","regional presentation data");
+        release_guest.content=base/"regional-content";
         boots.push_back(std::make_unique<OnlineRoomBoot>());
         if(!check(boots[0]->Host(release_host,base/"frozen","127.0.0.1","127.0.0.1",3,"Host") &&
             pump([&]{return !boots[0]->status().invitation.empty();}),"versioned host prepares shared checkpoint"))return false;
         boots.push_back(std::make_unique<OnlineRoomBoot>());
         if(!check(boots[1]->Join(release_guest,boots[0]->status().invitation,"Same version") &&
             pump([&]{return boots[1]->status().state==BootState::Ready;}) && fs::is_regular_file(release_guest.new_user_data/"42560816"/"save.dat"),
-            "matching version with different executable bytes passes real handshake and checkpoint installation"))return false;
+            "matching version with different executable and regional asset bytes passes real handshake and checkpoint installation"))return false;
         boots.clear();boots.push_back(std::make_unique<OnlineRoomBoot>());release_host.new_user_data=base/"different-version-host-save";
         if(!check(boots[0]->Host(release_host,base/"frozen","127.0.0.1","127.0.0.1",3,"Host") &&
             pump([&]{return !boots[0]->status().invitation.empty();}),"different-version rejection fixture hosts"))return false;
