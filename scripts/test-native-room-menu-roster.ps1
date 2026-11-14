@@ -16,6 +16,7 @@ param(
  [string]$ReuseVerifiedContent='', [string]$ReplayInvitationFile='',
  [ValidateRange(20,180)][int]$ObserveSeconds=30,
  [ValidateRange(256,8192)][int]$MinimumFreeMemoryMB=1024,
+ [ValidateRange(256,16384)][int]$MinimumFreeCommitMB=1536,
  [ValidateRange(120,600)][int]$StartupTimeoutSeconds=360
 )
 $ErrorActionPreference='Stop'
@@ -66,6 +67,7 @@ $normalCrash=Join-Path $runtime 'crash.log';$crashHash=if(Test-Path -LiteralPath
 $records=[Collections.Generic.List[object]]::new();$owned=[Collections.Generic.List[object]]::new()
 $record=[ordered]@{root=$root;players=$Players;exe_sha256=$exeHash;native_room_menu=$true;checkpoint_reload_tick=$CheckpointReloadTick;voice_probe=[bool]$VoiceProbe;navigation_trace=[bool]$NavigationTrace;face_target_poison=[bool]$FaceTargetPoison;face_target_unfixed=[bool]$UnfixedFaceTarget;replay_invitation=$ReplayInvitationFile;chat_probe=[bool]$ChatProbe;scripted_sdk_input=[bool]$ScriptedInput;mixed_characters=$true;gameplay_input_sent=$false;screenshots_taken=$false;startup_complete=$false;observation_complete=$false;processes=@()}
 $record.capture_shutdown_hang=[bool]$CaptureShutdownHang
+$record.commit_guard_mb=$MinimumFreeCommitMB;$record.minimum_free_commit_mb=$null
 $record.memory_guard_mb=$MinimumFreeMemoryMB;$record.memory_samples=@();$record.minimum_free_memory_mb=$null;$record.peak_owned_working_set_mb=0;$record.peak_owned_private_mb=0
 $nextMemorySample=[DateTime]::MinValue
 $record.native_reload=[bool]$NativeReload
@@ -83,6 +85,9 @@ if(-not ('BWNativeMenuWindows' -as [type])){Add-Type -TypeDefinition @'
 using System;using System.Text;using System.Runtime.InteropServices;
 public static class BWNativeMenuWindows {
  public delegate bool Callback(IntPtr window,IntPtr param);
+ [StructLayout(LayoutKind.Sequential)] public struct MemoryStatus {public uint length,load;public ulong totalPhysical,availablePhysical,totalPageFile,availablePageFile,totalVirtual,availableVirtual,availableExtendedVirtual;}
+ [DllImport("kernel32.dll",SetLastError=true)] static extern bool GlobalMemoryStatusEx(ref MemoryStatus status);
+ public static MemoryStatus Memory(){var status=new MemoryStatus();status.length=(uint)Marshal.SizeOf<MemoryStatus>();if(!GlobalMemoryStatusEx(ref status))throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());return status;}
  [DllImport("user32.dll")] public static extern bool EnumWindows(Callback callback,IntPtr param);
  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window,out uint pid);
  [DllImport("user32.dll",CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr window,StringBuilder name,int count);
@@ -126,17 +131,19 @@ function ObserveControlledDisconnect([int]$Attempts=1){
 }
 
 function SampleOwnedMemory {
- $memory=Get-CimInstance Win32_OperatingSystem
- $freeMB=[long]($memory.FreePhysicalMemory/1024)
+ $memory=[BWNativeMenuWindows]::Memory()
+ $freeMB=[long]($memory.availablePhysical/1MB);$commitMB=[long]($memory.availablePageFile/1MB)
  $working=0L;$private=0L
  foreach($entry in $owned){$process=$entry.process
   if(!$process.HasExited){$process.Refresh();$working+=$process.WorkingSet64;$private+=$process.PrivateMemorySize64}
  }
- $sample=[ordered]@{utc=[DateTime]::UtcNow.ToString('o');free_mb=$freeMB;owned_working_set_mb=[long]($working/1MB);owned_private_mb=[long]($private/1MB)}
+ $sample=[ordered]@{utc=[DateTime]::UtcNow.ToString('o');free_mb=$freeMB;free_commit_mb=$commitMB;owned_working_set_mb=[long]($working/1MB);owned_private_mb=[long]($private/1MB)}
  if($record.memory_samples.Count -lt 256){$record.memory_samples+=@($sample)}
  if($null -eq $record.minimum_free_memory_mb -or $freeMB -lt $record.minimum_free_memory_mb){$record.minimum_free_memory_mb=$freeMB}
  $record.peak_owned_working_set_mb=[Math]::Max([long]$record.peak_owned_working_set_mb,[long]$sample.owned_working_set_mb)
  $record.peak_owned_private_mb=[Math]::Max([long]$record.peak_owned_private_mb,[long]$sample.owned_private_mb)
+ if($null -eq $record.minimum_free_commit_mb -or $commitMB -lt $record.minimum_free_commit_mb){$record.minimum_free_commit_mb=$commitMB}
+ if($commitMB -lt $MinimumFreeCommitMB){throw ('Isolated capture stopped for low commit headroom: '+$commitMB+' MB available; guard '+$MinimumFreeCommitMB+' MB. Only owned test processes will close.')}
  if($freeMB -lt $MinimumFreeMemoryMB){throw ('Isolated capture stopped for low memory: '+$freeMB+' MB available; guard '+$MinimumFreeMemoryMB+' MB. Only owned test processes will close.')}
 }
 try {
@@ -296,7 +303,7 @@ try {
   Start-Sleep -Milliseconds 500
  }
  if(!$record.observation_complete -and !$record.failure_observed){throw 'Native menu roster observation timed out; no restart was attempted.'}
-}catch{$record.error=$_.Exception.Message;Write-Output $record.error}
+}catch{$record.error=$_.Exception.Message;$record.error_detail=$_.Exception.ToString();$record.error_stack=$_.ScriptStackTrace;Write-Output $record.error}
 finally{
  # Request all closes before waiting, avoiding one finisher disconnecting
  # peers which are still completing their shared observation interval.
@@ -307,10 +314,12 @@ finally{
   $p=$entry.process;if(!$p.WaitForExit(10000)){
    $verified=OwnedProcess $entry
    if($verified -and $CaptureShutdownHang){
-    $entry.record.slow_shutdown=$true
+    $closePosted=$entry.record.close_messages -gt 0
+    $entry.record.slow_shutdown=$closePosted;$entry.record.stalled_without_close_request=!$closePosted
     $dumpTool=Join-Path $workspace 'tools/procdump/procdump64.exe'
     if(Test-Path -LiteralPath $dumpTool){
-     $dump=Join-Path $entry.record.root 'shutdown-hang.dmp'
+     $dumpName=if($closePosted){'shutdown-hang.dmp'}else{'process-stall.dmp'}
+     $dump=Join-Path $entry.record.root $dumpName
      $dumpInfo=[Diagnostics.ProcessStartInfo]::new($dumpTool);$dumpInfo.UseShellExecute=$false;$dumpInfo.CreateNoWindow=$true
      $dumpInfo.RedirectStandardOutput=$true;$dumpInfo.RedirectStandardError=$true
      foreach($arg in @('-accepteula','-mm',[string]$p.Id,$dump)){$dumpInfo.ArgumentList.Add($arg)}
@@ -319,7 +328,7 @@ finally{
      if($dumpProcess.HasExited){
       $entry.record.shutdown_dump_exit=$dumpProcess.ExitCode
       [IO.File]::WriteAllText((Join-Path $entry.record.root 'shutdown-dump-tool.log'),$dumpOutput.GetAwaiter().GetResult()+$dumpError.GetAwaiter().GetResult())
-      if(Test-Path -LiteralPath $dump){$entry.record.shutdown_dump=$dump}
+      if(Test-Path -LiteralPath $dump){$entry.record.process_dump=$dump;if($closePosted){$entry.record.shutdown_dump=$dump}}
      }
     }
    }
