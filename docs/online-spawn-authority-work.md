@@ -347,11 +347,45 @@ Original `828B8DD0` iterates these handles, resolves each local entity, invokes
 used by native AI/script callers. Historical raw logs and JSON keys retain
 their old label; their readback proves pending registration, not launch.
 
-The new source corrects diagnostic wording. The launch processor has not yet
-been replicated, and it must not be called blindly at preparation time: host
-windup/animation can intentionally separate preparation and launch. Correct
-launch timing and inputs, continuing projectile motion, general world births,
-same-tick causal ordering and broader multiplayer transitions remain required.
+The impact-only checkpoint did not replicate the launch processor. Calling it
+blindly at preparation time would bypass intentional host windup/animation.
+The following adapter now transports the actual host launch operation separately.
+
+## Native pending-shot launch authority (private)
+
+Default-off `em2_probe_room_shooter_launches` requires the private impact/spawn
+replay flags. Room wire 23 adds bounded launch records: stable owner, ordered
+pending projectile IDs, RNG input/end state, native success result, and launch
+FX clone records. No handles, pointers or callable addresses travel.
+
+At six audited callers of original `828B8DD0`, tracked guest launches wait for
+the host command. Host preparation and launch remain separate operations.
+Guest replay resolves its own Shooter and exact pending IDs, seeds the native
+CRT, calls the original launch processor (including `828B81D8` velocity setup),
+and verifies the return value, FX clones and emptied pending list. The adapter
+does not clear the list itself. Untracked paths retain original behavior.
+Replay before/after missing preparation permits both earlier pending shots and
+same-tick prepared shots without forcing launch at birth.
+
+The same-executable regression passes 119 launch codec checks and 9,091 Room
+checks, including full bounded payloads over real TCP. Evidence:
+`analysis/native-shooter-launch-test-9e94d4ac324d4f5eb6d32cb237cfe49e/rollback.log`.
+
+The isolated Autotopia run replays 15 launches (ticks 940 through 5328), each
+with matching native success and an emptied pending list, plus 13 projectile
+impacts with canonical FX/retirement checks. It passes the old tick-2252 failure
+and verifies gameplay through tick 5523. It then stops at 5524 on a different,
+non-Shooter collection spawn: engineBlock 06, template `0013D073`, owner
+`0013D06C`, caller `827B4178`. Both windows close normally and normal saves and
+settings remain unchanged. This is a failed full integration with passed
+launch/impact cases, not full enemy synchronization. Evidence:
+`analysis/private-native-room-pair-20261115-112608-c7cf76be/native-launch-integration-result.json`.
+Executable SHA256:
+`09B2502CC88BAFF0E1797553250DDAC0B0D097A0652CEC768D57048775888D57`.
+
+Continuing projectile motion, immediate firing paths outside the pending list,
+general world births, same-tick causal ordering and broader multiplayer
+transitions remain required. These private flags are not enabled in demo 14.
 
 ## GUID mutation fence fixed
 

@@ -76,6 +76,8 @@ public:
     bool PrepareSpawnReplay(PPCContext&,uint8_t*,unsigned depth);
     NativeImpactMode ProjectileImpactMode(const SpawnId&,uint32_t caller);
     bool RecordProjectileImpact(ProjectileImpact);
+    NativeImpactMode ShooterLaunchMode(std::span<const SpawnId>,uint32_t caller);
+    bool RecordShooterLaunch(ShooterLaunch,uint32_t owner);
     bool passive_input_pending()const;
     uint64_t committed_tick()const;
     // Owner-thread read only, outside the native update. Eligibility proves
@@ -89,6 +91,7 @@ public:
 private:
     bool ReplayMissingSpawns(PPCContext&,uint8_t*);
     bool ReplayProjectileImpacts(PPCContext&,uint8_t*);
+    bool ReplayShooterLaunches(PPCContext&,uint8_t*,bool required);
     bool RearmInputContext(uint64_t source_tick,PPCContext&,uint8_t*);
     struct Impl;
     std::unique_ptr<Impl> impl_;
