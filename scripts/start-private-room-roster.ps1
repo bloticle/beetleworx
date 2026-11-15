@@ -1,7 +1,12 @@
-param([ValidateRange(3,16)][int]$Players=3,[switch]$ScriptedInput,[switch]$MixedCharacters,[switch]$TraceClothing,[string]$ClothingDirectory="",[switch]$BindClothing,[switch]$ClothingLifecycle,[switch]$NativeButtons,[switch]$TraceRandomOwners,[uint32]$RandomTraceStartTick=0,[string]$ReplayInvitationFile="",[switch]$OriginalEventOrder,[ValidateSet(30,60,120)][int]$HostFrameCap=30,[ValidateSet(30,60,120)][int]$GuestFrameCap=30,[switch]$HostAuthority,[switch]$TraceEntities,[ValidateCount(0,4)][ValidatePattern("^[a-z0-9_.]{1,63}$")][string[]]$LevelTargets=@(),[ValidateRange(60,1000000)][uint32]$LevelTick=700,[ValidateRange(600,1000000)][uint32]$LevelInterval=700,[ValidateSet("clean","transition")][string]$LevelMethod="transition")
+param([ValidateRange(3,16)][int]$Players=3,[switch]$ScriptedInput,[switch]$MixedCharacters,[switch]$TraceClothing,[string]$ClothingDirectory="",[switch]$BindClothing,[switch]$ClothingLifecycle,[switch]$NativeButtons,[switch]$TraceRandomOwners,[uint32]$RandomTraceStartTick=0,[string]$ReplayInvitationFile="",[switch]$OriginalEventOrder,[ValidateSet(30,60,120)][int]$HostFrameCap=30,[ValidateSet(30,60,120)][int]$GuestFrameCap=30,[switch]$HostAuthority,[switch]$NativeWorldAuthority,[switch]$TraceEntities,[ValidateCount(0,4)][ValidatePattern("^[a-z0-9_.]{1,63}$")][string[]]$LevelTargets=@(),[ValidateRange(60,1000000)][uint32]$LevelTick=700,[ValidateRange(600,1000000)][uint32]$LevelInterval=700,[ValidateSet("clean","transition")][string]$LevelMethod="transition")
 $ErrorActionPreference='Stop'
 if($ClothingLifecycle -and (!$ScriptedInput -or !$BindClothing)){throw 'ClothingLifecycle requires ScriptedInput and BindClothing.'}
 $workspace=(Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+$catalog=[IO.File]::ReadAllText((Join-Path $workspace 'runtime/game_console_catalog.h'))
+$knownLevels=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+foreach($match in [regex]::Matches($catalog,'(?m)^"([a-z0-9_.]+)"[,]?\r?$')){[void]$knownLevels.Add($match.Groups[1].Value)}
+if(!$knownLevels.Count){throw 'Native level catalog is empty or unreadable.'}
+foreach($target in $LevelTargets){if(!$knownLevels.Contains($target)){throw "Unknown native level state: $target"}}
 if(Get-CimInstance Win32_Process -Filter "Name='beetleworx.exe' OR Name='EM2Recomp.exe'"){throw 'Close existing game sessions before starting an isolated Room roster.'}
 $root=Join-Path $workspace ('analysis/private-native-room-roster-'+[DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss')+'-'+[Guid]::NewGuid().ToString('N').Substring(0,8))
 New-Item -ItemType Directory -Path $root | Out-Null
@@ -10,6 +15,11 @@ $records=[Collections.Generic.List[object]]::new()
 # One coherent private authority preset, matching the two-peer acceptance path.
 # This never changes normal game settings or enables probes in public lobbies.
 $authorityOptions=@{}
+if($HostAuthority -and $NativeWorldAuthority){throw "Choose the private per-feature preset or the production native authority policy."}
+if($NativeWorldAuthority){
+ $authorityOptions["OnlineNativeWorldAuthority"]=$true
+ $authorityOptions["OnlineRoomVerificationWindow"]=8
+}
 if($HostAuthority){
  foreach($name in @('OnlineHostCorrection','OnlineRoomPlayerDamageEvents','OnlineRoomWorldDamageEvents','OnlineAiTargetAuthority','OnlineSpawnBatches','OnlineSpawnEligibility','OnlineSpawnReplay','OnlineEntityRetirements','OnlineProjectileImpacts','OnlineShooterLaunches','TraceRoomAiDecisions')){$authorityOptions[$name]=$true}
  $authorityOptions['OnlineRoomVerificationWindow']=8
@@ -31,7 +41,7 @@ try {
   $records.Add($record)
   $record | ConvertTo-Json -Depth 7 | Set-Content -LiteralPath (Join-Path $root ('process-'+$index+'.json'))
  }
- [ordered]@{root=$root;invitation=$invitation;players=$Players;processes=@($records.ToArray());external_gameplay_input_sent=$false;scripted_sdk_input=[bool]$ScriptedInput;host_authority=[bool]$HostAuthority;level_targets=@($LevelTargets);level_tick=$LevelTick;level_interval=$LevelInterval;level_method=$LevelMethod;mixed_characters=[bool]$MixedCharacters;scope='Real native worlds with extra-human admission and authoritative Room frames; optional synthetic SDK input is interpreted and transported normally. Independent extra cameras and full action coverage remain separate.'} |
+ [ordered]@{root=$root;invitation=$invitation;players=$Players;processes=@($records.ToArray());external_gameplay_input_sent=$false;scripted_sdk_input=[bool]$ScriptedInput;host_authority=[bool]$HostAuthority;native_world_authority=[bool]$NativeWorldAuthority;level_targets=@($LevelTargets);level_tick=$LevelTick;level_interval=$LevelInterval;level_method=$LevelMethod;mixed_characters=[bool]$MixedCharacters;scope='Real native worlds with extra-human admission and authoritative Room frames; optional synthetic SDK input is interpreted and transported normally. Independent extra cameras and full action coverage remain separate.'} |
   ConvertTo-Json -Depth 9 | Set-Content -LiteralPath (Join-Path $root 'roster.json')
  Write-Output ('Private native Room roster: '+$root)
 }catch{

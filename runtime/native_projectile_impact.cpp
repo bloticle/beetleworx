@@ -16,10 +16,6 @@ PPC_EXTERN_FUNC(__imp__sub_8293D8A0);
 PPC_EXTERN_FUNC(__imp__sub_8275C0C8);
 PPC_EXTERN_FUNC(__imp__sub_828B8DD0);
 PPC_EXTERN_FUNC(__imp__sub_82AA86E8);
-REXCVAR_DECLARE(bool,em2_private_profile);
-REXCVAR_DECLARE(bool,em2_probe_room_projectile_impacts);
-REXCVAR_DECLARE(bool,em2_probe_room_shooter_launches);
-REXCVAR_DECLARE(bool,em2_probe_room_world_damage_events);
 namespace {
 struct Preserve {PPCContext& ctx;PPCContext saved;unsigned fp=_mm_getcsr();DWORD error=GetLastError();explicit Preserve(PPCContext& c):ctx(c),saved(c){}~Preserve(){ctx=saved;_mm_setcsr(fp);SetLastError(error);}};
 bool Readable(uint8_t* base,uint32_t p,size_t n){return base && p>=4096 && uint64_t(p)+n<=0x100000000ull && em2::GuestReadBatch::Readable(base+p,n);}
@@ -101,7 +97,7 @@ void em2::EndNativeImpactClone(const NativeImpactCloneTicket& ticket,PPCContext&
 }
 PPC_FUNC_IMPL(sub_8293D8A0){
     auto* gameplay=em2::net::CurrentNativeRoomGameplay();uint32_t entity=0;em2::net::SpawnId id{};
-    if(!gameplay || !REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_projectile_impacts)){__imp__sub_8293D8A0(ctx,base);return;}
+    if(!gameplay || !em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::ProjectileImpacts)){__imp__sub_8293D8A0(ctx,base);return;}
     em2::net::NativeImpactMode mode=em2::net::NativeImpactMode::Original;
     {Preserve preserve(ctx);em2::GuestReadBatch reads;if(Projectile(base,ctx.r3.u32,entity,id) && !PPC_LOAD_U8(ctx.r3.u32+207))mode=gameplay->ProjectileImpactMode(id,uint32_t(ctx.lr));}
     if(mode==em2::net::NativeImpactMode::Suppress)return; // Audited void callers ignore return registers.
@@ -153,7 +149,7 @@ bool em2::ReplayNativeProjectileImpact(PPCContext& ctx,uint8_t* base,uint32_t en
 }
 PPC_FUNC_IMPL(sub_82AA86E8){
     auto* gameplay=em2::net::CurrentNativeRoomGameplay();
-    if(!gameplay || !REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_world_damage_events)){__imp__sub_82AA86E8(ctx,base);return;}
+    if(!gameplay || !em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::WorldDamage)){__imp__sub_82AA86E8(ctx,base);return;}
     em2::net::DeathReward reward;uint32_t handle=0,owner=0;const auto component=ctx.r3.u32>=64?ctx.r3.u32-64:0,event=ctx.r4.u32;
     em2::net::NativeImpactMode mode=em2::net::NativeImpactMode::Original;
     {Preserve preserve(ctx);em2::GuestReadBatch reads;
@@ -224,7 +220,7 @@ bool em2::ReadNativeShooterPending(uint8_t* base,uint32_t shooter,net::ShooterLa
 }
 PPC_FUNC_IMPL(sub_828B8DD0){
     auto* gameplay=em2::net::CurrentNativeRoomGameplay();
-    if(!gameplay || !REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_shooter_launches)){__imp__sub_828B8DD0(ctx,base);return;}
+    if(!gameplay || !em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::ShooterLaunches)){__imp__sub_828B8DD0(ctx,base);return;}
     em2::net::ShooterLaunch launch;uint32_t owner=0;const auto shooter=ctx.r3.u32;
     em2::net::NativeImpactMode mode=em2::net::NativeImpactMode::Original;
     {Preserve preserve(ctx);if(em2::ReadNativeShooterPending(base,shooter,launch,owner) && !launch.projectiles.empty())mode=gameplay->ShooterLaunchMode(launch.projectiles,uint32_t(ctx.lr));}

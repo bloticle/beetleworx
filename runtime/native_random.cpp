@@ -21,8 +21,6 @@ PPC_EXTERN_FUNC(__imp__KeTlsGetValue);
 PPC_EXTERN_FUNC(__imp__sub_827B3298);
 PPC_EXTERN_FUNC(__imp__sub_827B3C60);
 REXCVAR_DECLARE(bool,em2_private_profile);
-REXCVAR_DECLARE(bool,em2_probe_room_world_damage_events);
-REXCVAR_DECLARE(bool,em2_probe_room_spawn_batches);
 REXCVAR_DECLARE(bool,em2_trace_online_random_owners);
 REXCVAR_DECLARE(uint32_t,em2_trace_online_random_start_tick);
 PPC_EXTERN_FUNC(__imp__sub_82B6DD98);
@@ -545,7 +543,7 @@ PPC_FUNC_IMPL(sub_827B3C60){
     if(auto* gameplay=em2::net::CurrentNativeRoomGameplay();gameplay && gameplay->SuppressSpawnBatch(ctx,base,spawn_depth)){ctx.r3.u64=0;return;}
     if(auto* gameplay=em2::net::CurrentNativeRoomGameplay();gameplay && !gameplay->PrepareSpawnReplay(ctx,base,spawn_depth)){ctx.r3.u64=0;return;}
     uint64_t tick=0;
-    const bool trace=base && REXCVAR_GET(em2_private_profile) && (REXCVAR_GET(em2_probe_room_world_damage_events) || REXCVAR_GET(em2_probe_room_spawn_batches)) && em2::CurrentAgreedSimulationTick(tick);
+    const bool trace=base && (em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::WorldDamage) || em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::SpawnBatches)) && em2::CurrentAgreedSimulationTick(tick);
     if(!trace){__imp__sub_827B3C60(ctx,base);return;}
     const auto component=ctx.r3.u32,anchor=ctx.r5.u32,caller=uint32_t(ctx.lr);
     const auto selector=ctx.r4.s32;const auto flag=ctx.r6.u32;const bool collection=ctx.r7.u32!=0;
@@ -580,7 +578,7 @@ PPC_FUNC_IMPL(sub_827B3C60){
         const bool same_random=random_valid && ReadRandomOwner(ctx,base,after) && after==random_owner && !online_seed.pending && !world_seed.pending;
         REXLOG_INFO("Private native spawn batch end: tick {} caller {:08X}, owner GUID {:08X}/{:08X}/{:08X}/{:08X}, owner-unchanged {}, count {}, choice {}, used {:08X}, result-valid {} GUID {:08X}/{:08X}/{:08X}/{:08X}, CRT-valid {} state {:08X}; observation only",
             tick,caller,owner[0],owner[1],owner[2],owner[3],owner_unchanged,owner_unchanged?PPC_LOAD_U32(component+104):0,owner_unchanged?PPC_LOAD_U32(component+140):0,owner_unchanged?PPC_LOAD_U32(component+144):0,output_valid,result[0],result[1],result[2],result[3],same_random,same_random?PPC_LOAD_U32(after.ptd+20):0);
-        if(auto* gameplay=em2::net::CurrentNativeRoomGameplay();gameplay && REXCVAR_GET(em2_probe_room_spawn_batches)){
+        if(auto* gameplay=em2::net::CurrentNativeRoomGameplay();gameplay && em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::SpawnBatches)){
             captured.owner.id=owner_unchanged?owner:em2::net::SpawnId{};captured.anchor.id=anchor_id;
             captured.selection=selector;captured.flag=flag==1;captured.collection=collection;
             captured.before={count_before,choice_before,used_before};
@@ -594,7 +592,7 @@ PPC_FUNC_IMPL(sub_827B3C60){
 }
 PPC_FUNC_IMPL(sub_827B3298){
     uint64_t tick=0;const uint64_t start=REXCVAR_GET(em2_trace_online_random_start_tick);
-    const bool operation=REXCVAR_GET(em2_private_profile) && (REXCVAR_GET(em2_probe_room_world_damage_events) || REXCVAR_GET(em2_probe_room_spawn_batches)) && em2::CurrentAgreedSimulationTick(tick);
+    const bool operation=(em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::WorldDamage) || em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::SpawnBatches)) && em2::CurrentAgreedSimulationTick(tick);
     const auto component=ctx.r3.u32,anchor=ctx.r4.u32,prototype=ctx.r5.u32,caller=uint32_t(ctx.lr);
     const std::array<uint32_t,3> flags{ctx.r6.u32,ctx.r7.u32,ctx.r8.u32};
     std::array<uint32_t,4> owner_id{},anchor_id{},prototype_id{};bool owner_valid=false,anchor_valid=false,random_valid=false;
@@ -648,13 +646,14 @@ PPC_FUNC_IMPL(sub_827B3298){
 }
 
 // Observe the original slot cleanup that can change a later parent's mask.
-// Default-off private tracing only; never repairs or replaces native storage.
+// Original cleanup is scheduled by the negotiated authority adapter.
+// The surrounding field observations never replace native storage.
 PPC_EXTERN_FUNC(__imp__sub_827B2E28);
 PPC_FUNC_IMPL(sub_827B2E28){
-    if(REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_spawn_batches))
+    if(em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::SpawnBatches))
         if(auto* gameplay=em2::net::CurrentNativeRoomGameplay();gameplay && !gameplay->PrepareSpawnerCleanup(ctx,base)){ctx.r3.u64=0;return;}
     uint64_t tick=0;
-    if(!base || !REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_spawn_batches) ||
+    if(!base || !em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::SpawnBatches) ||
        !em2::CurrentAgreedSimulationTick(tick)){__imp__sub_827B2E28(ctx,base);return;}
     const auto component=ctx.r3.u32,caller=uint32_t(ctx.lr);
     std::array<uint32_t,4> owner{},before{},after{};bool valid=false;

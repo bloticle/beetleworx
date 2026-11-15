@@ -61,6 +61,7 @@ REXCVAR_DECLARE(uint32_t,em2_native_lobby_qa_damage_player);
 REXCVAR_DECLARE(uint32_t,em2_probe_extra_damage_peer);
 REXCVAR_DEFINE_INT32(em2_room_probe_expected_players,2,"Debug","Private native Room probe transport participant count 2..16; not playable actor capacity");
 REXCVAR_DEFINE_BOOL(em2_room_probe_gameplay,false,"Debug","Explicit private two-retail-player native gameplay experiment; no public-menu enablement");
+REXCVAR_DEFINE_BOOL(em2_room_probe_native_authority,false,"Debug","Isolated Room: select the production native world-authority policy without enabling per-feature probe switches");
 REXCVAR_DEFINE_BOOL(em2_room_probe_host_correction,false,"Debug","Private native Room: negotiate host-state corrections instead of independent world-digest equality");
 REXCVAR_DEFINE_BOOL(em2_room_probe_scripted_input,false,"Debug","Isolated verified loopback Room only: synthetic SDK source for extra-human movement and jump; never normal gameplay input");
 REXCVAR_DEFINE_UINT32(em2_room_probe_input_warmup_ticks,0,"Debug","Private validated SDK input only: neutral native updates before the scripted program, maximum 3000");
@@ -186,7 +187,7 @@ bool PreparePrivateRoomProbe(const fs::path& executable,const fs::path& content,
         Require(REXCVAR_GET(em2_private_profile) && !REXCVAR_GET(em2_user_data_directory).empty(),"Private Room probe requires private_profile and explicit isolated user root");
         const auto window=REXCVAR_GET(em2_room_probe_verification_window);
         Require(window>=1 && window<=8 && boot.SetGameplayVerificationWindow(uint8_t(window)),"Private Room verification window must be 1..8");
-        Require(boot.SetHostCorrectionMode(REXCVAR_GET(em2_room_probe_host_correction)),"Private Room could not configure host correction mode");
+        Require(boot.SetHostCorrectionMode(REXCVAR_GET(em2_room_probe_host_correction)) && boot.SetNativeWorldAuthority(REXCVAR_GET(em2_room_probe_native_authority)),"Private Room could not configure native authority policy");
         Require(REXCVAR_GET(em2_online_auto_continue),"Private Room probe requires native online automatic Continue enabled");
         Require(!REXCVAR_GET(em2_online_menu) && !REXCVAR_GET(em2_online_qa_prelaunch) && REXCVAR_GET(em2_online_qa_role).empty() &&
             REXCVAR_GET(em2_native_lobby_qa_role).empty() && !REXCVAR_GET(em2_open_native_online_menu) &&

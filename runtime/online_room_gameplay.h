@@ -54,6 +54,7 @@ public:
     bool Complete(const std::array<uint8_t,32>& digest,PPCContext&,uint8_t*);
     void ObservationFailed();
     bool active()const;
+    bool native_world_authority()const;
     bool halted()const;
     bool waiting()const;
     bool completion_pending()const;
@@ -105,6 +106,10 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
+// Production adapters use the immutable Room policy. The per-feature debug
+// switches are retained only for isolated private comparisons.
+enum class NativeAuthorityFeature {PlayerDamage,WorldDamage,AiTargets,SpawnBatches,SpawnEligibility,SpawnReplay,Retirements,ProjectileImpacts,ShooterLaunches};
+bool NativeAuthorityEnabled(NativeAuthorityFeature);
 NativeRoomGameplay* CurrentNativeRoomGameplay()noexcept;
 bool NativeRoomGameplayReadiness(PPCContext&,uint8_t*);
 bool NativeRoomGameplayHalted()noexcept;

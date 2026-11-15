@@ -6,8 +6,12 @@ bytes; prerelease identifiers must match, while SemVer build metadata is ignored
 Protocol, game-content, session and checkpoint checks remain independent. An
 unversioned development tree retains executable-hash compatibility checks.
 
-The current experimental native Room combines delayed synchronized inputs with
-host correction of player and recognized NPC position, velocity and health.
+The current development native Room combines delayed synchronized inputs with
+host correction of player and recognized NPC position, velocity and health,
+plus host ownership of mapped Damage events, AI target decisions, spawner
+batches, projectile launches/impacts, death rewards and entity retirements.
+Normal development lobbies select this mode through the negotiated session
+policy; they no longer need the individual private authority switches.
 Inputs still wait for every participant. General world authority, prediction,
 rollback/replay and reconnect remain unfinished. Props, scripts, spawning and
 combat effects may diverge. Online demo packages enable the lobby through the
@@ -16,14 +20,13 @@ available. The EM1 preview remains offline. Current correction evidence and
 limits are recorded in [the correction notes](online-authority-correction-work.md).
 
 Private death-reward replication work and its remaining native lifecycle failure
-are recorded in [the reward notes](online-death-reward-work.md). It remains
-disabled in public lobbies. The mapped cosmetic cleanup repair and subsequent
+are recorded in [the reward notes](online-death-reward-work.md). Published
+demo.15 retains the earlier correction-only behavior. The mapped cosmetic cleanup repair and subsequent
 level-entry identity mismatch are in [the particle retirement notes](online-particle-retirement-work.md).
 The identity repair and passed three-player Gulch/Autotopia route are in
 [the human peer proof notes](online-human-peer-proof-work.md).
-The immutable session-mode contract needed to move those adapters into normal
-lobbies is recorded in [the authority policy notes](online-native-authority-policy.md).
-Negotiating that mode alone does not enable the adapters.
+The immutable session-mode contract and its native adapter integration are
+recorded in [the authority policy notes](online-native-authority-policy.md).
 
 The following checkpoint results describe earlier deterministic-path checks.
 

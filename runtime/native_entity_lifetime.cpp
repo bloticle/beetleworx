@@ -16,8 +16,6 @@
 #include <limits>
 #include <string>
 REXCVAR_DECLARE(bool,em2_private_profile);
-REXCVAR_DECLARE(bool,em2_probe_room_world_damage_events);
-REXCVAR_DECLARE(bool,em2_probe_room_entity_retirements);
 
 PPC_EXTERN_FUNC(__imp__sub_82747E08); // Registry inserts handle/entity maps.
 PPC_EXTERN_FUNC(__imp__sub_827448B0); // Registry removes both maps.
@@ -58,7 +56,7 @@ struct Calls {
 // Only the same-executable fixture changes its own thread's call table.
 thread_local const Calls* test_calls=nullptr;
 void TraceLifecycle(const char* action,const PPCContext& ctx,uint8_t* base){
-    if(test_calls || !base || !REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_world_damage_events))return;
+    if(test_calls || !base || !REXCVAR_GET(em2_private_profile) || !em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::WorldDamage))return;
     const auto fp=_mm_getcsr();const auto host_error=GetLastError();
     struct Restore {unsigned fp;DWORD error;~Restore(){_mm_setcsr(fp);SetLastError(error);}} restore{fp,host_error};
     em2::GuestReadBatch reads;const auto entity=ctx.r4.u32;
@@ -87,7 +85,7 @@ PPC_FUNC_IMPL(sub_82747E08){TraceLifecycle("insert",ctx,base);Mutation mutation;
 PPC_FUNC_IMPL(sub_827448B0){TraceLifecycle("remove",ctx,base);Mutation mutation;(test_calls?test_calls->remove:__imp__sub_827448B0)(ctx,base);}
 PPC_FUNC_IMPL(sub_82517E50){Mutation mutation;(test_calls?test_calls->identity:__imp__sub_82517E50)(ctx,base);}
 PPC_FUNC_IMPL(sub_82744E90){
-    if(!test_calls && REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_entity_retirements))
+    if(!test_calls && em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::Retirements))
         if(auto* gameplay=em2::net::CurrentNativeRoomGameplay();gameplay && gameplay->DeferSpawnerRetirement(ctx,base))return;
     TraceLifecycle("teardown",ctx,base);Mutation mutation;(test_calls?test_calls->teardown:__imp__sub_82744E90)(ctx,base);}
 PPC_FUNC_IMPL(sub_827437B0){
@@ -101,7 +99,7 @@ PPC_FUNC_IMPL(sub_827437B0){
 PPC_FUNC_IMPL(sub_827B9960){
     const auto impact=em2::BeginNativeImpactClone(ctx,base);
     uint64_t tick=0;
-    const bool trace=base && REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_world_damage_events) && em2::CurrentAgreedSimulationTick(tick);
+    const bool trace=base && REXCVAR_GET(em2_private_profile) && em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::WorldDamage) && em2::CurrentAgreedSimulationTick(tick);
     if(!trace){__imp__sub_827B9960(ctx,base);if(impact)em2::EndNativeImpactClone(*impact,ctx,base);return;}
     const auto prototype=ctx.r3.u32,initialize=ctx.r4.u32,new_guid=ctx.r5.u32,caller=uint32_t(ctx.lr);
     std::array<uint32_t,4> source{};std::string name;bool source_readable=false;

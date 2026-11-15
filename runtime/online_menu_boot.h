@@ -18,9 +18,9 @@ class OnlineMenuBoot {
     OnlineRoomBoot room_;
 public:
     explicit OnlineMenuBoot(bool rooms):rooms_(rooms){
-        // Regular lobbies use bounded host-state correction; low-level Room
-        // probes can still select verified lockstep independently.
-        if(rooms_)room_.SetHostCorrectionMode(true);
+        // Regular lobbies negotiate the complete native world-event policy.
+        // Low-level comparisons may still select correction-only or lockstep.
+        if(rooms_)room_.SetNativeWorldAuthority(true);
     }
     bool uses_room()const{return rooms_;}
     Room* LobbyChatRoom()const{return rooms_?room_.LobbyChatRoom():nullptr;}

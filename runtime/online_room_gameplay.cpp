@@ -350,7 +350,7 @@ struct NativeRoomGameplay::Impl {
             tick==committed && !pending_authority && room->HostLoadAnnounced(tick);
     }
     bool AiScope(uint32_t brain,uint8_t* base,std::array<uint32_t,4>& id,uint64_t& tick){
-        if(!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_ai_targets) || !Owner() || !Configured() || stopped ||
+        if(!em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::AiTargets) || !Owner() || !Configured() || stopped ||
            !pending || !delivered || load_depth || transition_pending || !room->host_correction_mode() ||
            room->state()!=RoomState::Running || !em2::CurrentAgreedSimulationTick(tick) || tick!=committed || AnnouncedLoadCancellation(tick))return false;
         if(!Readable(brain,296,base))return Stop("Native AI target brain unavailable");
@@ -380,6 +380,7 @@ bool NativeRoomGameplay::Configure(Room& room,RoomBootstrapGate& bootstrap,rex::
     s.native_buttons=REXCVAR_GET(em2_room_native_buttons);
     s.scripted_input=MakePrivateRoomInput(room);if(s.scripted_input)s.input=s.scripted_input.get();
     current_gameplay=this;gameplay_halted.store(false,std::memory_order_release);gameplay_waiting.store(false,std::memory_order_release);
+    REXLOG_INFO("Native Room gameplay authority policy: peer {}, full world events {}, host correction {}",s.peer,room.native_world_authority(),room.host_correction_mode());
     return true;
 }
 void NativeRoomGameplay::Detach(){
@@ -994,21 +995,21 @@ bool NativeRoomGameplay::Deliver(PPCContext& ctx,uint8_t* base){
             if(!s.pending_authority)std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         if(!s.pending_authority || s.pending_authority->tick!=tick)return s.Stop("Host update result did not arrive before matching native guest update");
-        if(!s.pending_authority->ai_decisions.empty() && (!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_ai_targets)))
+        if(!s.pending_authority->ai_decisions.empty() && (!em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::AiTargets)))
             return s.Stop("Host AI target decisions require the matching native AI adapter");
-        if(!s.pending_authority->spawn_batches.empty() && (!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_spawn_batches)))
-            return s.Stop("Host spawn batches require the matching private native capture adapter");
-        if(!s.pending_authority->projectile_impacts.empty() && (!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_projectile_impacts)))
-            return s.Stop("Host projectile impacts require the matching private native impact adapter");
-        if(!s.pending_authority->death_rewards.empty() && (!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_world_damage_events) || !REXCVAR_GET(em2_probe_room_spawn_replay) || !REXCVAR_GET(em2_probe_room_entity_retirements)))
+        if(!s.pending_authority->spawn_batches.empty() && (!em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::SpawnBatches)))
+            return s.Stop("Host spawn batches require the matching native capture adapter");
+        if(!s.pending_authority->projectile_impacts.empty() && (!em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::ProjectileImpacts)))
+            return s.Stop("Host projectile impacts require the matching native impact adapter");
+        if(!s.pending_authority->death_rewards.empty() && (!em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::WorldDamage) || !em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::SpawnReplay) || !em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::Retirements)))
             return s.Stop("Host death rewards require the matching native authority adapters");
-        if(!s.pending_authority->shooter_launches.empty() && (!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_shooter_launches)))
-            return s.Stop("Host Shooter launches require the matching private native launch adapter");
-        if(!s.pending_authority->retired_entities.empty() && (!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_entity_retirements)))
-            return s.Stop("Host entity retirements require the matching private native adapter");
-        if(!s.pending_authority->live_spawners.empty() && (!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_entity_retirements)))
+        if(!s.pending_authority->shooter_launches.empty() && (!em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::ShooterLaunches)))
+            return s.Stop("Host Shooter launches require the matching native launch adapter");
+        if(!s.pending_authority->retired_entities.empty() && (!em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::Retirements)))
+            return s.Stop("Host entity retirements require the matching native adapter");
+        if(!s.pending_authority->live_spawners.empty() && (!em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::Retirements)))
             return s.Stop("Host spawner lifetime inventory requires the matching native adapter");
-        if(REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_entity_retirements)){
+        if(em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::Retirements)){
             s.authority_entities.insert(s.pending_authority->live_spawners.begin(),s.pending_authority->live_spawners.end());
             for(const auto& batch:s.pending_authority->spawn_batches)if(!batch.owner.peer)s.authority_entities.insert(batch.owner.id);
             for(const auto& actor:s.pending_authority->characters)s.authority_entities.insert(actor.id);
@@ -1046,7 +1047,7 @@ bool NativeRoomGameplay::Deliver(PPCContext& ctx,uint8_t* base){
                 // direct native path such as FallRescue; do not invent another
                 // hit that native immunity may reject. Legacy health-only
                 // correction retains its immediate Damage notification path.
-                const bool full_damage=REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_world_damage_events);
+                const bool full_damage=em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::WorldDamage);
                 // A direct host zero observed AFTER this update (FallRescue,
                 // for example) must not be moved before the guest update.
                 // That would advance Health death/countdown and respawn by
@@ -1113,19 +1114,19 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
         !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed)return false;
     if(s.AnnouncedLoadCancellation(tick))return s.Stop("Host announced a native load, but guest completed without entering the matching loader");
     if(const auto failure=s.WorldFailure(base))return s.Stop(std::string("Native gameplay completion rejected: ")+failure);
-    if(REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_ai_targets) && s.peer!=1 &&
+    if(em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::AiTargets) && s.peer!=1 &&
        (!s.pending_authority || s.ai_cursor!=s.pending_authority->ai_decisions.size()))return s.Stop("Native AI target completion did not consume the host decision batch");
-    if(REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_spawn_batches) && s.peer!=1){
-        if(REXCVAR_GET(em2_probe_room_world_damage_events) && !ReplayDeathRewards(ctx,base))return false;
-        if(REXCVAR_GET(em2_probe_room_shooter_launches) && !ReplayShooterLaunches(ctx,base,false))return false;
-        if(REXCVAR_GET(em2_probe_room_projectile_impacts) && !ReplayProjectileImpacts(ctx,base))return false;
-        if(REXCVAR_GET(em2_probe_room_entity_retirements) && !ReplayEntityRetirements(ctx,base,false))return false;
-        if(REXCVAR_GET(em2_probe_room_spawn_replay) && !ReplayMissingSpawns(ctx,base))return false;
-        if(REXCVAR_GET(em2_probe_room_shooter_launches) && !ReplayShooterLaunches(ctx,base,true))return false;
-        if(REXCVAR_GET(em2_probe_room_entity_retirements) && !ReplayEntityRetirements(ctx,base,true))return false;
+    if(em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::SpawnBatches) && s.peer!=1){
+        if(em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::WorldDamage) && !ReplayDeathRewards(ctx,base))return false;
+        if(em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::ShooterLaunches) && !ReplayShooterLaunches(ctx,base,false))return false;
+        if(em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::ProjectileImpacts) && !ReplayProjectileImpacts(ctx,base))return false;
+        if(em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::Retirements) && !ReplayEntityRetirements(ctx,base,false))return false;
+        if(em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::SpawnReplay) && !ReplayMissingSpawns(ctx,base))return false;
+        if(em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::ShooterLaunches) && !ReplayShooterLaunches(ctx,base,true))return false;
+        if(em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::Retirements) && !ReplayEntityRetirements(ctx,base,true))return false;
         if(!s.pending_authority || s.spawn_batches!=s.pending_authority->spawn_batches)
-            return s.Stop("Native spawn batch capture differs from host; spawn replay remains unimplemented");
-        if(!s.spawn_batches.empty())REXLOG_INFO("Native host spawn batch capture matched: tick {}, batches {}; original births and bookkeeping compared, no replay",tick,s.spawn_batches.size());
+            return s.Stop("Native spawn batch differs from host after replay");
+        if(!s.spawn_batches.empty())REXLOG_INFO("Native host spawn batch matched: tick {}, batches {}; original births and bookkeeping compared",tick,s.spawn_batches.size());
     }
     if(s.game_over_entry || s.consumed_passive){
         if(!FinishRetailPassiveTick(tick,ctx,base))return s.Stop("Native passive input quarantine completion failed");
@@ -1187,7 +1188,7 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
                 em2::NativeEntitySnapshot entities;const char* error=nullptr;uint32_t address=0;
                 ready=em2::ReadNativeEntitySnapshot(base,entities,error,address,false);
                 world.erase(std::remove_if(world.begin(),world.end(),[&](const auto& character){return std::find(player_ids.begin(),player_ids.end(),character.id)!=player_ids.end();}),world.end());
-                if(ready && REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_entity_retirements)){
+                if(ready && em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::Retirements)){
                     for(const auto& actor:world)s.authority_entities.insert(actor.id);
                     // Canonical indices: TemplateSpawner 40, DeathReward 117.
                     // Validate its actual component type before publishing IDs.
@@ -1279,7 +1280,7 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
                 REXLOG_INFO("Private native authority health drift injected: tick {}, peer {}, health {} (host {}) through original property setter",tick,player,*current,*target);
             }
             if(*current==*target)return true;
-            const auto phase=REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_world_damage_events)?
+            const auto phase=em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::WorldDamage)?
                 em2::NativeHealthCorrectionPhase::CompletedPropertyOnly:em2::NativeHealthCorrectionPhase::CompletedUpdate;
             if(!em2::CorrectNativeActorHealth(ctx,base,entity,*target,phase))return false;
             if(*target==0 && *current>0 && phase==em2::NativeHealthCorrectionPhase::CompletedPropertyOnly)
@@ -1356,6 +1357,10 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
 }
 void NativeRoomGameplay::ObservationFailed(){auto& s=*impl_;if(s.Owner() && !s.stopped)s.Stop("Completed native gameplay observation is unavailable");}
 bool NativeRoomGameplay::active()const{return impl_->Configured();}
+bool NativeRoomGameplay::native_world_authority()const{
+    const auto& s=*impl_;return s.Owner() && s.Configured() && !s.stopped && s.room->native_world_authority();
+}
+
 bool NativeRoomGameplay::halted()const{return impl_->stopped;}
 bool NativeRoomGameplay::waiting()const{return gameplay_waiting.load(std::memory_order_acquire);}
 bool NativeRoomGameplay::completion_pending()const{return impl_->pending;}
@@ -1365,7 +1370,7 @@ bool NativeRoomGameplay::SuppressLocalDamage(uint32_t target)const{
         !s.transition_pending && s.room->state()==RoomState::Running && s.room->host_correction_mode() &&
         em2::CurrentAgreedSimulationTick(tick) && tick==s.committed;
     if(!owned || !target || s.AnnouncedLoadCancellation(tick))return false;
-    if(REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_world_damage_events))return true;
+    if(em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::WorldDamage))return true;
     return target==s.label_handles[0] || target==s.label_handles[1] ||
         std::any_of(s.actors->actors().begin(),s.actors->actors().end(),[&](const auto& entry){return entry.actor.handle==target;});
 }
@@ -1373,12 +1378,12 @@ std::optional<size_t> NativeRoomGameplay::BeginAiTargetDecision(uint32_t brain,u
     Environment preserve;em2::GuestReadBatch reads;auto& s=*impl_;uint64_t tick=0;std::array<uint32_t,4> owner;
     if(s.peer!=1 || !s.AiScope(brain,base,owner,tick))return {};
     if(s.ai_decisions.size()>=kAuthorityAiDecisionBatch){s.Stop("Native AI target decision batch exceeds bound");return {};}
-    if(REXCVAR_GET(em2_probe_room_entity_retirements))s.authority_entities.insert(owner);
+    if(em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::Retirements))s.authority_entities.insert(owner);
     const auto ticket=s.ai_decisions.size();RoomAiTargetDecision decision;decision.owner=owner;s.ai_decisions.push_back(decision);return ticket;
 }
 bool NativeRoomGameplay::RecordSpawnBatch(SpawnBatch batch,uint32_t owner,uint32_t anchor,uint8_t* base){
     Environment preserve;em2::GuestReadBatch reads;auto& s=*impl_;uint64_t tick=0;
-    if(!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_spawn_batches) || !s.Owner() || !s.Configured() || s.stopped ||
+    if(!em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::SpawnBatches) || !s.Owner() || !s.Configured() || s.stopped ||
        !s.pending || s.load_depth || s.transition_pending || s.room->state()!=RoomState::Running || !s.room->host_correction_mode() ||
        !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed)return false;
     if(s.AnnouncedLoadCancellation(tick))return false;
@@ -1389,18 +1394,18 @@ bool NativeRoomGameplay::RecordSpawnBatch(SpawnBatch batch,uint32_t owner,uint32
         ref.peer=s.HumanPeer(entity);if(ref.peer)ref.id={};return true;
     };
     if(!canonical(batch.owner,owner) || !canonical(batch.anchor,anchor) || !ValidSpawnBatch(batch))return s.Stop("Native spawn capture has unsupported ownership, identity or child side effects");
-    if((s.spawn_replaying || (s.peer!=1 && REXCVAR_GET(em2_probe_room_spawn_replay))) && (!s.pending_authority || s.spawn_batches.size()>=s.pending_authority->spawn_batches.size() ||
+    if((s.spawn_replaying || (s.peer!=1 && em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::SpawnReplay))) && (!s.pending_authority || s.spawn_batches.size()>=s.pending_authority->spawn_batches.size() ||
        batch!=s.pending_authority->spawn_batches[s.spawn_batches.size()]))return s.Stop("Replayed native spawn differs from complete host parent payload");
     if(s.spawn_batches.size()>=kAuthoritySpawnBatch)return s.Stop("Native spawn capture batch exceeds bound");
-    if(REXCVAR_GET(em2_probe_room_projectile_impacts) && batch.shooter){
+    if(em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::ProjectileImpacts) && batch.shooter){
         if(s.projectile_load!=s.load){s.owned_projectiles.clear();s.projectile_load=s.load;}
         for(const auto& child:batch.children){
             if(s.owned_projectiles.size()>=65536)return s.Stop("Native projectile authority inventory exceeds bound");
             s.owned_projectiles.insert(child.entity);
         }
     }
-    if(REXCVAR_GET(em2_probe_room_entity_retirements) && !batch.owner.peer)s.authority_entities.insert(batch.owner.id);
-    if(REXCVAR_GET(em2_probe_room_entity_retirements) && !batch.shooter && batch.collection){
+    if(em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::Retirements) && !batch.owner.peer)s.authority_entities.insert(batch.owner.id);
+    if(em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::Retirements) && !batch.shooter && batch.collection){
         for(const auto& child:batch.children)s.authority_entities.insert(child.entity);
         if(s.authority_entities.size()>65536)return s.Stop("Native collection authority inventory exceeds bound");
     }
@@ -1408,8 +1413,8 @@ bool NativeRoomGameplay::RecordSpawnBatch(SpawnBatch batch,uint32_t owner,uint32
 }
 NativeImpactMode NativeRoomGameplay::ProjectileImpactMode(const SpawnId& id,uint32_t caller){
     Environment preserve;auto& s=*impl_;uint64_t tick=0;
-    if(!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_projectile_impacts) || !REXCVAR_GET(em2_probe_room_spawn_replay) ||
-       !REXCVAR_GET(em2_probe_room_world_damage_events) || !s.Owner() || !s.Configured() || s.stopped || !s.pending || s.load_depth || s.transition_pending ||
+    if(!em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::ProjectileImpacts) || !em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::SpawnReplay) ||
+       !em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::WorldDamage) || !s.Owner() || !s.Configured() || s.stopped || !s.pending || s.load_depth || s.transition_pending ||
        s.room->state()!=RoomState::Running || !s.room->host_correction_mode() || s.projectile_load!=s.load || !s.owned_projectiles.contains(id) ||
        !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed || s.AnnouncedLoadCancellation(tick))return NativeImpactMode::Original;
     // All direct original callers below ignore this void operation's return.
@@ -1419,8 +1424,8 @@ NativeImpactMode NativeRoomGameplay::ProjectileImpactMode(const SpawnId& id,uint
 }
 NativeImpactMode NativeRoomGameplay::ShooterLaunchMode(std::span<const SpawnId> shots,uint32_t caller){
     Environment preserve;auto& s=*impl_;uint64_t tick=0;
-    if(!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_shooter_launches) || !REXCVAR_GET(em2_probe_room_projectile_impacts) ||
-       !REXCVAR_GET(em2_probe_room_spawn_replay) || !s.Owner() || !s.Configured() || s.stopped || !s.pending || s.load_depth || s.transition_pending ||
+    if(!em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::ShooterLaunches) || !em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::ProjectileImpacts) ||
+       !em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::SpawnReplay) || !s.Owner() || !s.Configured() || s.stopped || !s.pending || s.load_depth || s.transition_pending ||
        s.room->state()!=RoomState::Running || !s.room->host_correction_mode() || s.projectile_load!=s.load || shots.empty() ||
        !std::all_of(shots.begin(),shots.end(),[&](const auto& id){return s.owned_projectiles.contains(id);}) ||
        !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed || s.AnnouncedLoadCancellation(tick))return NativeImpactMode::Original;
@@ -1431,7 +1436,7 @@ NativeImpactMode NativeRoomGameplay::ShooterLaunchMode(std::span<const SpawnId> 
 bool NativeRoomGameplay::RecordShooterLaunch(ShooterLaunch launch,uint32_t owner){
     Environment preserve;auto& s=*impl_;uint64_t tick=0;
     if(!s.Owner() || !s.Configured() || s.stopped || s.peer!=1 || !s.pending || s.load_depth || s.transition_pending ||
-       !REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_shooter_launches) || !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed)return false;
+       !em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::ShooterLaunches) || !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed)return false;
     if((launch.owner.peer=s.HumanPeer(owner)))launch.owner.id={};
     if(!ValidShooterLaunch(launch) || s.shooter_launches.size()>=kAuthorityLaunchBatch)return s.Stop("Native Shooter launch capture exceeds its input or batch contract");
     REXLOG_INFO("Native host Shooter launch captured: tick {}, owner peer {} GUID {:08X}/{:08X}/{:08X}/{:08X}, shots {}, success {}, FX clones {}",tick,launch.owner.peer,launch.owner.id[0],launch.owner.id[1],launch.owner.id[2],launch.owner.id[3],launch.projectiles.size(),launch.success,launch.clones.size());
@@ -1463,8 +1468,8 @@ bool NativeRoomGameplay::ReplayShooterLaunches(PPCContext& ctx,uint8_t* base,boo
 }
 NativeImpactMode NativeRoomGameplay::DeathRewardMode(uint32_t owner)const{
     Environment preserve;auto& s=*impl_;uint64_t tick=0;
-    if(!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_world_damage_events) || !REXCVAR_GET(em2_probe_room_spawn_replay) ||
-       !REXCVAR_GET(em2_probe_room_entity_retirements) || !s.Owner() || !s.Configured() || s.stopped || !s.pending || s.load_depth || s.transition_pending ||
+    if(!em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::WorldDamage) || !em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::SpawnReplay) ||
+       !em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::Retirements) || !s.Owner() || !s.Configured() || s.stopped || !s.pending || s.load_depth || s.transition_pending ||
        s.HumanPeer(owner) || !s.room->host_correction_mode() || !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed || s.AnnouncedLoadCancellation(tick))return NativeImpactMode::Original;
     return s.peer==1?NativeImpactMode::Host:NativeImpactMode::Suppress;
 }
@@ -1500,7 +1505,7 @@ bool NativeRoomGameplay::ReplayDeathRewards(PPCContext& ctx,uint8_t* base){
 bool NativeRoomGameplay::RecordProjectileImpact(ProjectileImpact impact){
     Environment preserve;auto& s=*impl_;uint64_t tick=0;
     if(!s.Owner() || !s.Configured() || s.stopped || s.peer!=1 || !s.pending || s.load_depth || s.transition_pending ||
-       !REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_projectile_impacts) || !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed)return false;
+       !em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::ProjectileImpacts) || !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed)return false;
     if(!ValidProjectileImpact(impact) || !s.owned_projectiles.contains(impact.projectile) || s.projectile_impacts.size()>=kAuthorityImpactBatch)
         return s.Stop("Native projectile impact capture has unsupported identity, RNG, FX or batch data");
     REXLOG_INFO("Native host projectile impact captured: tick {} GUID {:08X}/{:08X}/{:08X}/{:08X}, FX clones {}, retirement queued {}",tick,impact.projectile[0],impact.projectile[1],impact.projectile[2],impact.projectile[3],impact.clones.size(),impact.queued);
@@ -1528,7 +1533,7 @@ bool NativeRoomGameplay::ReplayProjectileImpacts(PPCContext& ctx,uint8_t* base){
 }
 bool NativeRoomGameplay::SuppressSpawnBatch(const PPCContext& ctx,uint8_t* base,unsigned depth){
     Environment preserve;em2::GuestReadBatch reads;auto& s=*impl_;uint64_t tick=0;
-    if(!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_spawn_batches) || !REXCVAR_GET(em2_probe_room_spawn_eligibility) ||
+    if(!em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::SpawnBatches) || !em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::SpawnEligibility) ||
        !s.Owner() || !s.Configured() || s.stopped || s.peer==1 || !s.pending || s.load_depth || s.transition_pending ||
        s.room->state()!=RoomState::Running || !s.room->host_correction_mode() || !s.pending_authority ||
        !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed || s.pending_authority->tick!=tick)return false;
@@ -1571,8 +1576,8 @@ bool NativeRoomGameplay::SuppressSpawnBatch(const PPCContext& ctx,uint8_t* base,
 bool NativeRoomGameplay::PrepareSpawnReplay(PPCContext& ctx,uint8_t* base,unsigned depth){
     Environment preserve;em2::GuestReadBatch reads;auto& s=*impl_;uint64_t tick=0;
     if(!s.spawn_replaying){
-        if(!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_spawn_batches) || !REXCVAR_GET(em2_probe_room_spawn_eligibility) ||
-           !REXCVAR_GET(em2_probe_room_spawn_replay) || !s.Owner() || !s.Configured() || s.stopped || s.peer==1 || !s.pending ||
+        if(!em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::SpawnBatches) || !em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::SpawnEligibility) ||
+           !em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::SpawnReplay) || !s.Owner() || !s.Configured() || s.stopped || s.peer==1 || !s.pending ||
            s.load_depth || s.transition_pending || s.room->state()!=RoomState::Running)return true;
         // Audited native callers consume the host's parent inputs.
         // 827B4178 passes its live output array from the original Lua route;
@@ -1698,7 +1703,7 @@ bool NativeRoomGameplay::DeferSpawnerRetirement(const PPCContext& ctx,uint8_t* b
     Environment environment;em2::GuestReadBatch reads;auto& s=*impl_;uint64_t tick=0;
     // Health update and GUID DestroyEntity requests have void contracts.
     // Other destruction paths remain native until their callbacks are mapped.
-    if((uint32_t(ctx.lr)!=0x827CFC44 && uint32_t(ctx.lr)!=0x827452A8) || !REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_entity_retirements) ||
+    if((uint32_t(ctx.lr)!=0x827CFC44 && uint32_t(ctx.lr)!=0x827452A8) || !em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::Retirements) ||
        !s.Owner() || !s.Configured() || s.stopped || s.peer==1 || !s.pending || !s.delivered || s.load_depth || s.transition_pending ||
        !s.pending_authority || ctx.r3.u32!=s.registry || !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed ||
        s.pending_authority->tick!=tick || s.AnnouncedLoadCancellation(tick))return false;
@@ -1717,8 +1722,8 @@ bool NativeRoomGameplay::DeferSpawnerRetirement(const PPCContext& ctx,uint8_t* b
 }
 bool NativeRoomGameplay::PrepareSpawnerCleanup(PPCContext& ctx,uint8_t* base){
     Environment environment;Context context(ctx);auto& s=*impl_;uint64_t tick=0;
-    if(uint32_t(ctx.lr)!=0x828B91C8 || !REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_spawn_replay) ||
-       !REXCVAR_GET(em2_probe_room_spawn_eligibility) || !s.Owner() || !s.Configured() || s.peer==1 || s.spawn_replaying ||
+    if(uint32_t(ctx.lr)!=0x828B91C8 || !em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::SpawnReplay) ||
+       !em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::SpawnEligibility) || !s.Owner() || !s.Configured() || s.peer==1 || s.spawn_replaying ||
        s.stopped || !s.pending || s.load_depth || s.transition_pending || !s.pending_authority ||
        !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed || s.pending_authority->tick!=tick ||
        s.AnnouncedLoadCancellation(tick))return true;
@@ -1746,8 +1751,8 @@ bool NativeRoomGameplay::PrepareSpawnerCleanup(PPCContext& ctx,uint8_t* base){
 }
 bool NativeRoomGameplay::ReplayMissingSpawns(PPCContext& ctx,uint8_t* base,const SpawnReference* stop_before,const SpawnReference* stop_after){
     auto& s=*impl_;uint64_t tick=0;Environment environment;
-    if(!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_spawn_batches) || !REXCVAR_GET(em2_probe_room_spawn_eligibility) ||
-       !REXCVAR_GET(em2_probe_room_spawn_replay) || !s.Owner() || s.stopped || s.peer==1 || !s.pending || s.load_depth || s.transition_pending ||
+    if(!em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::SpawnBatches) || !em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::SpawnEligibility) ||
+       !em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::SpawnReplay) || !s.Owner() || s.stopped || s.peer==1 || !s.pending || s.load_depth || s.transition_pending ||
        !s.pending_authority || !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed || s.pending_authority->tick!=tick)
         return s.Stop("Native missing-spawn replay is outside its admitted authority scope");
     while(s.pending_authority && s.spawn_batches.size()<s.pending_authority->spawn_batches.size()){
@@ -1861,14 +1866,14 @@ bool NativeRoomGameplay::FinishAiTargetDecision(size_t ticket,uint32_t brain,uin
 }
 bool NativeRoomGameplay::ReplayAiTargetDecision(PPCContext& ctx,uint8_t* base){
     Environment preserve;em2::GuestReadBatch reads;auto& s=*impl_;uint64_t tick=0;std::array<uint32_t,4> owner;
-    if(s.peer==1 || !REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_ai_targets))return false;
+    if(s.peer==1 || !em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::AiTargets))return false;
     if(!s.AiScope(ctx.r3.u32,base,owner,tick))return s.stopped;
     const auto fail=[&](const char* message){s.Stop(message);return true;};
     if(!s.pending_authority || s.ai_cursor>s.pending_authority->ai_decisions.size())return fail("Guest AI selector has no valid host decision batch");
     const auto& decisions=s.pending_authority->ai_decisions;
     if(s.ai_cursor==decisions.size() || decisions[s.ai_cursor].owner!=owner){
         const bool remaining=std::any_of(decisions.begin()+s.ai_cursor,decisions.end(),[&](const auto& command){return command.owner==owner;});
-        const bool retiring=REXCVAR_GET(em2_probe_room_entity_retirements) && s.authority_entities.contains(owner) &&
+        const bool retiring=em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::Retirements) && s.authority_entities.contains(owner) &&
             std::find(s.pending_authority->retired_entities.begin(),s.pending_authority->retired_entities.end(),owner)!=s.pending_authority->retired_entities.end();
         if(!remaining && retiring){
             REXLOG_INFO("Native retiring NPC selector skipped: tick {} owner {:08X}/{:08X}/{:08X}/{:08X}; explicit host retirement pending, no target choice or command consumed",tick,owner[0],owner[1],owner[2],owner[3]);
@@ -1922,8 +1927,8 @@ bool NativeRoomGameplay::OverridePrivateAiTarget(uint32_t brain,uint32_t& target
 }
 bool NativeRoomGameplay::RecordDamageEvent(uint32_t event,uint32_t listener,uint32_t caller,uint8_t* base){
     auto& s=*impl_;uint64_t tick=0;Environment preserve;em2::GuestReadBatch reads;
-    const bool world_events=REXCVAR_GET(em2_probe_room_world_damage_events);
-    if(!REXCVAR_GET(em2_private_profile) || (!REXCVAR_GET(em2_probe_room_player_damage_events) && !world_events) ||
+    const bool world_events=em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::WorldDamage);
+    if((!em2::net::NativeAuthorityEnabled(em2::net::NativeAuthorityFeature::PlayerDamage) && !world_events) ||
        !s.Owner() || !s.Configured() || s.stopped || s.peer!=1 || !s.pending || s.load_depth || s.transition_pending ||
        !s.room->host_correction_mode() || !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed || !Readable(event,116,base) ||
        PPC_LOAD_U16(event+4)!=14 || PPC_LOAD_U32(event)!=0x82076C70)return false;
@@ -1986,6 +1991,23 @@ std::optional<uint64_t> NativeRoomGameplay::last_native_completed_tick()const{
     return impl_->Owner()?impl_->native_completed:std::nullopt;
 }
 const std::string& NativeRoomGameplay::error()const{return impl_->error;}
+bool NativeAuthorityEnabled(NativeAuthorityFeature feature){
+    bool probe=false;
+    switch(feature){
+        case NativeAuthorityFeature::PlayerDamage:probe=REXCVAR_GET(em2_probe_room_player_damage_events);break;
+        case NativeAuthorityFeature::WorldDamage:probe=REXCVAR_GET(em2_probe_room_world_damage_events);break;
+        case NativeAuthorityFeature::AiTargets:probe=REXCVAR_GET(em2_probe_room_ai_targets);break;
+        case NativeAuthorityFeature::SpawnBatches:probe=REXCVAR_GET(em2_probe_room_spawn_batches);break;
+        case NativeAuthorityFeature::SpawnEligibility:probe=REXCVAR_GET(em2_probe_room_spawn_eligibility);break;
+        case NativeAuthorityFeature::SpawnReplay:probe=REXCVAR_GET(em2_probe_room_spawn_replay);break;
+        case NativeAuthorityFeature::Retirements:probe=REXCVAR_GET(em2_probe_room_entity_retirements);break;
+        case NativeAuthorityFeature::ProjectileImpacts:probe=REXCVAR_GET(em2_probe_room_projectile_impacts);break;
+        case NativeAuthorityFeature::ShooterLaunches:probe=REXCVAR_GET(em2_probe_room_shooter_launches);break;
+        default:return false;
+    }
+    const auto* gameplay=CurrentNativeRoomGameplay();
+    return (gameplay && gameplay->native_world_authority()) || (REXCVAR_GET(em2_private_profile) && probe);
+}
 NativeRoomGameplay* CurrentNativeRoomGameplay()noexcept{return current_gameplay;}
 bool NativeRoomRenderBindingsAvailable(uint8_t* base){if(NativeRoomTitleLeaveRenderRetired())return false;const auto* game=CurrentNativeRoomGameplay();return !game || game->RenderBindingsAvailable(base);}
 bool NativeRoomGameplayReadiness(PPCContext& ctx,uint8_t* base){return current_gameplay && current_gameplay->Readiness(ctx,base);}
