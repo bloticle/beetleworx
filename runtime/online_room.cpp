@@ -28,7 +28,7 @@ namespace {
 using Clock=std::chrono::steady_clock;
 using Bytes=std::vector<uint8_t>;
 constexpr size_t Window=64,MaxPacket=8192,MaxQueued=256*1024;
-constexpr uint8_t WireVersion=12;
+constexpr uint8_t WireVersion=13;
 static_assert(100+16*31+kAuthorityCharacterBatch*46<=MaxPacket);
 constexpr auto Timeout=std::chrono::seconds(15);
 constexpr auto StartupTimeout=std::chrono::seconds(180);
@@ -36,7 +36,7 @@ constexpr auto TransferTimeout=std::chrono::seconds(120);
 enum class Wire:uint8_t {Hello=1,Welcome,Profile,Snapshot,Start,Input,Frame,Ping,Pong,ProfileReply,WorldReady,Activate,
     CheckpointBegin,CheckpointChunk,CheckpointEnd,CheckpointProgress,CheckpointInstalled,CheckpointReady,CheckpointAck,
     BootstrapWorldReady,BootstrapBegin,BootstrapPad,BootstrapFrame,BootstrapComplete,BootstrapContinue,BootstrapActivate,GameplayComplete,GameplayVerified,ChatRequest,ChatMessage,VoiceRequest,VoiceOffer,LoadVote,LoadAgreed,ReloadVote,ReloadBegin,Kicked,Rejected,
-    RollbackOffer,RollbackStateBegin,RollbackStateChunk,RollbackStateEnd,RollbackStateReceived,RollbackInputs,AuthorityState,AuthorityApplied};
+    RollbackOffer,RollbackStateBegin,RollbackStateChunk,RollbackStateEnd,RollbackStateReceived,RollbackInputs,AuthorityState,AuthorityApplied,AuthorityLoad};
 bool Winsock(){
     struct Startup {bool ok=false;Startup(){WSADATA data{};ok=WSAStartup(MAKEWORD(2,2),&data)==0;}~Startup(){if(ok)WSACleanup();}};
     static Startup startup;return startup.ok;
@@ -309,6 +309,7 @@ struct Room::Impl {
     uint8_t gameplay_window=1;
     RoomHistory gameplay_history;
     RoomLoadExchange loads;
+    std::optional<LoadPoint> authority_load;
     std::array<std::optional<Hash>,kOnlineRoomCapacity> reload_worlds;
     std::optional<Hash> reload_local;
     std::optional<LoadPoint> reload_end;
@@ -416,7 +417,7 @@ struct Room::Impl {
     void BeginRaw(){state=RoomState::Bootstrapping;ResetRawRound(id.first_tick);}
     bool BeginRunning(Clock::time_point now,uint64_t first){
         if(!local_world || !gameplay_history.Reset({id,*local_world,lobby.revision,first,PlayerMask(),host_correction})){Fail("Could not establish native gameplay input history scope");return false;}
-        state=RoomState::Running;submit_next=first+id.input_delay;frame_next=consume_next=first;loads=RoomLoadExchange{};
+        state=RoomState::Running;submit_next=first+id.input_delay;frame_next=consume_next=first;loads=RoomLoadExchange{};authority_load.reset();
         raw_pads={};raw_proofs={};raw_frame.reset();local_proof.reset();local_raw_pad.reset();raw_consumed=false;
         progress=now;gameplay_tick=first;gameplay_exhausted=false;
         gameplay_pending.reset();gameplay_verified.reset();gameplay_rounds.clear();gameplay_proof_next.fill(first);gameplay_proof_exhausted={};Close(listener);
@@ -494,6 +495,10 @@ struct Room::Impl {
     }
     bool AcceptLoad(uint64_t sender,const LoadPoint& point,Clock::time_point now){
         if(!loads.Add(sender,PlayerMask(),point,now))return false;
+        if(host_correction && sender==1 && point.phase==LoadPhase::Begin && !authority_load){
+            authority_load=point;
+            if(!Broadcast(LoadPacket(Wire::AuthorityLoad,point)))return false;
+        }
         if(!loads.Complete())return true;
         // Publish agreement in the same TCP order as other authoritative
         // events. A guest cannot authorize its own loader advancement.
@@ -518,7 +523,7 @@ struct Room::Impl {
         inputs.clear();echoes.clear();frames.clear();submitted_jumps={};received_jumps={};
         submit_exhausted=frame_exhausted=consume_exhausted=false;
         gameplay_pending.reset();gameplay_rounds.clear();gameplay_history=RoomHistory{};
-        reload_worlds={};reload_local.reset();reload_end.reset();
+        reload_worlds={};reload_local.reset();reload_end.reset();authority_load.reset();
         loading_started=now;state=RoomState::Bootstrapping;ResetRawRound(end.tick+1);
         REXLOG_INFO("Room native world rebootstrap: cancelled unverified tick {}, raw first {}, load sequence {}",end.tick,end.tick+1,end.sequence);
         return true;
@@ -632,6 +637,14 @@ struct Room::Impl {
             if(checkpoint_mode){c.transfer=Connection::Transfer::Sending;c.transfer_progress=now;}return true;
         }
         if(!c.welcomed)return false;
+        if(kind==Wire::AuthorityLoad){
+            LoadPoint point;
+            if(host || c.peer!=1 || !host_correction || state!=RoomState::Running || !ReadLoad(r,point) ||
+               point.phase!=LoadPhase::Begin || authority_load || !loads.CanAnnounceRoot(point) || !gameplay_history.scope() ||
+               point.tick<gameplay_history.scope()->first_tick ||
+               (point.tick>consume_next && point.tick-consume_next>=gameplay_window))return false;
+            authority_load=point;return true;
+        }
         if(kind==Wire::AuthorityState){
             RoomAuthorityState incoming;
             if(host || c.peer!=1 || state!=RoomState::Running || !local_world || !ReadAuthorityState(r,incoming) ||
@@ -1275,6 +1288,7 @@ bool Room::SubmitLoadPoint(const LoadPoint& point){
     return p.Queue(*p.connections.front(),p.LoadPacket(Wire::LoadVote,point));
 }
 bool Room::LoadPointAgreed(const LoadPoint& point)const{return impl_->state==RoomState::Running && impl_->loads.Agreed(point);}
+bool Room::HostLoadAnnounced(uint64_t tick)const{const auto& p=*impl_;return !p.host && p.host_correction && p.state==RoomState::Running && p.authority_load && p.authority_load->tick==tick;}
 bool Room::RebootstrapLoadedWorld(const LoadPoint& end,const Hash& world){
     auto& p=*impl_;const auto now=Clock::now();
     if(!p.ReloadEligible(end) || p.gameplay_pending!=end.tick || !Nonzero(world) || p.reload_local || p.loads.Expired(now))return false;
@@ -2048,6 +2062,16 @@ bool TestOnlineRoom(){
     check(pump([&]{return rooms[0]->verified_gameplay_tick()==id.first_tick+8 && rooms[1]->verified_gameplay_tick()==id.first_tick+8;}),
         "delayed application acknowledgements drain the authority pipeline contiguously");
     fixture_verification_window=1;
+    if(!check(running() && take_fixture_tick(id.first_tick),"correction loader announcement fixture consumes a native tick"))return false;
+    LoadPoint announced;announced.tick=id.first_tick;announced.phase=LoadPhase::Begin;
+    std::copy_n("tcy_autotopia_visit1",19,announced.destination.begin());
+    check(!rooms[1]->HostLoadAnnounced(id.first_tick),"no correction load permission before a host announcement");
+    if(!check(rooms[0]->SubmitLoadPoint(announced) && pump([&]{return rooms[1]->HostLoadAnnounced(id.first_tick);}),"host outer-load announcement reaches a guest before its local loader vote"))return false;
+    check(!rooms[0]->HostLoadAnnounced(id.first_tick) && !rooms[1]->HostLoadAnnounced(id.first_tick+1) &&
+          !rooms[1]->LoadPointAgreed(announced) && rooms[1]->gameplay_completion_pending(),
+          "announcement is guest-only and tick-scoped; it grants no teardown agreement or completion proof");
+    check(rooms[1]->SubmitLoadPoint(announced) && pump([&]{return rooms[0]->LoadPointAgreed(announced) && rooms[1]->LoadPointAgreed(announced);}),
+          "both real loader votes are still required after announcement");
     fixture_host_correction=false;
 
     if(!check(setup(2),"unsolicited WorldReady fixture connects lobby"))return false;

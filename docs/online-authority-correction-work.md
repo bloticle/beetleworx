@@ -288,3 +288,54 @@ records native fatal damage on both peers, original GameOver and native respawn,
 followed by movement of both characters. A later fall caused another natural
 reload without stopping the connection. Host-only death and all other scripted
 events remain unverified. Broader world authority and reconnect remain open.
+
+## Corrected death timing (wire 13)
+
+The demo-12 executable failed host-only fatal damage. Health reached zero on the
+guest after update 180, so its original GameOver began at 181 while the host
+began at 180. The exact terminal input boundary disconnected them. Allowing a
+single extra terminal prefix update only moved the failure to native reload;
+replaying native Damage after the guest update also retained the one-step skew.
+Those failed candidates were not published. Their results are in the
+`host-only-fatal-result.json` files in these private pair captures:
+
+- `analysis/private-native-room-pair-20261115-070726-89053a31`
+- `analysis/private-native-room-pair-20261115-071244-08c11f0f`
+- `analysis/private-native-room-pair-20261115-071658-da4d9ebf`
+
+The replacement retains the exact terminal input checks. A correction guest
+receives the matching host result before its original native update, replays a
+living player's authoritative zero through the retail Damage-export sequence,
+then executes its native update. Position/velocity and other health corrections
+still finish after that update. Receiving a result does not acknowledge or
+fabricate native completion: the real local diagnostic remains separate and the
+application acknowledgement follows original post-update completion.
+
+Host loads cannot produce a completed old-world snapshot. Wire 13 therefore
+adds a host-only, world/roster/tick/sequence-scoped outer-load notice. It lets a
+waiting guest enter the matching native update, with no loader vote, teardown
+agreement or invented completion. Both peers must still enter and agree the
+actual native loader barriers. The new path passes 9,059 Room TCP checks.
+
+`analysis/private-native-room-pair-20261115-072438-a7462f28/host-only-fatal-result.json`
+records the successful native check with executable SHA256
+`654E934975DDE686804C7ECA04DED50C749AF46271894AEBC09CDDF6E1EB5726`.
+Only the host ran the fatal-damage fixture. The guest applied native death before
+update 180; both entered GameOver at 180 and rebootstrap at cancelled tick 241,
+raw first 242. Both characters moved independently after respawn; updates
+continued past 1,600 with no gameplay stop and no missing/inactive world proxies
+in the final sampled correction reports. Owned processes exited normally and
+normal user files were unchanged.
+
+The lethal correction uses the retail export's generic physical damage stimulus,
+not the host's full original damage cause, instigator or event payload. General
+combat-event replication and client-only false-death recovery remain unfinished.
+This does not establish full campaign synchronization or rollback.
+
+The same executable also passed native CleanLoadLevel to Mean Street in
+`analysis/private-native-room-pair-20261115-072703-cfb6e396/authority-level-result.json`.
+Both rebootstrap at raw tick 181. Input at 1177..1370 did not move the actors;
+after the entry sequence progressed, independent input at 4149..4338 moved both.
+There was no gameplay stop before owned shutdown. The guest logged a cancelled
+host-state wait 14 ms after Window closing; this remains noisy shutdown reporting,
+not a crash or a successful reconnect. Normal user files were unchanged.

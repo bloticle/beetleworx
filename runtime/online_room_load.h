@@ -31,6 +31,8 @@ public:
         mask_=roster;pending_=p;votes_|=bit;return true;
     }
     bool Complete()const{return pending_ && votes_==mask_;}
+    bool CanAnnounceRoot(const LoadPoint& p)const{return !exhausted_ && !failed_ && !depth_ &&
+        p.phase==LoadPhase::Begin && p.sequence==next_ && (!pending_ || *pending_==p) && (!last_ || p.tick>=last_->tick);}
     uint16_t voters()const{return votes_;}
     bool Commit(const LoadPoint& p,bool authority){
         if(!pending_ || *pending_!=p || (authority && !Complete()))return false;

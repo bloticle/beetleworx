@@ -183,6 +183,10 @@ public:
     // then Poll until LoadPointAgreed; repeating an agreed local point is safe.
     bool SubmitLoadPoint(const LoadPoint&);
     bool LoadPointAgreed(const LoadPoint&)const;
+    // Host announced the outer native load at this consumed tick. This only
+    // permits a correction client to enter its native update; it does not vote,
+    // authorize teardown, invent a completion or bypass loader agreement.
+    bool HostLoadAnnounced(uint64_t tick)const;
     // After the agreed successful outer End and the original native finish.
     // Discards the unverified transition tick and future input only after all
     // frozen peers assert the same loaded world; resumes raw native admission.

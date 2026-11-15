@@ -221,6 +221,7 @@ struct NativeRoomGameplay::Impl {
     uint64_t button_frames=0;
     std::optional<uint64_t> submitted;
     std::optional<RoomFrame> prepared,consumed;
+    std::optional<RoomAuthorityState> pending_authority;
     bool stopped=false,pending=false,delivered=false,started=false,ready_logged=false;
     bool authority_drift_injected=false;
     bool authority_world_drift_injected=false;
@@ -849,6 +850,34 @@ bool NativeRoomGameplay::Deliver(PPCContext& ctx,uint8_t* base){
     if(!s.Owner() || s.stopped || !s.pending || s.delivered || !s.consumed ||
         !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed)return false;
     if(const auto reason=s.WorldFailure(base))return s.Stop(std::string("Native world changed before input delivery: ")+reason);
+    const auto stage_authority=[&]{
+        if(s.peer==1 || !s.room->host_correction_mode())return true;
+        // Receive the host result before the guest native update. Lethal state
+        // applied only after the update shifts death/reload by one simulation
+        // step even when the original Damage listeners are used.
+        const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+        while(!s.pending_authority && s.room->state()==RoomState::Running &&
+              std::chrono::steady_clock::now()<until && !NativeRoomLoadsCancelled()){
+            UpdateNativeRoomSession(base,false);s.pending_authority=s.room->TakeAuthorityState();
+            if(!s.pending_authority && s.room->HostLoadAnnounced(tick))return true;
+            if(!s.pending_authority)std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if(!s.pending_authority || s.pending_authority->tick!=tick)return s.Stop("Host update result did not arrive before matching native guest update");
+        std::vector<OnlineNameActor> actors;uint64_t local=0;
+        if(!NameTagActors(actors,local,base) || actors.size()!=s.pending_authority->actors.size())return s.Stop("Host pre-update death correction lost native roster ownership");
+        for(const auto& sample:s.pending_authority->actors){
+            if(!sample.health || *sample.health!=0)continue;
+            const auto actor=std::find_if(actors.begin(),actors.end(),[&](const auto& value){return value.peer==sample.peer;});
+            if(actor==actors.end())return s.Stop("Host pre-update death correction has no native actor");
+            const auto health=em2::ReadNativeActorHealth(ctx,base,actor->entity);
+            if(!health)return s.Stop("Host pre-update death correction could not inspect native health");
+            if(*health>0){
+                if(!em2::CorrectNativeActorHealth(ctx,base,actor->entity,0))return s.Stop("Host pre-update native death correction failed");
+                REXLOG_INFO("Native host death applied before guest update: tick {}, peer {}; original Damage listeners",tick,sample.peer);
+            }
+        }
+        return true;
+    };
     if(s.game_over_entry || s.consumed_passive){
         if(s.game_over_entry?!s.GameOverFrame(*s.consumed,ctx,base):!s.CutsceneFrame(*s.consumed,ctx,base))return s.Stop("Native no-gameplay input phase changed before native update");
         if(!BeginRetailPassiveTick(s.registry,tick,ctx,base))return s.Stop("Could not retain retail quarantine for native passive input phase");
@@ -867,7 +896,7 @@ bool NativeRoomGameplay::Deliver(PPCContext& ctx,uint8_t* base){
         s.delivered=true;
         if(s.skip_target_mode==1 && s.skip_receiver && !ServiceNativeDirectMovieSkip(s.registry,ctx,base))
             return s.Stop("Native direct movie held-skip completion lost its agreed owner");
-        return true; // Character gameplay callbacks remain quarantined.
+        return stage_authority(); // Character gameplay callbacks remain quarantined.
     }
     if(!s.Actions(*s.consumed,ctx,base))return s.Stop("Native retail action bindings changed before delivery");
     if(!s.ButtonFrame(*s.consumed,ctx,base))return s.Stop("Native retail button frame failed delivery admission");
@@ -894,7 +923,7 @@ bool NativeRoomGameplay::Deliver(PPCContext& ctx,uint8_t* base){
         REXLOG_INFO("Private native Room partial delivery injected: tick {}; original actor/retail inputs delivered, native update not entered",tick);
         return s.Stop("Private native Room partial-delivery fault injection");
     }
-    s.delivered=true;return true;
+    s.delivered=true;return stage_authority();
 }
 bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContext& ctx,uint8_t* base){
     Environment environment;Context context(ctx);auto& s=*impl_;Impl::FaultOnThrow fault{s};uint64_t tick=0;
@@ -983,7 +1012,7 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
         // Do not apply a packet from an earlier/later update to the current
         // physics world. The host may pipeline later results within negotiated
         // credit; the client applies only this exact update's result.
-        std::optional<RoomAuthorityState> state;
+        std::optional<RoomAuthorityState> state=std::move(s.pending_authority);s.pending_authority.reset();
         const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(10);
         while(s.room->state()==RoomState::Running && !state && std::chrono::steady_clock::now()<until && !NativeRoomLoadsCancelled()){
             UpdateNativeRoomSession(base,false);state=s.room->TakeAuthorityState();
