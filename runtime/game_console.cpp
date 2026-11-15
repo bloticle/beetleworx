@@ -445,10 +445,19 @@ std::string em2::QueueGameLua(std::string_view source,bool needs_world){
  work_pending.store(true,std::memory_order_release);
  return "Queued Lua for the next protected game-VM boundary. Results/errors appear in Output.";
 }
+std::string_view em2::RetailLevelEntry(std::string_view state){
+ // Retail master.lvlc: main omits rbc_falls.entrance and visit-1 zones.
+ // Its start markers have no supporting floor until that authored entry loads.
+ return state=="rbc_falls.main"?std::string_view("rbc_falls.entrancev1"):state;
+}
 std::string em2::QueueRetailLevelLoad(std::string_view state,bool needs_world){
  const auto name=Level(state);if(!name)return "Unknown retail level state. Use levels [search]; names are validated against the 205-state database.";
  const bool zone_only=std::find(std::begin(kNativeZoneOnlyLevelStates),std::end(kNativeZoneOnlyLevelStates),*name)!=std::end(kNativeZoneOnlyLevelStates);
- if(!zone_only)return QueueGameLua("CleanLoadLevel("+Quote(*name)+")",needs_world);
+ if(!zone_only){
+  const auto entry=RetailLevelEntry(*name);auto response=QueueGameLua("CleanLoadLevel("+Quote(entry)+")",needs_world);
+  if(entry!=*name && response.starts_with("Queued Lua"))response+=" Entry: "+std::string(entry)+".";
+  return response;
+ }
  // Check the ACTUAL native level in the protected VM, not thread-local loader
  // diagnostics on the UI thread. The normal queue also fences world changes.
  // CleanLoadLevel would discard the geometry this incremental state needs.
@@ -618,6 +627,9 @@ bool em2::TestGameplayConsole(){
  if(ExecuteGameplayConsoleTool({"unrelated"}) || !ExecuteGameplayConsoleTool({"give","tickets","nan"}) || !ExecuteGameplayConsoleTool({"level.load","bad"}))return false;
  const auto choices=GameplayConsoleCompletions({"level.load"});if(!choices || choices->size()!=205)return false;
  if(PendingGameLua()!=0)return false;
+ if(!QueueRetailLevelLoad("rbc_falls.main",false).starts_with("Queued Lua") || requests.size()!=1 ||
+    requests.back().source!="CleanLoadLevel(\"rbc_falls.entrancev1\")" || CancelQueuedGameLua()!=1)return false;
+ for(const auto state:kNativeLevelStates)if(state!="rbc_falls.main" && RetailLevelEntry(state)!=state)return false;
  for(unsigned i=0;i<8;++i)if(!QueueGameLua("return 1").starts_with("Queued Lua"))return false;
  if(QueueGameLua("return 2").find("full")==std::string::npos || CancelQueuedGameLua()!=8 || PendingGameLua()!=0)return false;
  auto* base=static_cast<uint8_t*>(VirtualAlloc(nullptr,0x100000000ull,MEM_RESERVE,PAGE_READWRITE));if(!base)return false;

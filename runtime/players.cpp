@@ -1476,6 +1476,7 @@ bool em2::TestNativePlayerActions() {
        !VirtualAlloc(base+0x82000000,0x10000,MEM_COMMIT,PAGE_READWRITE) ||
        !VirtualAlloc(base+0x82030000,0x10000,MEM_COMMIT,PAGE_READWRITE) ||
        !VirtualAlloc(base+0x82070000,0x10000,MEM_COMMIT,PAGE_READWRITE) ||
+       !VirtualAlloc(base+0x82110000,0x10000,MEM_COMMIT,PAGE_READWRITE) ||
        !VirtualAlloc(base+0x82120000,0x10000,MEM_COMMIT,PAGE_READWRITE) ||
        !VirtualAlloc(base+0x82200000,0x10000,MEM_COMMIT,PAGE_READWRITE) ||
        !VirtualAlloc(base+0x833D0000,0x10000,MEM_COMMIT,PAGE_READWRITE) ||
@@ -1558,6 +1559,10 @@ bool em2::TestNativePlayerActions() {
             !JoinedHumanPlayer(true,2,{1,0,1},{entity,0,1}),
             "controller activation requires a successful native AI-to-human co-op join")) return false;
         auto setup=[&] {
+            // Each case starts with only the normal fixed mode installed.
+            // An authored-mode case otherwise leaves snapshot in +396,
+            // accidentally giving later pool cases a valid fixed-slot owner.
+            std::memset(base+camera+392,0,44);
             PPC_STORE_U32(0x833DAB60,manager);PPC_STORE_U32(0x833DC87C,profile);
             PPC_STORE_U32(profile+24,2);PPC_STORE_U32(manager+20,0x11);
             PPC_STORE_U32(manager+28,camera);PPC_STORE_U32(manager+32,0);

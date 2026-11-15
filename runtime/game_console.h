@@ -13,6 +13,9 @@ void TickPrivateNativeRestart(PPCContext&,uint8_t* base);
 // Explicit private serialization probe only, after original scheduler return.
 void RunPrivateScriptPersistenceBoundary(PPCContext&,uint8_t* base);
 std::string QueueGameLua(std::string_view source,bool needs_world=false);
+// User-facing standalone entry for a known retail state. Raw Lua state APIs
+// remain available for intentionally applying internal base/streaming states.
+std::string_view RetailLevelEntry(std::string_view state);
 std::string QueueRetailLevelLoad(std::string_view state,bool needs_world=true);
 std::optional<std::string> GameLuaConsoleSource(std::string_view line);
 unsigned CancelQueuedGameLua();

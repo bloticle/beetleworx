@@ -101,19 +101,22 @@ void DrawDebugLevelBrowser(){
   if(ImGui::BeginListBox("##all-levels",ImVec2(-1,std::max(100.f,ImGui::GetContentRegionAvail().y-115.f)))){
     ImGuiListClipper clipper;clipper.Begin(int(shown.size()));
     while(clipper.Step())for(int row=clipper.DisplayStart;row<clipper.DisplayEnd;++row){const auto& c=choices[shown[size_t(row)]];
-      const auto label=std::string(c.em1?"EM1  ":"EM2  ")+c.name+(c.zone_only?"  [zone state]":"");
+      const auto label=std::string(c.em1?"EM1  ":"EM2  ")+c.name+(c.zone_only?"  [zone state]":"")+
+        (!c.em1 && RetailLevelEntry(c.destination)!=c.destination?"  [entrancev1]":"");
       if(ImGui::Selectable(label.c_str(),selected==c.destination,ImGuiSelectableFlags_AllowDoubleClick)){selected=c.destination;if(ImGui::IsMouseDoubleClicked(0))load=true;}
     }ImGui::EndListBox();
   }
   bool busy;std::string status;{std::lock_guard lock(request_mutex);busy=preparing||pending.has_value();status=last_status;}
   const auto selected_choice=std::find_if(choices.begin(),choices.end(),[&](const auto& c){return c.destination==selected;});
   const bool zone_only=selected_choice!=choices.end() && selected_choice->zone_only;
+  const bool entrance=selected_choice!=choices.end() && !selected_choice->em1 && RetailLevelEntry(selected)!=selected;
   ImGui::BeginDisabled(selected.empty() || busy || net::SynchronizedSessionActive());
-  load|=ImGui::Button(zone_only?"Apply zone state":"Play selected level");ImGui::EndDisabled();
+  load|=ImGui::Button(zone_only?"Apply zone state":entrance?"Play entrance (visit 1)":"Play selected level");ImGui::EndDisabled();
   if(load && !selected.empty()){const auto result=QueueDebugLevelLoad(selected);EngineConsoleMessage(result);}
   ImGui::SameLine();if(ImGui::Button("Restart current level"))ExecuteEngineConsole("level.restart");
   if(selected.starts_with("em1:"))ImGui::TextDisabled("EM1 compatibility is in development. Assets are prepared when selected.");
   if(zone_only)ImGui::TextWrapped("This state changes existing zones. Load a full state of the same level first; applying it will keep the current level loaded.");
+  if(entrance)ImGui::TextWrapped("Rainbow Falls main loads base zones. Standalone play starts through the original entrancev1 state.");
   if(!status.empty())ImGui::TextWrapped("%s",status.c_str());
 }
 bool TestDebugLevelCatalog(){

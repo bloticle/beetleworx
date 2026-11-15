@@ -89,3 +89,33 @@ with normal user saves/settings unchanged. This establishes this three-player
 route, not sixteen native clients, arbitrary levels/latency, full campaign
 combat/quest synchronization, prediction, rollback or reconnect. Public demo.15
 is unchanged; general world-authority adapters remain private/default-off.
+
+## Four native worlds and Rainbow Falls entry
+
+The four-world transition route at
+`analysis/private-native-room-roster-20261115-162805-d9c79c63` admitted Gulch,
+Autotopia and Mean Street North visit 2. Loading `rbc_falls.main` next did not
+admit the extra actors: the original start markers have no supporting floor in
+that base-zone state. A clean-load comparison reproduced the problem. This was
+not a stale Mean Street spawn transform.
+
+The original `levels/master.lvlc` shows that `rbc_falls.entrancev1` also loads
+`entrance`, `rbfvisit1` and the visit-1 enemies. The standalone level browser and
+validated `level` command now resolve Rainbow Falls Main through that original
+entrance. Raw Lua level APIs still permit exact internal states. Other catalog
+destinations remain unchanged.
+
+Four actual native worlds using the full private authority preset and mixed
+characters entered that state in roster
+`analysis/private-native-room-roster-20261115-164647-36371199`. The intro briefly
+had no live character hull; admission waited rather than manufacturing one.
+All four produced their first v7 observation at tick 714 with digest
+`1c1debaa8817a3d6d2e2b658630ccde42b05f2705acd7ab339a446797385fd76`.
+At tick 6000 all four still agreed on
+`a95a8573918fc350173b9247b41ab481c47f210c6c30e9555823bd33f67584e3`.
+The first intentional window close was 16:52:18.137 UTC; the recorded socket
+stops occurred afterwards, beginning 16:52:18.328 UTC. All processes exited 0
+and normal user files remained unchanged. `entrance-evidence.json` preserves
+the exact observations, stop messages and completion records. This is entry
+and sustained synchronization evidence, not completion of Rainbow Falls or
+sixteen-player campaign acceptance.
