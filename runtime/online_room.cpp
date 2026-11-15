@@ -29,11 +29,11 @@ using Clock=std::chrono::steady_clock;
 using Bytes=std::vector<uint8_t>;
 constexpr size_t Window=64,MaxPacket=8192,MaxQueued=2*1024*1024;
 constexpr size_t MaxAuthorityPacket=1024*1024;
-constexpr uint8_t WireVersion=21;
+constexpr uint8_t WireVersion=22;
 static_assert(100+16*31+kAuthorityCharacterBatch*46<=MaxPacket);
 constexpr size_t MaxEncodedDamage=6+16+16+2+32+1+kMaxDamageStimuli*12+2+2+kMaxDamageShapeKeys*4+3+kMaxDamageTag;
 static_assert(MaxEncodedDamage<=kMaxDamageEventBytes);
-static_assert(100+16*38+kAuthorityCharacterBatch*46+kAuthorityDamageBatch*(2+MaxEncodedDamage)+2+kAuthorityAiDecisionBatch*39+2+kAuthoritySpawnBatch*(2+kMaxSpawnBatchBytes)<=MaxAuthorityPacket);
+static_assert(100+16*38+kAuthorityCharacterBatch*46+kAuthorityDamageBatch*(2+MaxEncodedDamage)+2+kAuthorityAiDecisionBatch*39+2+kAuthoritySpawnBatch*(2+kMaxSpawnBatchBytes)+2+kAuthorityImpactBatch*(2+kMaxImpactBytes)<=MaxAuthorityPacket);
 static_assert(MaxAuthorityPacket+16*4096<=MaxQueued); // One incomplete frame plus the bounded Poll read burst.
 constexpr auto Timeout=std::chrono::seconds(15);
 constexpr auto StartupTimeout=std::chrono::seconds(180);
@@ -91,6 +91,8 @@ bool ValidAuthorityActors(const RoomAuthorityState& state){
         for(auto peer:{batch.owner.peer,batch.anchor.peer})if(peer && !(state.players_mask&(1u<<(peer-1))))return false;
         for(const auto& child:batch.children)if(!births.insert(child.entity).second)return false;
     }
+    if(state.projectile_impacts.size()>kAuthorityImpactBatch)return false;
+    for(const auto& impact:state.projectile_impacts){if(!ValidProjectileImpact(impact))return false;for(const auto& clone:impact.clones)if(!births.insert(clone.entity).second)return false;}
     return state.damages.size()<=kAuthorityDamageBatch &&
         std::all_of(state.damages.begin(),state.damages.end(),[&](const auto& damage){
             if(!ValidDamageEvent(damage))return false;
@@ -118,6 +120,8 @@ void WriteAuthorityState(Bytes& bytes,const RoomAuthorityState& state){
     }
     U64(bytes,state.spawn_batches.size(),2);
     for(const auto& batch:state.spawn_batches){const auto encoded=EncodeSpawnBatch(batch);U64(bytes,encoded.size(),2);bytes.insert(bytes.end(),encoded.begin(),encoded.end());}
+    U64(bytes,state.projectile_impacts.size(),2);
+    for(const auto& impact:state.projectile_impacts){const auto encoded=EncodeProjectileImpact(impact);U64(bytes,encoded.size(),2);bytes.insert(bytes.end(),encoded.begin(),encoded.end());}
 }
 bool ReadAuthorityState(Reader& reader,RoomAuthorityState& state){
     state.tick=reader.Number(8);state.roster_revision=reader.Number(8);for(auto& byte:state.world)byte=reader.Byte();
@@ -149,6 +153,12 @@ bool ReadAuthorityState(Reader& reader,RoomAuthorityState& state){
         if(!reader.good || !length || length>kMaxSpawnBatchBytes || length>reader.bytes.size()-reader.at)return false;
         SpawnBatch batch;if(!DecodeSpawnBatch(reader.bytes.subspan(reader.at,size_t(length)),batch))return false;
         reader.at+=size_t(length);state.spawn_batches.push_back(std::move(batch));
+    }
+    const auto impacts=reader.Number(2);if(!reader.good || impacts>kAuthorityImpactBatch)return false;
+    for(unsigned i=0;i<impacts;++i){const auto length=reader.Number(2);
+        if(!reader.good || !length || length>kMaxImpactBytes || length>reader.bytes.size()-reader.at)return false;
+        ProjectileImpact impact;if(!DecodeProjectileImpact(reader.bytes.subspan(reader.at,size_t(length)),impact))return false;
+        reader.at+=size_t(length);state.projectile_impacts.push_back(std::move(impact));
     }
     return reader.Done() && ValidAuthorityActors(state);
 }
@@ -1648,6 +1658,7 @@ bool TestOnlineRoomLoads(){
 }
 
 bool TestOnlineRoom(){
+    if(!TestProjectileImpactCodec())return false;
     if(!TestSpawnBatchCodec())return false;
     if(!TestOnlineRoomLoads())return false;
     if(!TestOnlineRoomHistory())return false;
@@ -2139,7 +2150,7 @@ bool TestOnlineRoom(){
     for(unsigned i=0;i<kAuthorityAiDecisionBatch;++i)event_state.ai_decisions.push_back({{i+1,8,7,6},{9,8,7,6},0,true,true,4096});
     event_state.ai_decisions[0].target={};event_state.ai_decisions[0].target_peer=1;
     for(unsigned field:{33u,34u}){
-        Bytes bad;WriteAuthorityState(bad,event_state);bad[bad.size()-41+field]=2;
+        Bytes bad;WriteAuthorityState(bad,event_state);bad[bad.size()-43+field]=2;
         Reader reader{bad};RoomAuthorityState decoded;
         check(!ReadAuthorityState(reader,decoded),"non-boolean native AI command flags rejected on wire");
     }
@@ -2150,7 +2161,11 @@ bool TestOnlineRoom(){
         for(unsigned child=0;child<kMaxSpawnChildren;++child)batch.children.push_back({{0x69771,0,0,0},{i+1,child+1,0x1234,0x5678},{0,child,1}});
         batch.result=batch.children.back().entity;event_state.spawn_batches.push_back(std::move(batch));
     }
-    for(unsigned mutation=0;mutation<13;++mutation){auto bad=event_state;
+    for(unsigned i=0;i<kAuthorityImpactBatch;++i){ProjectileImpact impact;impact.projectile={i+1,2,3,4};impact.position={0x80000000,0x3f800001,0};impact.queued=true;
+        for(unsigned j=0;j<kMaxImpactClones;++j)impact.clones.push_back({{0x1300dc,0,0,0},{i+1,j+1,0x2234,0x5678},{1,1},i,j});
+        event_state.projectile_impacts.push_back(std::move(impact));
+    }
+    for(unsigned mutation=0;mutation<17;++mutation){auto bad=event_state;
         if(mutation==0)bad.damages.push_back(large_event);
         if(mutation==1)bad.damages.front().stimuli.front().effective_bits=0x7fc00000;
         if(mutation==2){bad.damages.front().target={};bad.damages.front().target_peer=0;}
@@ -2164,6 +2179,10 @@ bool TestOnlineRoom(){
         if(mutation==10)bad.spawn_batches.front().children.front().prototype={};
         if(mutation==11)bad.spawn_batches.back().children.front().entity=bad.spawn_batches.front().children.front().entity;
         if(mutation==12)bad.spawn_batches.front().result={999,0,0,0};
+        if(mutation==13)bad.projectile_impacts.push_back(event_state.projectile_impacts.front());
+        if(mutation==14)bad.projectile_impacts.front().position[0]=0x7fc00000;
+        if(mutation==15)bad.projectile_impacts.front().projectile={};
+        if(mutation==16)bad.projectile_impacts.front().clones.front().entity=bad.spawn_batches.front().children.front().entity;
         check(rooms[0]->TryPublishAuthorityState(bad)==AuthorityPublishResult::Rejected && !rooms[0]->impl_->authority_sent,
             "invalid or oversized damage batches do not consume publication order");
     }

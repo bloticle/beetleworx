@@ -10,6 +10,7 @@ struct OwnedActorInput;
 class RoomBootstrapGate;
 class NativeRoomActors;
 enum class RoomGameplayAdmission {Inactive,Waiting,Ready,Stopped,WrongThread};
+enum class NativeImpactMode {Original,Host,Suppress};
 // Two retail humans plus native world-owned extra humans. Owns no
 // transport/controls/RNG lease: the retained
 // native Room and its raw gate outlive this adapter through gameplay cutover.
@@ -73,6 +74,8 @@ public:
     // audited caller, without entering the native parent or changing counters.
     bool SuppressSpawnBatch(const PPCContext&,uint8_t*,unsigned depth);
     bool PrepareSpawnReplay(PPCContext&,uint8_t*,unsigned depth);
+    NativeImpactMode ProjectileImpactMode(const SpawnId&,uint32_t caller);
+    bool RecordProjectileImpact(ProjectileImpact);
     bool passive_input_pending()const;
     uint64_t committed_tick()const;
     // Owner-thread read only, outside the native update. Eligibility proves
@@ -85,6 +88,7 @@ public:
     const std::string& error()const;
 private:
     bool ReplayMissingSpawns(PPCContext&,uint8_t*);
+    bool ReplayProjectileImpacts(PPCContext&,uint8_t*);
     bool RearmInputContext(uint64_t source_tick,PPCContext&,uint8_t*);
     struct Impl;
     std::unique_ptr<Impl> impl_;

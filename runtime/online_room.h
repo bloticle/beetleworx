@@ -5,6 +5,7 @@
 #include "online_rollback.h"
 #include "online_damage_event.h"
 #include "online_spawn_batch.h"
+#include "online_projectile_impact.h"
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -58,6 +59,7 @@ struct RoomAuthorityState {
     std::vector<DamageEvent> damages;
     std::vector<RoomAiTargetDecision> ai_decisions;
     std::vector<SpawnBatch> spawn_batches;
+    std::vector<ProjectileImpact> projectile_impacts;
     bool operator==(const RoomAuthorityState&)const=default;
 };
 struct RoomRollbackCommands {

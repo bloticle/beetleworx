@@ -34,4 +34,5 @@ bool TestNativeRandom();
 // Initialized native owner PTD only. Uses the original srand and verifies the
 // owner and resulting state; preserves the caller's complete PPC context.
 bool SeedNativeSpawnReplay(PPCContext&,uint8_t*,uint32_t seed);
+bool ReadNativeSpawnRandom(PPCContext&,uint8_t*,uint32_t& state);
 }

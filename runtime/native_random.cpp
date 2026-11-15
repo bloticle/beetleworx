@@ -353,6 +353,11 @@ bool em2::SeedNativeSpawnReplay(PPCContext& ctx,uint8_t* base,uint32_t seed){
     {GuestReadBatch::CallbackBoundary boundary;__imp__sub_82B6DD98(ctx,base);}
     return ReadRandomOwner(ctx,base,after) && before==after && PPC_LOAD_U32(after.ptd+20)==seed;
 }
+bool em2::ReadNativeSpawnRandom(PPCContext& ctx,uint8_t* base,uint32_t& state){
+    RandomHost preserve(ctx);GuestReadBatch reads;RandomOwner owner;
+    if(online_seed.pending || world_seed.pending || !ReadRandomOwner(ctx,base,owner))return false;
+    state=PPC_LOAD_U32(owner.ptd+20);return true;
+}
 struct em2::NativeRandomCheckpoint::Impl {
     uint8_t* base=nullptr;uint64_t epoch=0;uint32_t thread=0,state=0,visual=0;
     RandomOwner owner;bool initialized=false,isolate=false,fixture=false;

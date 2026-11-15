@@ -33,6 +33,7 @@
 #include "native_damage_event.h"
 #include "native_component_schema.h"
 #include "native_random.h"
+#include "native_projectile_impact.h"
 #include <rex/logging.h>
 #include <rex/input/input_system.h>
 #include <windows.h>
@@ -45,6 +46,7 @@
 #include <optional>
 #include <exception>
 #include <vector>
+#include <set>
 #include <rex/cvar.h>
 REXCVAR_DECLARE(bool,em2_private_profile);
 REXCVAR_DEFINE_BOOL(em2_probe_room_authority_state,false,"Debug","Private native Room: publish real completed player positions/velocities over the host-state channel; does not apply corrections or disable proofs");
@@ -55,7 +57,8 @@ REXCVAR_DEFINE_BOOL(em2_probe_room_ai_targets,false,"Debug","Private native Room
 REXCVAR_DEFINE_BOOL(em2_probe_room_ai_target_drift,false,"Debug","Private AI authority fixture: only the host requests Mickey as an NPC target during ticks 120-179");
 REXCVAR_DEFINE_BOOL(em2_probe_room_spawn_batches,false,"Debug","Private native Room: transport and compare complete native spawner batches; no spawn replay or suppression");
 REXCVAR_DEFINE_BOOL(em2_probe_room_spawn_eligibility,false,"Debug","Private spawn authority: suppress guest-only operations at the audited null-safe projectile caller; requires batch capture");
-REXCVAR_DEFINE_BOOL(em2_probe_room_spawn_replay,false,"Debug","Private spawn authority: replay missing Shooter bursts through original native firing and ownership setup; requires batch capture and eligibility");
+REXCVAR_DEFINE_BOOL(em2_probe_room_spawn_replay,false,"Debug","Private spawn authority: replay missing Shooter preparation and pending-shot setup; requires batch capture and eligibility");
+REXCVAR_DEFINE_BOOL(em2_probe_room_projectile_impacts,false,"Debug","Private authority: host-owned impact/retirement and native FX replay for captured Shooter projectiles");
 PPC_EXTERN_FUNC(__imp__sub_828B92A8);
 PPC_EXTERN_FUNC(__imp__sub_827F2FA8);
 REXCVAR_DECLARE(bool,em2_profile_world_memory);
@@ -239,6 +242,10 @@ struct NativeRoomGameplay::Impl {
     std::vector<RoomAiTargetDecision> ai_decisions;
     std::vector<SpawnBatch> spawn_batches;
     bool spawn_replaying=false;
+    std::vector<ProjectileImpact> projectile_impacts;
+    std::set<SpawnId> owned_projectiles;
+    uint64_t projectile_load=0;
+    bool impacts_applied=false;
     size_t ai_cursor=0;
     bool stopped=false,pending=false,delivered=false,started=false,ready_logged=false;
     bool authority_drift_injected=false;
@@ -881,7 +888,7 @@ bool NativeRoomGameplay::Commit(const RoomFrame& frame,PPCContext& ctx,uint8_t* 
     if(!s.started)REXLOG_INFO("Native Room gameplay first frame consumed: tick {}, delay {}, physical source {}, native slot {}; native update and world verification still required",
         frame.tick,s.identity.input_delay,s.physical,s.slot);
     s.consumed_passive=s.prepared_passive;s.prepared_passive=false;
-    s.committed=frame.tick;s.consumed=frame;s.pending=true;s.delivered=false;s.started=true;s.prepared.reset();s.submitted.reset();s.damage_events.clear();s.ai_decisions.clear();s.spawn_batches.clear();s.ai_cursor=0;return true;
+    s.committed=frame.tick;s.consumed=frame;s.pending=true;s.delivered=false;s.started=true;s.prepared.reset();s.submitted.reset();s.damage_events.clear();s.ai_decisions.clear();s.spawn_batches.clear();s.projectile_impacts.clear();s.impacts_applied=false;s.ai_cursor=0;return true;
 }
 bool NativeRoomGameplay::Deliver(PPCContext& ctx,uint8_t* base){
     Environment environment;Context context(ctx);auto& s=*impl_;Impl::FaultOnThrow fault{s};uint64_t tick=0;
@@ -905,6 +912,8 @@ bool NativeRoomGameplay::Deliver(PPCContext& ctx,uint8_t* base){
             return s.Stop("Host AI target decisions require the matching native AI adapter");
         if(!s.pending_authority->spawn_batches.empty() && (!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_spawn_batches)))
             return s.Stop("Host spawn batches require the matching private native capture adapter");
+        if(!s.pending_authority->projectile_impacts.empty() && (!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_projectile_impacts)))
+            return s.Stop("Host projectile impacts require the matching private native impact adapter");
         if(!s.pending_authority->damages.empty()){
             const char* error=nullptr;
             std::vector<OnlineNameActor> players;uint64_t local_player=0;
@@ -989,6 +998,7 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
     if(REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_ai_targets) && s.peer!=1 &&
        (!s.pending_authority || s.ai_cursor!=s.pending_authority->ai_decisions.size()))return s.Stop("Native AI target completion did not consume the host decision batch");
     if(REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_spawn_batches) && s.peer!=1){
+        if(REXCVAR_GET(em2_probe_room_projectile_impacts) && !ReplayProjectileImpacts(ctx,base))return false;
         if(REXCVAR_GET(em2_probe_room_spawn_replay) && !ReplayMissingSpawns(ctx,base))return false;
         if(!s.pending_authority || s.spawn_batches!=s.pending_authority->spawn_batches)
             return s.Stop("Native spawn batch capture differs from host; spawn replay remains unimplemented");
@@ -1072,6 +1082,7 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
             state.damages=std::move(s.damage_events);
             state.ai_decisions=std::move(s.ai_decisions);
             state.spawn_batches=std::move(s.spawn_batches);
+            state.projectile_impacts=std::move(s.projectile_impacts);
             if(!ready)return s.Stop("Could not capture completed host actor state");
             const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(10);
             AuthorityPublishResult result;
@@ -1219,7 +1230,54 @@ bool NativeRoomGameplay::RecordSpawnBatch(SpawnBatch batch,uint32_t owner,uint32
     if((s.spawn_replaying || (s.peer!=1 && REXCVAR_GET(em2_probe_room_spawn_replay))) && (!s.pending_authority || s.spawn_batches.size()>=s.pending_authority->spawn_batches.size() ||
        batch!=s.pending_authority->spawn_batches[s.spawn_batches.size()]))return s.Stop("Replayed native spawn differs from complete host parent payload");
     if(s.spawn_batches.size()>=kAuthoritySpawnBatch)return s.Stop("Native spawn capture batch exceeds bound");
+    if(REXCVAR_GET(em2_probe_room_projectile_impacts) && batch.shooter){
+        if(s.projectile_load!=s.load){s.owned_projectiles.clear();s.projectile_load=s.load;}
+        for(const auto& child:batch.children){
+            if(s.owned_projectiles.size()>=65536)return s.Stop("Native projectile authority inventory exceeds bound");
+            s.owned_projectiles.insert(child.entity);
+        }
+    }
     s.spawn_batches.push_back(std::move(batch));return true;
+}
+NativeImpactMode NativeRoomGameplay::ProjectileImpactMode(const SpawnId& id,uint32_t caller){
+    Environment preserve;auto& s=*impl_;uint64_t tick=0;
+    if(!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_projectile_impacts) || !REXCVAR_GET(em2_probe_room_spawn_replay) ||
+       !REXCVAR_GET(em2_probe_room_world_damage_events) || !s.Owner() || !s.Configured() || s.stopped || !s.pending || s.load_depth || s.transition_pending ||
+       s.room->state()!=RoomState::Running || !s.room->host_correction_mode() || s.projectile_load!=s.load || !s.owned_projectiles.contains(id) ||
+       !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed)return NativeImpactMode::Original;
+    // All direct original callers below ignore this void operation's return.
+    switch(caller){case 0x8293E5E4:case 0x8293F8D4:case 0x82940BFC:case 0x82940E48:case 0x82941538:case 0x82941588:case 0x8294275C:case 0x82943480:break;
+    default:return NativeImpactMode::Original;}
+    return s.peer==1?NativeImpactMode::Host:NativeImpactMode::Suppress;
+}
+bool NativeRoomGameplay::RecordProjectileImpact(ProjectileImpact impact){
+    Environment preserve;auto& s=*impl_;uint64_t tick=0;
+    if(!s.Owner() || !s.Configured() || s.stopped || s.peer!=1 || !s.pending || s.load_depth || s.transition_pending ||
+       !REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_projectile_impacts) || !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed)return false;
+    if(!ValidProjectileImpact(impact) || !s.owned_projectiles.contains(impact.projectile) || s.projectile_impacts.size()>=kAuthorityImpactBatch)
+        return s.Stop("Native projectile impact capture has unsupported identity, RNG, FX or batch data");
+    REXLOG_INFO("Native host projectile impact captured: tick {} GUID {:08X}/{:08X}/{:08X}/{:08X}, FX clones {}, retirement queued {}",tick,impact.projectile[0],impact.projectile[1],impact.projectile[2],impact.projectile[3],impact.clones.size(),impact.queued);
+    s.projectile_impacts.push_back(std::move(impact));return true;
+}
+bool NativeRoomGameplay::ReplayProjectileImpacts(PPCContext& ctx,uint8_t* base){
+    auto& s=*impl_;uint64_t tick=0;
+    if(s.impacts_applied)return true;
+    if(!s.Owner() || !s.pending_authority || s.stopped || s.peer==1 || !s.pending || s.load_depth || s.transition_pending ||
+       !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed || s.pending_authority->tick!=tick)return s.Stop("Native projectile impact replay lost its owned authority tick");
+    const auto impacts=s.pending_authority->projectile_impacts;
+    for(const auto& impact:impacts){
+        if(s.projectile_load!=s.load || !s.owned_projectiles.contains(impact.projectile))return s.Stop("Host impact refers to a projectile outside the captured Shooter inventory");
+        NativeEntitySnapshot snapshot;const char* error=nullptr;uint32_t address=0;uint64_t before=0,after=0;
+        if(!em2::SampleNativeEntityLifetimeRevision(before) || !ReadNativeEntitySnapshot(base,snapshot,error,address,false) ||
+           !em2::SampleNativeEntityLifetimeRevision(after) || before!=after)return s.Stop("Native impact registry changed during projectile resolution");
+        const auto found=std::find_if(snapshot.records.begin(),snapshot.records.end(),[&](const auto& row){return row.id==impact.projectile;});
+        if(found==snapshot.records.end())return s.Stop("Host impact projectile has no matching live guest entity");
+        if(!em2::ReplayNativeProjectileImpact(ctx,base,found->debug_address,impact,error))return s.Stop(std::string("Native host projectile impact replay failed: ")+(error?error:"unknown"));
+        if(CurrentNativeRoomGameplay()!=this || !s.Configured() || !s.pending_authority || s.pending_authority->tick!=tick || s.load_depth || s.transition_pending)
+            return s.Stop("Native projectile impact replay left its original world");
+        REXLOG_INFO("Native host projectile impact replayed: tick {} GUID {:08X}/{:08X}/{:08X}/{:08X}, FX clones {}, retirement queued {}; original cleanup and canonical clone IDs verified",tick,impact.projectile[0],impact.projectile[1],impact.projectile[2],impact.projectile[3],impact.clones.size(),impact.queued);
+    }
+    s.impacts_applied=true;return true;
 }
 bool NativeRoomGameplay::SuppressSpawnBatch(const PPCContext& ctx,uint8_t* base,unsigned depth){
     Environment preserve;em2::GuestReadBatch reads;auto& s=*impl_;uint64_t tick=0;
@@ -1314,7 +1372,7 @@ bool NativeRoomGameplay::ReplayMissingSpawns(PPCContext& ctx,uint8_t* base){
         if(!shooter || !spawner || !Readable(shooter,96,base) || !Readable(spawner,148,base) ||
            PPC_LOAD_U32(shooter+48)!=entity-8 || PPC_LOAD_U32(spawner+48)!=entity-8 || PPC_LOAD_U32(shooter+72)!=spawner)
             return s.Stop("Native missing-spawn Shooter and TemplateSpawner class bindings unavailable");
-        if(PPC_LOAD_U32(shooter+84))return s.Stop("Native Shooter still owns shots while host requests a fresh burst");
+        if(PPC_LOAD_U32(shooter+84))return s.Stop("Native Shooter has unlaunched shots while host requests fresh preparation");
         const auto old_count=s.spawn_batches.size();
         const auto top=ctx.r1.u32&~15u;constexpr size_t bytes=65536;
         if(top<bytes+4096 || !Readable(top-uint32_t(bytes),bytes,base))return s.Stop("Native Shooter replay has no bounded borrowed stack");
@@ -1329,18 +1387,18 @@ bool NativeRoomGameplay::ReplayMissingSpawns(PPCContext& ctx,uint8_t* base){
         if(CurrentNativeRoomGameplay()!=this || !s.Configured() || s.stopped || !s.pending_authority || s.pending_authority->tick!=tick || s.load_depth || s.transition_pending)
             return s.Stop("Native Shooter replay left its original owned world");
         if(s.spawn_batches.size()<=old_count)return s.Stop("Native Shooter replay made no host-command progress");
-        // Validate the outer firing operation's real active-shot list as well
+        // Validate the outer preparation operation's real pending-shot list as well
         // as the captured parent, rather than stopping at constructor success.
         if(!ReadNativeEntitySnapshot(base,snapshot,error,address,false))return s.Stop("Native Shooter replay cannot verify its registered children");
         const auto count=PPC_LOAD_U32(shooter+84),data=PPC_LOAD_U32(shooter+80);
-        if(count>kMaxSpawnChildren || (count && !Readable(data,size_t(count)*4,base)))return s.Stop("Native Shooter replay active-shot list is malformed");
+        if(count>kMaxSpawnChildren || (count && !Readable(data,size_t(count)*4,base)))return s.Stop("Native Shooter replay pending-shot list is malformed");
         for(size_t i=old_count;i<s.spawn_batches.size();++i){const auto& result=s.spawn_batches[i].result;
             if(std::all_of(result.begin(),result.end(),[](auto word){return word==0;}))continue;
             const auto record=std::find_if(snapshot.records.begin(),snapshot.records.end(),[&](const auto& row){return row.id==result;});
             bool listed=false;if(record!=snapshot.records.end())for(unsigned shot=0;shot<count;++shot)listed|=PPC_LOAD_U32(data+shot*4)==record->handle;
-            if(!listed)return s.Stop("Native Shooter replay child is absent from its registered active-shot list");
+            if(!listed)return s.Stop("Native Shooter replay child is absent from its registered pending-shot list");
         }
-        REXLOG_INFO("Native host Shooter burst replayed: tick {}, batches {}, active shots {}; original firing, child identities, parent payload and shot ownership verified",tick,s.spawn_batches.size()-old_count,count);
+        REXLOG_INFO("Native host Shooter burst replayed: tick {}, batches {}, pending shots {}; original preparation, child identities, parent payload and pending-shot registration verified",tick,s.spawn_batches.size()-old_count,count);
     }
     return true;
 }

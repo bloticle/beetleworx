@@ -222,7 +222,7 @@ omit native projectile setup and burst ownership. Host-only replay must cover
 these outer effects or an audited complete firing operation; constructor-only
 replay must not be presented as a functional host-owned projectile.
 
-## Original native Shooter burst replay
+## Original native Shooter preparation replay
 
 The new, default-off `em2_probe_room_spawn_replay` flag requires capture,
 eligibility, an admitted host-corrected guest and a pending authority command
@@ -231,7 +231,7 @@ Shooter-origin boolean, not a remotely supplied function pointer. The adapter
 resolves the current owner through its GUID or lobby peer, decodes native
 component RTTI leaves without calling getters, and requires uniquely bound
 `ShooterComponent` and `TemplateSpawnerComponent` objects on that owner.
-The Shooter's +72 link must point to that spawner, and its active-shot list
+The Shooter's +72 link must point to that spawner, and its pending-shot list
 must be empty before replaying a fresh burst.
 
 Missing host births invoke original `828B92A8` on a bounded borrowed native
@@ -249,7 +249,7 @@ Before execution, the local parent counters/selection fields must already equal
 the host pre-state. Counters are not blindly restored. Every captured replay
 must equal the complete host parent payload, including native child template
 IDs, generated IDs, arguments, RNG and bookkeeping. The outer firing result is
-then checked against registered local entities and the real active-shot handle
+then checked against registered local entities and the real pending-shot handle
 array. Unsupported paths, replaced ownership, missing classes, nonempty shot
 lists, no-progress calls, callbacks leaving the owned world, or payload
 mismatches halt the private adapter. Other factories and nested operations are
@@ -257,7 +257,7 @@ not treated as this firing RPC. Launcher switch: `-SpawnReplay`.
 
 The first live replay test reuses the earlier nonce, suppresses the extra
 projectile at 1720, then creates the missing host projectile at 1728 with ID
-`000001C6/00002A78/00001DCF/00006F74`. Exact parent data and one active-shot
+`000001C6/00002A78/00001DCF/00006F74`. Exact parent data and one pending-shot
 handle pass native readback. Both peers subsequently sample the moving entity.
 Its positions differ, however, so birth identity/setup do not prove motion sync.
 The run fails at host tick 1985 when a real collision produces 522 child keys,
@@ -289,6 +289,69 @@ across peers. Both owned windows close normally with user files unchanged.
 This is a failed full integration with passed birth and dense-Damage cases.
 Evidence:
 `analysis/private-native-room-pair-20261115-103808-5a3b27b5/native-shooter-dense-damage-integration-result.json`.
+
+## Host-owned impact and retirement
+
+The default-off private flag `em2_probe_room_projectile_impacts` adds impact
+authority for projectile IDs captured from Shooter preparation. It requires
+world Damage, spawn capture, eligibility and replay in the isolated launcher
+(`-ProjectileImpacts`). Other projectiles and unaudited callers retain original
+behavior. Tracking is bounded and scoped to the native load generation.
+
+The fixed native operation `8293D8A0` takes a Projectile component, requests
+retirement, performs area effects and creates impact FX. Native lookup
+`828BA0C0` confirms that this component's entity interface is at +20, while
+its owner is at +60; treating it as a generic component at +8/+48 is wrong.
+The hook verifies that original typed binding and only suppresses local guest
+calls at audited void-return callers. No local counter or pending-shot array
+is cleared by the impact adapter.
+
+Room wire 22 transports bounded impact records: projectile GUID, exact host
+position bits, native RNG inputs/end state, callback/queue mode and a bounded
+ordered list of FX clone template IDs, generated IDs, flags and RNG states.
+Host requests remain native. The guest resolves its own live entity, sets the
+impact position through the original setter, and calls original `8293D8A0` on
+a preserved borrowed stack. Damage from local area queries is suppressed;
+the exact host Damage payload was delivered separately. Native FX clone
+inputs are validated and seeded at the original clone boundary, with exact
+generated-ID and post-state checks. The original retirement queue is read
+back. The host operation's end RNG is committed through original srand because
+queries on already-painted geometry can consume different local random draws.
+Native pointers, collision objects and callback addresses are never sent.
+
+The codec passes 98 truncation, identity, float, clone and malformed-data checks.
+The Room suite passes 9,087 checks, including maximum impact records alongside
+maximum damage, AI, character and spawn data over fragmented real TCP. The
+existing 1 MiB authority and 2 MiB queue budgets still cover the full maximum.
+Evidence:
+`analysis/native-projectile-impact-test-73464b6ff2e248808a10521fa4fdf92e/rollback.log`.
+
+The live run matches four host/guest impacts at ticks 1471, 1708, 1985 and 2229.
+Each checks one canonical FX clone and a queued native retirement. Native
+gameplay passes the previous 1990 mismatch and is observed through tick 2200.
+It stops at 2252 because the guest still has unlaunched projectiles when the
+host requests another preparation. Both owned windows close normally and leave
+normal user files unchanged. This remains a failed full integration with
+passed impact cases. Evidence:
+`analysis/private-native-room-pair-20261115-110057-92b2979c/native-impact-integration-result.json`.
+Live executable SHA256:
+`C5135C2BF78440B5CBF7D9D6A2C117CB0B410D95BFF6F08FEA810F9A4859E7BF`.
+
+## Pending launch is a separate native operation
+
+Earlier logs/results called Shooter +80/+84 an active-shot list. The source
+audit now establishes that it holds pending launches. Original `828B92A8`
+prepares entities and appends their handles; that is not complete firing.
+Original `828B8DD0` iterates these handles, resolves each local entity, invokes
+`828B81D8` with its ordinal, and then clears +84 itself. Its success result is
+used by native AI/script callers. Historical raw logs and JSON keys retain
+their old label; their readback proves pending registration, not launch.
+
+The new source corrects diagnostic wording. The launch processor has not yet
+been replicated, and it must not be called blindly at preparation time: host
+windup/animation can intentionally separate preparation and launch. Correct
+launch timing and inputs, continuing projectile motion, general world births,
+same-tick causal ordering and broader multiplayer transitions remain required.
 
 ## GUID mutation fence fixed
 

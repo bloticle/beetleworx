@@ -1,6 +1,7 @@
 #include "native_entity_lifetime.h"
 #include "guest_read_batch.h"
 #include "simulation.h"
+#include "native_projectile_impact.h"
 #include "ppc_context.h"
 #include <rex/cvar.h>
 #include <rex/logging.h>
@@ -92,9 +93,10 @@ PPC_FUNC_IMPL(sub_827437B0){
     Mutation mutation;(test_calls?test_calls->flush:__imp__sub_827437B0)(ctx,base);
 }
 PPC_FUNC_IMPL(sub_827B9960){
+    const auto impact=em2::BeginNativeImpactClone(ctx,base);
     uint64_t tick=0;
     const bool trace=base && REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_world_damage_events) && em2::CurrentAgreedSimulationTick(tick);
-    if(!trace){__imp__sub_827B9960(ctx,base);return;}
+    if(!trace){__imp__sub_827B9960(ctx,base);if(impact)em2::EndNativeImpactClone(*impact,ctx,base);return;}
     const auto prototype=ctx.r3.u32,initialize=ctx.r4.u32,new_guid=ctx.r5.u32,caller=uint32_t(ctx.lr);
     std::array<uint32_t,4> source{};std::string name;bool source_readable=false;
     struct Preserve {unsigned fp=_mm_getcsr();DWORD error=GetLastError();~Preserve(){_mm_setcsr(fp);SetLastError(error);}};
@@ -112,6 +114,7 @@ PPC_FUNC_IMPL(sub_827B9960){
         }
     }
     __imp__sub_827B9960(ctx,base);
+    if(impact)em2::EndNativeImpactClone(*impact,ctx,base);
     {
         Preserve preserve;em2::GuestReadBatch reads;std::array<uint32_t,4> id{};const auto result=ctx.r3.u32;
         const bool valid=result>=4096 && uint64_t(result)+28<=0x100000000ull && em2::GuestReadBatch::Readable(base+result+8,20) && PPC_LOAD_U32(result+8)==0x8208D908;
