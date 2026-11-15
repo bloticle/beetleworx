@@ -21,6 +21,7 @@ public:
     // One preserves synchronous completion and legacy invitation compatibility.
     bool SetGameplayVerificationWindow(uint8_t completed_worlds);
     bool SetHostCorrectionMode(bool enabled);
+    bool SetNativeWorldAuthority(bool enabled);
     bool Host(BootPaths,const std::filesystem::path& frozen_checkpoint,
         std::string listen_address,std::string advertised_address,uint8_t gameplay_capacity,
         std::string name="Player 1",uint16_t port=0,uint8_t input_delay=2,

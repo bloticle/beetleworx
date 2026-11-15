@@ -21,6 +21,9 @@ disabled in public lobbies. The mapped cosmetic cleanup repair and subsequent
 level-entry identity mismatch are in [the particle retirement notes](online-particle-retirement-work.md).
 The identity repair and passed three-player Gulch/Autotopia route are in
 [the human peer proof notes](online-human-peer-proof-work.md).
+The immutable session-mode contract needed to move those adapters into normal
+lobbies is recorded in [the authority policy notes](online-native-authority-policy.md).
+Negotiating that mode alone does not enable the adapters.
 
 The following checkpoint results describe earlier deterministic-path checks.
 

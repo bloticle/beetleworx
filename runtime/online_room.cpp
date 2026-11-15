@@ -30,7 +30,7 @@ using Clock=std::chrono::steady_clock;
 using Bytes=std::vector<uint8_t>;
 constexpr size_t Window=64,MaxPacket=8192,MaxQueued=2*1024*1024;
 constexpr size_t MaxAuthorityPacket=1024*1024;
-constexpr uint8_t WireVersion=29;
+constexpr uint8_t WireVersion=30;
 static_assert(109+16*31+kAuthorityCharacterBatch*46<=MaxPacket);
 constexpr size_t MaxEncodedDamage=6+16+16+2+32+1+kMaxDamageStimuli*12+2+2+kMaxDamageShapeKeys*4+3+kMaxDamageTag;
 static_assert(MaxEncodedDamage<=kMaxDamageEventBytes);
@@ -411,7 +411,8 @@ struct Room::Impl {
     std::optional<uint64_t> authority_sent,authority_received,authority_applied,authority_taken;
     std::deque<RoomAuthorityState> authority_states;
     std::map<uint64_t,Hash> authority_pending;
-    bool host_correction=false;
+    bool host_correction=false,native_world_authority=false;
+    uint8_t AuthorityMode()const{return native_world_authority?2:host_correction?1:0;}
     uint8_t gameplay_window=1;
     RoomHistory gameplay_history;
     RoomLoadExchange loads;
@@ -712,7 +713,7 @@ struct Room::Impl {
             };
             if(!r.Done())return reject(0);
             if(window!=gameplay_window)return reject(5);
-            if(correction!=uint8_t(host_correction))return reject(5);
+            if(correction!=AuthorityMode())return reject(5);
             if(mode!=uint8_t(checkpoint_mode))return reject(4);
             if(identity.build!=id.build)return reject(1);
             if(identity.content!=id.content)return reject(2);
@@ -724,7 +725,7 @@ struct Room::Impl {
             uint64_t assigned=2;while(assigned<=roster.capacity() && roster.Find(assigned))++assigned;
             if(assigned>roster.capacity() || roster.Join(assigned,normalized)!=LobbyResult::Ok)return false;
             c.peer=assigned;c.welcomed=true;state=RoomState::Lobby;
-            auto welcome=Packet(Wire::Welcome);WriteIdentity(welcome,id);U64(welcome,assigned);U8(welcome,uint8_t(checkpoint_mode));U8(welcome,gameplay_window);U8(welcome,uint8_t(host_correction));
+            auto welcome=Packet(Wire::Welcome);WriteIdentity(welcome,id);U64(welcome,assigned);U8(welcome,uint8_t(checkpoint_mode));U8(welcome,gameplay_window);U8(welcome,AuthorityMode());
             if(!c.Queue(welcome)){Fail("Room welcome queue full");return true;}
             if(!Publish())return true;
             if(checkpoint_mode){
@@ -737,7 +738,7 @@ struct Room::Impl {
         if(kind==Wire::Welcome){
             if(host || c.welcomed || state!=RoomState::Connecting)return false;
             const auto identity=ReadIdentity(r);const auto assigned=r.Number(8);const auto mode=r.Byte(),window=r.Byte(),correction=r.Byte();
-            if(!r.Done() || correction!=uint8_t(host_correction) || window!=gameplay_window || mode!=uint8_t(checkpoint_mode) || !ValidIdentity(identity) || (checkpoint_mode?!CompatibleCheckpoint(identity,id):identity!=id) || assigned<2 || assigned>kOnlineRoomCapacity)return false;
+            if(!r.Done() || correction!=AuthorityMode() || window!=gameplay_window || mode!=uint8_t(checkpoint_mode) || !ValidIdentity(identity) || (checkpoint_mode?!CompatibleCheckpoint(identity,id):identity!=id) || assigned<2 || assigned>kOnlineRoomCapacity)return false;
             id=identity;peer=assigned;c.peer=1;c.welcomed=true;
             state=checkpoint_mode?RoomState::Transferring:RoomState::Lobby;
             if(checkpoint_mode){c.transfer=Connection::Transfer::Sending;c.transfer_progress=now;}return true;
@@ -1035,8 +1036,13 @@ Room::Room():impl_(std::make_unique<Impl>()){}
 Room::~Room()=default;
 void Room::KeepInternetRelay(std::shared_ptr<InternetRelay> relay){impl_->internet_relay=std::move(relay);}
 bool Room::SetGameplayVerificationWindow(uint8_t window){auto& p=*impl_;if(p.state!=RoomState::Idle || window<1 || window>8)return false;p.gameplay_window=window;return true;}
-bool Room::SetHostCorrectionMode(bool enabled){auto& p=*impl_;if(p.state!=RoomState::Idle || p.rollback_schema)return false;p.host_correction=enabled;return true;}
+bool Room::SetHostCorrectionMode(bool enabled){auto& p=*impl_;if(p.state!=RoomState::Idle || p.rollback_schema || (!enabled && p.native_world_authority))return false;p.host_correction=enabled;return true;}
 bool Room::host_correction_mode()const{return impl_->host_correction;}
+bool Room::SetNativeWorldAuthority(bool enabled){
+    auto& p=*impl_;if(p.state!=RoomState::Idle || p.rollback_schema)return false;
+    p.native_world_authority=enabled;if(enabled)p.host_correction=true;return true;
+}
+bool Room::native_world_authority()const{return impl_->native_world_authority;}
 bool Room::EnableRollbackTransport(const Hash& schema){
     auto& p=*impl_;if(p.state!=RoomState::Idle || p.rollback_schema || p.host_correction || !Nonzero(schema))return false;p.rollback_schema=schema;return true;
 }
@@ -1134,7 +1140,7 @@ bool Room::JoinInternal(const Identity& id,std::string_view address,uint16_t por
     const auto result=connect(c->socket,reinterpret_cast<const sockaddr*>(&endpoint->storage),endpoint->size);
     if(result==SOCKET_ERROR && WSAGetLastError()!=WSAEWOULDBLOCK)return false;
     c->connecting=result!=0;p.id=id;p.join_name=normalized;p.state=RoomState::Connecting;p.checkpoint_mode=checkpoint;
-    auto hello=Packet(Wire::Hello);WriteIdentity(hello,id);U8(hello,uint8_t(checkpoint));U8(hello,p.gameplay_window);U8(hello,uint8_t(p.host_correction));Text(hello,normalized);if(!c->Queue(hello))return false;
+    auto hello=Packet(Wire::Hello);WriteIdentity(hello,id);U8(hello,uint8_t(checkpoint));U8(hello,p.gameplay_window);U8(hello,p.AuthorityMode());Text(hello,normalized);if(!c->Queue(hello))return false;
     p.connections.push_back(std::move(c));return true;
 }
 std::shared_ptr<const std::vector<uint8_t>> Room::DownloadedCheckpoint()const{
@@ -1735,6 +1741,29 @@ bool TestOnlineRoom(){
     auto setup=[&](unsigned count){rooms.clear();rooms.push_back(std::make_unique<Room>());if(!rooms[0]->SetGameplayVerificationWindow(fixture_verification_window) || !rooms[0]->SetHostCorrectionMode(fixture_host_correction) || !rooms[0]->Host(id,"127.0.0.1",0,uint8_t(count),"Host"))return false;
         for(unsigned i=1;i<count;++i){rooms.push_back(std::make_unique<Room>());if(!rooms.back()->SetGameplayVerificationWindow(fixture_verification_window) || !rooms.back()->SetHostCorrectionMode(fixture_host_correction) || !rooms.back()->Join(id,"127.0.0.1",rooms[0]->port(),"Guest "+std::to_string(i)))return false;}
         return pump([&]{return std::all_of(rooms.begin(),rooms.end(),[&](const auto& r){return r->lobby().players.size()==count;});});};
+    // Native world authority must never silently connect to correction-only
+    // or independently verified peers, even when release versions match.
+    for(unsigned host_mode=0;host_mode<3;++host_mode)for(unsigned guest_mode=0;guest_mode<3;++guest_mode){
+        rooms.clear();rooms.push_back(std::make_unique<Room>());rooms.push_back(std::make_unique<Room>());
+        auto configure=[](Room& room,unsigned mode){return room.SetHostCorrectionMode(mode!=0) && room.SetNativeWorldAuthority(mode==2);};
+        if(!check(configure(*rooms[0],host_mode) && configure(*rooms[1],guest_mode),"authority modes configure before connection"))return false;
+        if(!check(rooms[0]->host_correction_mode()==(host_mode!=0) && rooms[0]->native_world_authority()==(host_mode==2),"native world policy retains its exact requested mode"))return false;
+        if(!check(rooms[0]->Host(id,"127.0.0.1",0,2,"Host") && rooms[1]->Join(id,"127.0.0.1",rooms[0]->port(),"Guest"),"authority negotiation uses actual socket Hello/Welcome"))return false;
+        if(!check(!rooms[0]->SetNativeWorldAuthority(false) && !rooms[1]->SetNativeWorldAuthority(true),"world authority is immutable after connecting"))return false;
+        if(host_mode==guest_mode){
+            if(!check(pump([&]{return rooms[0]->lobby().players.size()==2 && rooms[1]->lobby().players.size()==2;}),"matching world authority modes join"))return false;
+        }else{
+            if(!check(pump([&]{return rooms[1]->state()==RoomState::Error || rooms[1]->state()==RoomState::Disconnected;}) && rooms[0]->lobby().players.size()==1,
+                "mismatched authority modes reject before admitting guest to roster"))return false;
+        }
+    }
+    {
+        Room native,rollback;std::array<uint8_t,32> schema{};schema[0]=1;
+        if(!check(native.SetNativeWorldAuthority(true) && native.host_correction_mode() && !native.SetHostCorrectionMode(false) && !native.EnableRollbackTransport(schema),
+            "native world authority requires correction and excludes rollback transport"))return false;
+        if(!check(native.SetNativeWorldAuthority(false) && native.SetHostCorrectionMode(false) && native.EnableRollbackTransport(schema) &&
+            rollback.EnableRollbackTransport(schema) && !rollback.SetNativeWorldAuthority(true),"idle authority can be deliberately reset; rollback refuses native authority"))return false;
+    }
     if(!check(setup(16),"sixteen real simultaneous loopback participants handshake and receive the host roster"))return false;
     for(unsigned i=0;i<16;++i)check(rooms[i]->local_peer()==i+1,"peer IDs assigned by host connection, never client supplied");
     check(!rooms[0]->Start(),"unready roster cannot start");

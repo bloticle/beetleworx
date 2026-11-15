@@ -18,7 +18,7 @@ bool NameValid(std::string_view text){LobbyRoster roster(2);return roster.Join(1
 }
 struct OnlineRoomBoot::Impl {
     BootStatus status;BootPaths paths;bool host=false,cancelling=false,installation_started=false;
-    std::string listen,advertised,name;uint16_t port=0;uint8_t capacity=0,verification_window=8;bool explicit_window=false,host_correction=false;
+    std::string listen,advertised,name;uint16_t port=0;uint8_t capacity=0,verification_window=8;bool explicit_window=false,host_correction=false,native_world_authority=false;
     std::optional<Invite> invite;
     std::unique_ptr<Room> room;
     std::stop_source stop;
@@ -44,8 +44,12 @@ bool OnlineRoomBoot::SetGameplayVerificationWindow(uint8_t limit){
     p.verification_window=limit;p.explicit_window=true;return true;
 }
 bool OnlineRoomBoot::SetHostCorrectionMode(bool enabled){
-    auto& p=*impl_;if(p.status.state!=BootState::Idle)return false;
+    auto& p=*impl_;if(p.status.state!=BootState::Idle || (!enabled && p.native_world_authority))return false;
     p.host_correction=enabled;return true;
+}
+bool OnlineRoomBoot::SetNativeWorldAuthority(bool enabled){
+    auto& p=*impl_;if(p.status.state!=BootState::Idle)return false;
+    p.native_world_authority=enabled;if(enabled)p.host_correction=true;return true;
 }
 bool OnlineRoomBoot::Host(BootPaths paths,const fs::path& source,std::string listen,std::string advertised,
     uint8_t capacity,std::string name,uint16_t port,uint8_t delay,std::optional<std::array<uint8_t,16>> session_nonce){
@@ -91,7 +95,7 @@ void OnlineRoomBoot::Poll(){
             if(p.preparation.wait_for(std::chrono::seconds(0))!=std::future_status::ready)return;
             auto prepared=p.preparation.get();p.room=std::make_unique<Room>();
             if(!p.room->SetGameplayVerificationWindow(p.verification_window))throw std::runtime_error("Invalid gameplay verification window");
-            if(!p.room->SetHostCorrectionMode(p.host_correction))throw std::runtime_error("Invalid host correction mode");
+            if(!p.room->SetHostCorrectionMode(p.host_correction) || !p.room->SetNativeWorldAuthority(p.native_world_authority))throw std::runtime_error("Invalid native authority mode");
             if(p.host){
                 if(!p.room->HostWithCheckpoint(prepared.identity,p.listen,p.port,p.capacity,p.name,std::move(prepared.bundle)))throw std::runtime_error("Could not host the verified online room. Check the address and port.");
                 const auto invite=EncodeInvite(Invite{p.advertised,p.room->port(),prepared.identity.session,prepared.identity.first_tick,prepared.identity.input_delay,p.verification_window});

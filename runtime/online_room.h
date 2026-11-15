@@ -126,6 +126,10 @@ public:
     // host corrections, not identical independent world simulation.
     bool SetHostCorrectionMode(bool);
     bool host_correction_mode()const;
+    // Full native world event adapters are an immutable, negotiated mode.
+    // Enabling also enables host correction; rollback transport is exclusive.
+    bool SetNativeWorldAuthority(bool);
+    bool native_world_authority()const;
     // Explicit alternate transport mode, configured before Host/Join. Keeps
     // the listener open and uses the existing authenticated TCP/relay channel.
     // It does not start native gameplay or assert native snapshot capability.
