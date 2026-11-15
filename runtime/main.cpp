@@ -144,6 +144,7 @@
 #include "native_engine.h"
 #include "camera_projection.h"
 #include "allocation_trace.h"
+#include "native_texture_retirement.h"
 #include "gpu_interrupt_lifetime.h"
 #include "guest_shutdown.h"
 #include "audio_lifetime.h"
@@ -551,7 +552,7 @@ public:
             spdlog::shutdown();ExitProcess(success?0:1);
         }
         if(REXCVAR_GET(em2_test_rollback)){
-            bool success=false;try{success=em2::TestNativeEntityLifetime() && em2::TestNativeEntityProbe() && em2::TestNativeCharacterPhysics() && em2::net::TestOnlineRollback() && em2::net::TestLiveOnlineLobby() && em2::net::TestRoomRollbackTransport() && em2::net::TestOnlineRoom();}
+            bool success=false;try{success=em2::TestNativeTextureRetirement() && em2::TestNativeHeapHistory() && em2::TestNativeEntityLifetime() && em2::TestNativeEntityProbe() && em2::TestNativeCharacterPhysics() && em2::net::TestOnlineRollback() && em2::net::TestLiveOnlineLobby() && em2::net::TestRoomRollbackTransport() && em2::net::TestOnlineRoom();}
             catch(const std::exception& error){REXLOG_ERROR("Rollback regression: {}",error.what());}
             catch(...){REXLOG_ERROR("Rollback regression: unknown failure");}
             spdlog::shutdown();ExitProcess(success?0:1);

@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <cstddef>
 #include <array>
 #include <string_view>
 namespace em2 {
@@ -13,6 +14,13 @@ struct AllocationTrace {
 // POD thread-local snapshot: callable from the exception filter without locks,
 // allocation, logging or guest-memory reads.
 AllocationTrace CurrentNativeAllocation();
+struct NativeFreeTrace {bool active=false;uint32_t pointer=0,kind=0,caller=0;};
+NativeFreeTrace CurrentNativeFree();
+// Private opt-in allocation/free request history. Nonblocking crash-time read;
+// bounded records only, never a memory ownership repair or allocator replacement.
+size_t WriteNativeHeapHistory(char*,size_t,uint32_t pointer);
+bool TestNativeHeapHistory();
+
 void RecordNativeLoadLevel(std::string_view);
 std::array<char,64> CurrentNativeLoadLevel();
 // Native owner-thread load incarnation, including repeated loads of the same

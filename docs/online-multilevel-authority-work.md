@@ -97,3 +97,13 @@ Final diagnostic-build SHA-256:
 These checks validate diagnostics and transport regressions; they do not fix or
 prove recovery from the observed native teardown corruption. No new public
 binary release was published for this investigation.
+
+## Follow-up: observed teardown corruption repaired
+
+The original failure above was traced to a stale native texture wrapper freeing
+a header address after it had been reused for an InputOutput routing array.
+The ownership fix passed the previously failing three-destination route on both
+peers, with heap-history recording disabled. See
+[the ownership investigation and validation](online-native-io-storage-work.md)
+for exact lifetime evidence, regression coverage and remaining limits.
+This does not establish complete online campaign or combat synchronization.

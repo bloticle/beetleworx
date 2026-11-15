@@ -53,7 +53,7 @@ void CaptureCrashIdentity() {
         nt->FileHeader.TimeDateStamp, nt->OptionalHeader.SizeOfImage, codeview);
 }
 LONG WINAPI RecordCrash(EXCEPTION_POINTERS* exception) {
-    char buffer[8192];
+    char buffer[16384];
     SYSTEMTIME occurred{}; GetSystemTime(&occurred);
     int length = std::snprintf(buffer, sizeof(buffer),
         "Beetleworx unhandled exception\ncode=0x%08lX\nmodule=%p\npc=%p\naccess=%llu\naddress=0x%llX\n%s"
@@ -74,6 +74,12 @@ LONG WINAPI RecordCrash(EXCEPTION_POINTERS* exception) {
     __try {
     const auto allocation=em2::CurrentNativeAllocation();
     const auto shadow=em2::CurrentShadowCreation();
+    const auto native_free=em2::CurrentNativeFree();
+    if(native_free.active){
+        length+=std::snprintf(buffer+length,sizeof(buffer)-length,"native_free pointer=%08X kind=%u caller=%08X\n",native_free.pointer,native_free.kind,native_free.caller);
+        length+=int(em2::WriteNativeHeapHistory(buffer+length,sizeof(buffer)-length,native_free.pointer));
+    }
+
     if(shadow.active)length+=std::snprintf(buffer+length,sizeof(buffer)-length,
         "shadow_creation owner=%08X slot=%u cached=%u requested=%u root_requests=%u root_requested_bytes=%llu physical_requests=%u physical_completed=%u physical_requested_bytes=%llu physical_granted_bytes=%llu last_caller=%08X rejected_size=%u rejected_address=%08X\n",
         shadow.owner,shadow.slot,shadow.cached_size,shadow.requested_size,shadow.requests,
@@ -85,6 +91,15 @@ LONG WINAPI RecordCrash(EXCEPTION_POINTERS* exception) {
     if(!cpu_address)cpu_address=context.Rcx;
     if (VirtualQuery(reinterpret_cast<void*>(cpu_address), &candidate, sizeof(candidate)) && candidate.State == MEM_COMMIT && !(candidate.Protect & (PAGE_NOACCESS|PAGE_GUARD)) && cpu_address + sizeof(PPCContext) <= reinterpret_cast<uintptr_t>(candidate.BaseAddress) + candidate.RegionSize) {
         auto* cpu = reinterpret_cast<const PPCContext*>(cpu_address);
+        // Corrupt container contents may fault in a string destructor before
+        // the array free is entered. Retained owner/record registers still
+        // identify the storage; private history may explain its prior lifetime.
+        if(!native_free.active){
+            const uint32_t candidates[]={cpu->r18.u32,cpu->r30.u32};
+            for(const auto pointer:candidates)if(pointer>=0x90000000 && pointer<0xe0000000 && length>0 && length<int(sizeof(buffer)-3072))
+                length+=int(em2::WriteNativeHeapHistory(buffer+length,3072,pointer));
+        }
+
         length += std::snprintf(buffer+length, sizeof(buffer)-length, "guest ctr=%llX lr=%llX r3=%llX r4=%llX r5=%llX r29=%llX\n", cpu->ctr.u64, cpu->lr, cpu->r3.u64, cpu->r4.u64, cpu->r5.u64, cpu->r29.u64);
         length += std::snprintf(buffer+length, sizeof(buffer)-length, "guest r10=%llX r11=%llX r28=%llX r30=%llX r31=%llX\n", cpu->r10.u64, cpu->r11.u64, cpu->r28.u64, cpu->r30.u64, cpu->r31.u64);
         length += std::snprintf(buffer+length, sizeof(buffer)-length, "guest r6=%llX r7=%llX r8=%llX r9=%llX sp=%llX\n", cpu->r6.u64, cpu->r7.u64, cpu->r8.u64, cpu->r9.u64, cpu->r1.u64);

@@ -42,7 +42,21 @@ for address,name,digest,caller in [
     anchor='ctx.lr = 0x'+caller+';\n\tsub_82654790(ctx, base);'
     if destructor.count(anchor)!=1:raise SystemExit('Native texture header free site changed')
     destructor=destructor.replace(anchor,'ctx.lr = 0x'+caller+';\n\tif (!em2::DeferQueuedTextureHeaderFree(ctx,base)) sub_82654790(ctx, base);')
+    label='loc_8267CC58:' if address=='8267CC20' else 'loc_8267BDE8:'
+    if destructor.count(label)!=1:raise SystemExit('Native texture post-release boundary changed')
+    destructor=destructor.replace(label,label+'\n\tem2::TransferQueuedTextureOwnership(ctx,base);')
     destructor=destructor.replace('PPC_FUNC_IMPL(__imp__sub_'+address+')','PPC_FUNC('+name+')',1)
     out+='PPC_EXTERN_FUNC('+name+');\n'+destructor+'\n'
+drains=[]
+for path in a.sources.glob('ppc_recomp.*.cpp'):
+    drains+=re.findall(r'^PPC_FUNC_IMPL\(__imp__sub_826811B8\) \{\n.*?^\}',path.read_text(encoding='utf-8'),re.M|re.S)
+if len(drains)!=1 or hashlib.sha256(drains[0].encode()).hexdigest()!='88db5b7265035cd1ddad422d678520536d90afd34fa0e96ad02f1e10217f5970':
+    raise SystemExit('Native resource drain changed; review queue locking and header retirement')
+drain=drains[0]
+anchor='ctx.lr = 0x82681788;\n\tsub_82654790(ctx, base);'
+if drain.count(anchor)!=1:raise SystemExit('Native fenced header free site changed')
+drain=drain.replace(anchor,'ctx.lr = 0x82681788;\n\tem2::RetireNativeTextureHeader(ctx,base);\n\tsub_82654790(ctx, base);')
+drain=drain.replace('PPC_FUNC_IMPL(__imp__sub_826811B8)','PPC_FUNC(EM2DrainNativeResources)',1)
+out+='PPC_EXTERN_FUNC(EM2DrainNativeResources);\n'+drain+'\n'
 a.output.parent.mkdir(parents=True,exist_ok=True)
 if not a.output.exists() or a.output.read_text(encoding='utf-8')!=out:a.output.write_text(out,encoding='utf-8')

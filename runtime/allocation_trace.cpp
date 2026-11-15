@@ -1,6 +1,7 @@
 #include "allocation_trace.h"
 #include "shadow_resources.h"
 #include "ppc_context.h"
+#include "guest_read_batch.h"
 #include <rex/logging.h>
 #include <array>
 #include <cstring>
@@ -8,9 +9,56 @@
 #include <stdexcept>
 #include <thread>
 #include <windows.h>
+#include <rex/cvar.h>
+#include <memory>
+#include <new>
+#include <cstdio>
+#include <algorithm>
+#include <vector>
 
+REXCVAR_DECLARE(bool,em2_private_profile);
+REXCVAR_DEFINE_BOOL(em2_trace_native_heap_history,false,"Debug","Private diagnostic only: retain bounded native allocation/free request history for teardown crashes");
+PPC_EXTERN_FUNC(__imp__sub_8272EDC0);
 PPC_EXTERN_FUNC(__imp__sub_8272F5C8);
 namespace {
+struct HeapEvent {uint64_t sequence=0;uint32_t pointer=0,size=0,kind=0,caller=0,thread=0;bool allocation=false;std::array<uint32_t,3> parents{};};
+template<size_t Capacity> struct HeapHistory {
+    std::array<HeapEvent,Capacity> events{};uint64_t next=0,allocations=0,frees=0;
+    void Add(HeapEvent event){if(next==UINT64_MAX)return;event.sequence=++next;if(event.allocation)++allocations;else ++frees;events[(next-1)%Capacity]=event;}
+    template<class Visit> void Find(uint32_t pointer,Visit visit)const{
+        for(uint64_t n=0;n<std::min<uint64_t>(next,Capacity);++n){const auto& event=events[(next-1-n)%Capacity];
+            const auto distance=event.pointer>pointer?uint64_t(event.pointer)-pointer:uint64_t(pointer)-event.pointer;
+            if(distance<=16 || (event.allocation && event.pointer<=pointer && uint64_t(pointer)<uint64_t(event.pointer)+event.size))
+                if(!visit(event))break;
+        }
+    }
+};
+constexpr size_t heap_capacity=131072;
+SRWLOCK heap_lock=SRWLOCK_INIT;
+std::unique_ptr<HeapHistory<heap_capacity>> heap_history;
+thread_local em2::NativeFreeTrace current_free;
+bool HeapHistoryEnabled(){return REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_trace_native_heap_history);}
+std::array<uint32_t,3> HeapParents(const PPCContext& ctx,uint8_t* base){
+    const auto error=GetLastError();const auto fp=_mm_getcsr();
+    struct Restore {DWORD error;unsigned fp;~Restore(){SetLastError(error);_mm_setcsr(fp);}} restore{error,fp};
+    em2::GuestReadBatch reads;std::array<uint32_t,3> result{};auto stack=ctx.r1.u32;
+    for(auto& pc:result){
+        if(!base || stack<4096 || stack>UINT32_MAX-4 || !em2::GuestReadBatch::Readable(PPC_RAW_ADDR(stack),4))break;
+        const auto parent=PPC_LOAD_U32(stack);
+        if(parent<=stack || parent-stack>1024*1024 || (parent&15) || !em2::GuestReadBatch::Readable(PPC_RAW_ADDR(parent-8),4))break;
+        const auto candidate=PPC_LOAD_U32(parent-8);
+        if(candidate<0x822f0000 || candidate>=0x83346908 || (candidate&3))break;
+        pc=candidate;stack=parent;
+    }
+    return result;
+}
+void RecordHeapEvent(HeapEvent event){
+    const auto error=GetLastError();const auto fp=_mm_getcsr();
+    AcquireSRWLockExclusive(&heap_lock);
+    if(!heap_history)heap_history.reset(new(std::nothrow) HeapHistory<heap_capacity>);
+    if(heap_history){event.thread=GetCurrentThreadId();heap_history->Add(event);}
+    ReleaseSRWLockExclusive(&heap_lock);_mm_setcsr(fp);SetLastError(error);
+}
 thread_local em2::AllocationTrace current;
 thread_local std::array<char,64> load_level{};
 thread_local uint64_t load_generation=0;
@@ -25,12 +73,62 @@ template<class Allocate> void Track(PPCContext& ctx,uint8_t* base,Allocate alloc
     if(current.size_pointer){current.requested=PPC_LOAD_U32(current.size_pointer);current.has_size=true;}
     if(current.alignment_pointer){current.alignment=PPC_LOAD_U32(current.alignment_pointer);current.has_alignment=true;}
     em2::NoteShadowAllocationRequest(current);
+    const bool heap_trace=HeapHistoryEnabled();
+    const auto parents=heap_trace?HeapParents(ctx,base):std::array<uint32_t,3>{};
     allocate(ctx,base);
+    if(heap_trace && ctx.r3.u32 && current.has_size)
+        RecordHeapEvent({0,ctx.r3.u32,PPC_LOAD_U32(current.size_pointer),current.kind,current.caller,0,true,parents});
     if(em2::ShadowCreationActive() && current.kind==13 && ctx.r3.u32 && current.has_size)
         em2::NoteShadowAllocationCompletion(current,ctx.r3.u32,PPC_LOAD_U32(current.size_pointer));
 }
 }
 em2::AllocationTrace em2::CurrentNativeAllocation(){return current;}
+em2::NativeFreeTrace em2::CurrentNativeFree(){return current_free;}
+size_t em2::WriteNativeHeapHistory(char* out,size_t bytes,uint32_t pointer){
+    if(!out || bytes<128 || !TryAcquireSRWLockShared(&heap_lock))return 0;
+    size_t used=0;unsigned matches=0;
+    if(heap_history){
+        const auto append=[&](const char* text){const auto n=std::strlen(text);if(n>=bytes-used)return false;std::memcpy(out+used,text,n);used+=n;out[used]=0;return true;};
+        char line[192];std::snprintf(line,sizeof(line),"native_heap_history target=%08X recorded=%llu capacity=%zu allocations=%llu frees=%llu newest-first requests\n",pointer,static_cast<unsigned long long>(heap_history->next),heap_capacity,static_cast<unsigned long long>(heap_history->allocations),static_cast<unsigned long long>(heap_history->frees));append(line);
+        heap_history->Find(pointer,[&](const HeapEvent& event){
+            std::snprintf(line,sizeof(line),"heap_event %c seq=%llu pointer=%08X size=%u kind=%u caller=%08X thread=%u parents=%08X/%08X/%08X\n",event.allocation?'A':'F',static_cast<unsigned long long>(event.sequence),event.pointer,event.size,event.kind,event.caller,event.thread,event.parents[0],event.parents[1],event.parents[2]);
+            return append(line) && ++matches<32;
+        });
+    }
+    ReleaseSRWLockShared(&heap_lock);return used;
+}
+bool em2::TestNativeHeapHistory(){
+    HeapHistory<4> history;
+    history.Add({0,0x1000,64,1,0x10,0,true});history.Add({0,0x1000,0,3,0x20,0,false});
+    history.Add({0,0x1000,56,1,0x30,0,true});history.Add({0,0x9000,8,1,0x40,0,true});
+    std::vector<HeapEvent> matches;history.Find(0x1008,[&](const auto& event){matches.push_back(event);return true;});
+    if(matches.size()!=3 || matches[0].caller!=0x30 || matches[1].caller!=0x20 || matches[2].caller!=0x10)return false;
+    history.Add({0,0xfffffff0,64,1,0x50,0,true});matches.clear();history.Find(0x1008,[&](const auto& e){matches.push_back(e);return true;});
+    if(matches.size()!=2 || matches.back().caller!=0x20)return false;
+    matches.clear();history.Find(0xfffffffc,[&](const auto& e){matches.push_back(e);return false;});
+    if(matches.size()!=1 || matches[0].caller!=0x50)return false;
+    std::array<uint8_t,16384> memory{};auto* base=memory.data();PPCContext ctx{};ctx.r1.u64=0x1000;
+    PPC_STORE_U32(0x1000,0x1100);PPC_STORE_U32(0x10f8,0x82753284);
+    PPC_STORE_U32(0x1100,0x1200);PPC_STORE_U32(0x11f8,0x829e6828);
+    PPC_STORE_U32(0x1200,0x1300);PPC_STORE_U32(0x12f8,0x829ed310);
+    const auto saved=ctx;const auto before=memory;const auto error=GetLastError();const auto fp=_mm_getcsr();
+    if(HeapParents(ctx,base)!=std::array<uint32_t,3>{0x82753284,0x829e6828,0x829ed310} ||
+       std::memcmp(&ctx,&saved,sizeof(ctx)) || memory!=before || GetLastError()!=error || _mm_getcsr()!=fp)return false;
+    PPC_STORE_U32(0x1100,0x1000);
+    if(HeapParents(ctx,base)!=std::array<uint32_t,3>{0x82753284,0,0})return false;
+    ctx.r1.u64=0xfffffffc;
+    if(HeapParents(ctx,base)!=std::array<uint32_t,3>{})return false;
+    REXLOG_INFO("Native heap history passed bounded wrap, interior/array-prefix matching, allocation/free ordering, 64-bit range bounds, early-stop and bounded native parent-stack/preservation checks; diagnostic only, no native free intercepted by fixture");return true;
+}
+PPC_FUNC_IMPL(sub_8272EDC0){
+    if(!HeapHistoryEnabled()){__imp__sub_8272EDC0(ctx,base);return;}
+    const auto previous=current_free;
+    struct Restore {em2::NativeFreeTrace saved;~Restore(){current_free=saved;}} restore{previous};
+    current_free={true,ctx.r4.u32,ctx.r5.u32,uint32_t(ctx.lr)};
+    RecordHeapEvent({0,ctx.r4.u32,ctx.r6.u32,ctx.r5.u32,uint32_t(ctx.lr),0,false,HeapParents(ctx,base)});
+    __imp__sub_8272EDC0(ctx,base);
+}
+
 void em2::RecordNativeLoadLevel(std::string_view level) {
     if(load_generation!=UINT64_MAX)++load_generation;
     load_level.fill(0);const auto count=level.size()<load_level.size()-1?level.size():load_level.size()-1;

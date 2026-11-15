@@ -1,5 +1,6 @@
 #include "ppc_config.h"
 #include "shadow_resources.h"
+#include "native_texture_retirement.h"
 #include "ppc_context.h"
 #include <rex/logging.h>
 #include <array>
@@ -14,6 +15,7 @@ PPC_EXTERN_FUNC(EM2ShadowTextureAllocationFixture);
 PPC_FUNC_IMPL(sub_8267C260) {
     if(em2::ShadowCreationActive())EM2CheckedShadowTexture(ctx,base);
     else __imp__sub_8267C260(ctx,base);
+    em2::TrackNativeTextureData(ctx.r3.u32,base);
 }
 namespace {
 struct AllocatorFixture {
