@@ -1,6 +1,7 @@
 #include "online_event_order.h"
 #include "online_room_gameplay.h"
 #include "native_actor_health.h"
+#include "native_damage_event.h"
 #include "simulation.h"
 #include "guest_read_batch.h"
 #include "ppc_context.h"
@@ -32,6 +33,15 @@ void TracePrivateDamage(PPCContext& ctx,uint8_t* base,uint64_t tick,const char* 
     Environment preserve;em2::GuestReadBatch reads;static thread_local unsigned reports=0;
     if(reports>=128 || !Readable(event,116,base) || PPC_LOAD_U16(event+4)!=14)return;
     ++reports;
+    if(std::strcmp(phase,"before")==0){
+        em2::net::DamageEvent sample,decoded;const char* error=nullptr;
+        if(em2::CaptureNativeDamageEvent(base,event,sample,error)){
+            const auto bytes=em2::net::EncodeDamageEvent(sample);
+            const bool exact=em2::net::DecodeDamageEvent(bytes,decoded) && decoded==sample;
+            REXLOG_INFO("Private portable Damage capture: role {} tick {} target {:08X}/{:08X}/{:08X}/{:08X}, instigator {}, stimuli {}, tag bytes {}, encoded bytes {}, exact {}; read-only, not sent or replayed",
+                REXCVAR_GET(em2_room_probe_role),tick,sample.target[0],sample.target[1],sample.target[2],sample.target[3],sample.instigator.has_value(),sample.stimuli.size(),sample.tag.size(),bytes.size(),exact);
+        }else REXLOG_WARN("Private portable Damage capture unsupported: role {} tick {} reason {}; original dispatch retained",REXCVAR_GET(em2_room_probe_role),tick,error?error:"unknown");
+    }
     REXLOG_INFO("Private native Damage event: role {} phase {} tick {} caller {:08X} class {:08X} target {:08X} instigator {:08X} flags {}/{} auxiliary {} types {} raw {} effective {} tag {:08X}; read-only, original dispatch retained",
         REXCVAR_GET(em2_room_probe_role),phase,tick,caller,PPC_LOAD_U32(event),PPC_LOAD_U32(event+8),PPC_LOAD_U32(event+12),PPC_LOAD_U8(event+16),PPC_LOAD_U8(event+17),PPC_LOAD_U32(event+68),PPC_LOAD_U32(event+84),PPC_LOAD_U32(event+96),PPC_LOAD_U32(event+108),PPC_LOAD_U32(event+76));
     for(unsigned array:{80u,92u,104u}){

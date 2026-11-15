@@ -40,6 +40,7 @@
 #include "online_button_actions.h"
 #include "native_launch_defaults.h"
 #include "native_character_physics.h"
+#include "native_damage_event.h"
 #include "skinning.h"
 #include "mickey_ears.h"
 #include "render_options.h"
@@ -196,6 +197,7 @@ REXCVAR_DEFINE_BOOL(em2_online_menu,false,"Online","Show experimental direct-con
 REXCVAR_DEFINE_BOOL(em2_test_pc_settings,false,"Debug","Run PC menu settings tests without opening the game");
 REXCVAR_DEFINE_BOOL(em2_test_guest_shutdown,false,"Debug","Run isolated cancellable guest wait and C++ unwind checks without guest execution");
 REXCVAR_DEFINE_BOOL(em2_test_online_admission,false,"Debug","Headless public-release admission and checkpoint tests without gameplay");
+REXCVAR_DEFINE_BOOL(em2_test_native_damage,false,"Debug","Headless portable native Damage capture and codec tests, no gameplay or network replication");
 REXCVAR_DEFINE_BOOL(em2_test_online_startup,false,"Debug","Headless opening-cutscene input, desktop handoff and fake-device voice checks; no network or microphone");
 REXCVAR_DEFINE_BOOL(em2_test_rollback,false,"Debug","Headless restore/replay, live-lobby and TCP snapshot checks; allocated simulation fixture, no native gameplay");
 REXCVAR_DEFINE_BOOL(em2_test_online_menu_ui,false,"Debug","Headless ImGui online menu layout and mouse checks; no connections or gameplay");
@@ -368,7 +370,7 @@ public:
             const std::filesystem::path report=REXCVAR_GET(em2_allocation_crash_output);
             if(!report.is_absolute() || std::filesystem::exists(report) || !std::filesystem::is_directory(report.parent_path()))ExitProcess(2);
             InstallCrashHandler(report);
-        } else if(REXCVAR_GET(em2_test_rollback) || REXCVAR_GET(em2_test_online_startup) || REXCVAR_GET(em2_test_online_admission) || REXCVAR_GET(em2_test_online_menu_ui) || REXCVAR_GET(em2_test_guest_shutdown) || REXCVAR_GET(em2_test_online_voice) || REXCVAR_GET(em2_test_online_input) || REXCVAR_GET(em2_test_content_setup) || REXCVAR_GET(em2_test_mickey_ears) || REXCVAR_GET(em2_test_pc_settings) || REXCVAR_GET(em2_test_demo_support) || REXCVAR_GET(em2_test_update_swap) || REXCVAR_GET(em2_test_video_blocks) || REXCVAR_GET(em2_test_shader_storage) || REXCVAR_GET(em2_test_screen_upscale) || !REXCVAR_GET(em2_analyze_shadow_shader_path).empty() || !REXCVAR_GET(em2_analyze_bloom_shader_path).empty()) {
+        } else if(REXCVAR_GET(em2_test_native_damage) || REXCVAR_GET(em2_test_rollback) || REXCVAR_GET(em2_test_online_startup) || REXCVAR_GET(em2_test_online_admission) || REXCVAR_GET(em2_test_online_menu_ui) || REXCVAR_GET(em2_test_guest_shutdown) || REXCVAR_GET(em2_test_online_voice) || REXCVAR_GET(em2_test_online_input) || REXCVAR_GET(em2_test_content_setup) || REXCVAR_GET(em2_test_mickey_ears) || REXCVAR_GET(em2_test_pc_settings) || REXCVAR_GET(em2_test_demo_support) || REXCVAR_GET(em2_test_update_swap) || REXCVAR_GET(em2_test_video_blocks) || REXCVAR_GET(em2_test_shader_storage) || REXCVAR_GET(em2_test_screen_upscale) || !REXCVAR_GET(em2_analyze_shadow_shader_path).empty() || !REXCVAR_GET(em2_analyze_bloom_shader_path).empty()) {
             const auto reports=exe_dir/"diagnostic-crashes"/(std::to_string(GetCurrentProcessId())+"-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
             if(!std::filesystem::create_directories(reports))ExitProcess(2);
             InstallCrashHandler(reports/"crash.log");
@@ -541,6 +543,11 @@ public:
         if(REXCVAR_GET(em2_test_online_voice)){
             const auto voice_preferences_test=exe_dir/("online-voice-settings-test-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
             bool success=false;try{success=em2::net::TestOnlineInternetVoiceRelay(REXCVAR_GET(em2_test_voice_relay_origin)) && em2::net::TestOnlineVoiceAudio() && em2::net::TestOnlineVoiceTransport() && em2::net::TestOnlineRoomVoice() && em2::net::TestOnlineVoicePreferences(voice_preferences_test) && em2::net::TestOnlineVoiceSettings(voice_preferences_test) && em2::net::TestOnlineVoiceDevices() && em2::net::TestOnlineVoiceRuntime();}catch(const std::exception& e){REXLOG_ERROR("Voice regression threw: {}",e.what());}
+            spdlog::shutdown();ExitProcess(success?0:1);
+        }
+        if(REXCVAR_GET(em2_test_native_damage)){
+            bool success=false;try{success=em2::TestNativeDamageEvent();}
+            catch(const std::exception& error){REXLOG_ERROR("Native Damage regression: {}",error.what());}
             spdlog::shutdown();ExitProcess(success?0:1);
         }
         if(REXCVAR_GET(em2_test_rollback)){
