@@ -266,6 +266,7 @@ struct NativeRoomGameplay::Impl {
     struct PendingVisualRetirement {NativeVisualRetirement binding;unsigned active_updates=0;};
     std::map<SpawnId,PendingVisualRetirement> visual_retirements;
     std::optional<uint64_t> visual_retirement_tick;
+    std::vector<GameplayObservation::PeerCharacter> observation_peers;
     uint64_t projectile_load=0;
     bool impacts_applied=false;
     std::vector<ShooterLaunch> shooter_launches;
@@ -399,6 +400,45 @@ bool NativeRoomGameplay::InitializeActors(PPCContext& ctx,uint8_t* base){
     return result==NativeRosterStep::Ready;
 }
 uint16_t NativeRoomGameplay::extra_actor_mask()const{return impl_->actors->ready()?impl_->actors->mask():0;}
+bool NativeRoomGameplay::BindObservationPeers(GameplayObservation& observation,PPCContext& ctx,uint8_t* base){
+    Environment environment;Context preserve(ctx);GuestReadBatch reads;auto& s=*impl_;
+    if(!s.Owner() || !s.Configured() || s.stopped || !s.Canonical() || !s.actors->ready() || !observation.includes_character_physics ||
+       (s.room->state()!=RoomState::Bootstrapping && s.room->state()!=RoomState::Running) ||
+       (s.actors->mask()|3)!=s.roster_mask || s.roster.players.size()<2 || s.roster.players.size()>16 ||
+       s.actors->actors().size()!=s.roster.players.size()-2 || (s.registry && !s.World(base)) || !Readable(0x833DAB60,4,base))return false;
+    const auto manager=PPC_LOAD_U32(0x833DAB60);if(!Readable(manager,640,base))return false;
+    NativeEntitySnapshot snapshot;const char* error=nullptr;uint32_t address=0;uint64_t before=0,after=0;
+    if(!em2::SampleNativeEntityLifetimeRevision(before) || !ReadNativeEntitySnapshot(base,snapshot,error,address,false) ||
+       (s.registry && snapshot.registry!=s.registry))return false;
+    std::vector<GameplayObservation::PeerCharacter> peers;
+    for(unsigned slot=0;slot<2;++slot){const auto handle=PPC_LOAD_U32(manager+slot*320+20);
+        const auto row=std::find_if(snapshot.records.begin(),snapshot.records.end(),[&](const auto& r){return r.handle==handle;});
+        if(!handle || row==snapshot.records.end() || row->id!=observation.player_ids[slot] || row->vtable!=0x8208D908)return false;
+        peers.push_back({uint8_t(slot+1),row->id});
+    }
+    for(const auto& entry:s.actors->actors()){
+        OwnedActorInput actor;
+        if(entry.room_peer<=2 || entry.room_peer>16 || !(s.roster_mask&(1u<<(entry.room_peer-1))) ||
+           !OwnedActorInputFor(entry.actor.peer,ctx,base,actor) || !actor.enabled || actor.generation!=entry.actor.generation ||
+           actor.registry!=snapshot.registry || actor.registry!=entry.actor.registry || actor.entity!=entry.actor.entity ||
+           actor.controller!=entry.actor.controller || actor.listener!=entry.actor.listener || actor.handle!=entry.actor.handle || actor.action_user!=entry.actor.action_user)return false;
+        const auto row=std::find_if(snapshot.records.begin(),snapshot.records.end(),[&](const auto& r){return r.handle==actor.handle;});
+        if(row==snapshot.records.end() || row->debug_address!=actor.entity || row->vtable!=0x8208D908)return false;
+        peers.push_back({entry.room_peer,row->id});
+    }
+    std::sort(peers.begin(),peers.end(),[](const auto& a,const auto& b){return a.peer<b.peer;});
+    uint16_t mask=0;std::set<SpawnId> ids;
+    for(const auto& human:peers){const auto bit=uint16_t(1u<<(human.peer-1));if((mask&bit) || !ids.insert(human.id).second)return false;mask|=bit;}
+    if(mask!=s.roster_mask || !em2::SampleNativeEntityLifetimeRevision(after) || before!=after || PPC_LOAD_U32(0x833DAB60)!=manager)return false;
+    for(unsigned slot=0;slot<2;++slot){const auto handle=PPC_LOAD_U32(manager+slot*320+20);
+        if(std::none_of(snapshot.records.begin(),snapshot.records.end(),[&](const auto& r){return r.handle==handle && r.id==peers[slot].id;}))return false;
+    }
+    if(s.observation_peers!=peers){
+        for(const auto& human:peers)REXLOG_INFO("Native observation peer binding: peer {} GUID {:08X}/{:08X}/{:08X}/{:08X}; validated native human ownership, no GUID mutation",human.peer,human.id[0],human.id[1],human.id[2],human.id[3]);
+        s.observation_peers=peers;
+    }
+    observation.peer_characters=std::move(peers);return true;
+}
 uint32_t NativeRoomGameplay::NativeDeathParticipantCount(PPCContext& ctx,uint8_t* base)const{
     Environment environment;Context preserve(ctx);const auto& s=*impl_;uint64_t tick=0;
     if(!s.Owner() || s.stopped || !s.started || !s.pending || !s.delivered || !s.Canonical() ||

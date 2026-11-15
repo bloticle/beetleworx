@@ -54,8 +54,10 @@ std::optional<std::array<uint8_t,32>> HashPlayerObservations(uint64_t tick,const
     return HashEncoded(bytes);
 }
 std::optional<std::array<uint8_t,32>> HashGameplayObservation(uint64_t tick,const GameplayObservation& state) {
-    if(!state.includes_character_physics && (!state.characters.empty() || state.passive_character_physics))return {};
-    std::string bytes=state.includes_character_physics?(state.passive_character_physics?"EM2-gameplay-observation-v6-passive":"EM2-gameplay-observation-v5"):"EM2-gameplay-observation-v4";
+    if(!state.includes_character_physics && (!state.characters.empty() || state.passive_character_physics || !state.peer_characters.empty()))return {};
+    const bool peers=!state.peer_characters.empty();
+    std::string bytes=peers?(state.passive_character_physics?"EM2-gameplay-observation-v8-passive-peers":"EM2-gameplay-observation-v7-peers"):
+        state.includes_character_physics?(state.passive_character_physics?"EM2-gameplay-observation-v6-passive":"EM2-gameplay-observation-v5"):"EM2-gameplay-observation-v4";
     auto put=[&](uint64_t value,unsigned count){for(unsigned i=count;i;--i)bytes.push_back(char(value>>((i-1)*8)));};
     put(tick,8);
     for(const auto* name:{&state.world.level,&state.world.state,&state.world.interior}){
@@ -72,18 +74,40 @@ std::optional<std::array<uint8_t,32>> HashGameplayObservation(uint64_t tick,cons
     put(state.random.calls,8);put(state.random.seeds,8);put(state.random.last_state,4);put(state.random.sequence,8);
     if(state.includes_character_physics){
         if((!state.passive_character_physics && state.characters.size()<2) || state.characters.size()>4096)return {};
+        if(peers){
+            if(state.peer_characters.size()<2 || state.peer_characters.size()>16 || state.peer_characters[0].peer!=1 || state.peer_characters[1].peer!=2)return {};
+            uint8_t previous=0;
+            for(size_t i=0;i<state.peer_characters.size();++i){const auto& human=state.peer_characters[i];
+                if(human.peer<=previous || human.peer>16 || human.id==std::array<uint32_t,4>{})return {};previous=human.peer;
+                for(size_t j=0;j<i;++j)if(state.peer_characters[j].id==human.id)return {};
+                if(!state.passive_character_physics && std::none_of(state.characters.begin(),state.characters.end(),[&](const auto& c){return c.id==human.id;}))return {};
+            }
+            if(state.peer_characters[0].id!=state.player_ids[0] || state.peer_characters[1].id!=state.player_ids[1])return {};
+            put(state.peer_characters.size(),1);for(const auto& human:state.peer_characters)put(human.peer,1);
+        }
         if(state.player_ids[0]==state.player_ids[1])return {};
         for(unsigned slot=0;slot<2;++slot){
             if(state.player_ids[slot]==std::array<uint32_t,4>{})return {};
             const auto actor=std::find_if(state.characters.begin(),state.characters.end(),[&](const auto& c){return c.id==state.player_ids[slot];});
             if(actor==state.characters.end() && !state.passive_character_physics)return {};
             if(actor!=state.characters.end())for(unsigned axis=0;axis<3;++axis)if(actor->active && actor->position[axis]!=std::bit_cast<uint32_t>(state.players[slot].position[axis]))return {};
-            for(auto word:state.player_ids[slot])put(word,4);
+            if(!peers)for(auto word:state.player_ids[slot])put(word,4);
         }
         put(state.characters.size(),4);std::array<uint32_t,4> previous{};bool first=true;
+        struct Character {uint8_t peer=0;const GameplayObservation::CharacterPhysics* value;};
+        std::vector<Character> ordered;ordered.reserve(state.characters.size());
         for(const auto& character:state.characters){
             if(character.id==std::array<uint32_t,4>{} || (!first && character.id<=previous))return {};
-            first=false;previous=character.id;for(auto word:character.id)put(word,4);
+            first=false;previous=character.id;uint8_t peer=0;
+            if(peers)for(const auto& human:state.peer_characters)if(human.id==character.id){peer=human.peer;break;}
+            ordered.push_back({peer,&character});
+        }
+        if(peers)std::sort(ordered.begin(),ordered.end(),[](const auto& a,const auto& b){
+            if(bool(a.peer)!=bool(b.peer))return bool(a.peer);return a.peer?a.peer<b.peer:a.value->id<b.value->id;
+        });
+        for(const auto& entry:ordered){const auto& character=*entry.value;
+            if(peers){put(entry.peer?1:0,1);if(entry.peer)put(entry.peer,1);else for(auto word:character.id)put(word,4);}
+            else for(auto word:character.id)put(word,4);
             put(character.active?1:0,1);put(character.state,4);
             if(!character.active && (character.state || character.position!=std::array<uint32_t,3>{} || character.velocity!=std::array<uint32_t,3>{}))return {};
             for(const auto* vector:{&character.position,&character.velocity})for(auto bits:*vector){

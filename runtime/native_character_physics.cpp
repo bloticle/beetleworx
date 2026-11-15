@@ -10,6 +10,7 @@
 #include <limits>
 #include <utility>
 #include <cmath>
+#include <algorithm>
 PPC_EXTERN_FUNC(__imp__sub_82473F58); // hkpRigidBody position setter + moved-body broadphase
 PPC_EXTERN_FUNC(__imp__sub_824741C0); // hkpRigidBody linear velocity setter / world operation
 PPC_EXTERN_FUNC(__imp__sub_8275C0C8); // entity world position -> native transform notifications
@@ -190,6 +191,83 @@ bool em2::TestNativeCharacterPhysics(){
         for(unsigned axis=0;axis<3;++axis)observed.players[slot].position[axis]=std::bit_cast<float>(first[slot].position[axis]);}
     const auto digest=net::HashGameplayObservation(99,observed);
     if(!check(bool(digest),"complete character proof includes both identified native players"))return false;
+    {
+        auto typed=observed;typed.peer_characters={{1,typed.player_ids[0]},{2,typed.player_ids[1]}};
+        const auto canonical=net::HashGameplayObservation(99,typed);
+        if(!check(canonical && canonical!=digest,"typed human proof has a distinct versioned domain"))return false;
+        { // Actual Gulch re-entry fields; expected SHA-256 calculated independently.
+            net::GameplayObservation captured;captured.includes_character_physics=true;
+            std::memcpy(captured.world.level.data(),"ftl_gulch",9);std::memcpy(captured.world.state.data(),"ftl_gulch.main",14);std::memcpy(captured.world.interior.data(),"<none>",6);
+            captured.life={5,5,5,5};captured.ammo.fill(30.0f);captured.random.calls=221;captured.random.last_state=0x747AB6E6;captured.random.sequence=0x01CA769F1C425D3Eull;
+            captured.characters.push_back({{0x0000268Eu,0x00006A57u,0x000016A1u,0x00005281u},true,0,{0xC1B33E85u,0x4009821Au,0x422F5F87u},{0x00000000u,0xBD4CCCCCu,0x00000000u}});
+            captured.characters.push_back({{0x00005E64u,0x00003205u,0x00006E35u,0x00000B61u},true,0,{0xC1AD0C39u,0x401222B1u,0x424727CDu},{0xBF7A4C2Bu,0xBEDED130u,0xBEB3F607u}});
+            captured.characters.push_back({{0x00006D99u,0x00007723u,0x00007563u,0x000065FAu},true,2,{0xC1ACFA9Eu,0x4012703Du,0x42472AF7u},{0xBF388DA7u,0xBE956538u,0xBE84B116u}});
+            captured.player_ids[0]={0x00006D99u,0x00007723u,0x00007563u,0x000065FAu};
+            captured.players[0].position[0]=std::bit_cast<float>(0xC1ACFA9Eu);
+            captured.players[0].position[1]=std::bit_cast<float>(0x4012703Du);
+            captured.players[0].position[2]=std::bit_cast<float>(0x42472AF7u);
+            captured.player_ids[1]={0x00005E64u,0x00003205u,0x00006E35u,0x00000B61u};
+            captured.players[1].position[0]=std::bit_cast<float>(0xC1AD0C39u);
+            captured.players[1].position[1]=std::bit_cast<float>(0x401222B1u);
+            captured.players[1].position[2]=std::bit_cast<float>(0x424727CDu);
+            captured.peer_characters={{1,{0x00006D99u,0x00007723u,0x00007563u,0x000065FAu}},{2,{0x00005E64u,0x00003205u,0x00006E35u,0x00000B61u}},{3,{0x0000268Eu,0x00006A57u,0x000016A1u,0x00005281u}}};
+            const auto proof=net::HashGameplayObservation(701,captured);std::string hex;
+            if(proof){constexpr char digits[]="0123456789abcdef";for(auto b:*proof){hex+=digits[b>>4];hex+=digits[b&15];}}
+            if(!check(hex=="b6fc8bb3932c989efdc642e407e0bdc74cf546c6d10c7642947b5c257879d34e","typed peer proof matches independently encoded native Gulch re-entry bytes"))return false;
+        }
+        auto remapped=typed;
+        for(unsigned slot=0;slot<2;++slot){const auto old=remapped.player_ids[slot];const std::array<uint32_t,4> id{900u-slot,7,8,9};
+            for(auto& c:remapped.characters)if(c.id==old)c.id=id;
+            remapped.player_ids[slot]=id;remapped.peer_characters[slot].id=id;
+        }
+        std::sort(remapped.characters.begin(),remapped.characters.end(),[](const auto& a,const auto& b){return a.id<b.id;});
+        if(!check(net::HashGameplayObservation(99,remapped)==canonical,"local human IDs and their raw GUID ordering may change while peer physics is identical"))return false;
+        for(unsigned field=0;field<8;++field){auto changed=typed;
+            if(field<3)changed.characters[2].position[field]^=1;else if(field<6)changed.characters[2].velocity[field-3]^=1;
+            else if(field==6)++changed.characters[2].state;else ++changed.characters[2].id[3];
+            if(!check(net::HashGameplayObservation(99,changed) && net::HashGameplayObservation(99,changed)!=canonical,"NPC identity and every physics field still change the typed proof"))return false;
+        }
+        for(unsigned field=0;field<4;++field){auto changed=typed;
+            if(field<3)changed.characters[0].velocity[field]^=1;else ++changed.characters[0].state;
+            const auto different=net::HashGameplayObservation(99,changed);
+            if(!check(different && different!=canonical,"human velocity and motion state cannot be hidden by peer identity normalization"))return false;
+        }
+        for(unsigned invalid=0;invalid<8;++invalid){auto changed=typed;
+            switch(invalid){
+            case 0:changed.peer_characters[0].peer=0;break;
+            case 1:changed.peer_characters[1].peer=1;break;
+            case 2:changed.peer_characters[1].id=changed.peer_characters[0].id;break;
+            case 3:changed.peer_characters[0].id={};break;
+            case 4:std::swap(changed.peer_characters[0],changed.peer_characters[1]);break;
+            case 5:changed.peer_characters.push_back({17,{3,0,0,0}});break;
+            case 6:changed.peer_characters.push_back({3,{999,0,0,0}});break;
+            case 7:changed.includes_character_physics=false;changed.characters.clear();break;
+            }
+            if(!check(!net::HashGameplayObservation(99,changed),"invalid peer bindings cannot normalize missing, duplicate, unordered or foreign human identities"))return false;
+        }
+        auto full=typed;
+        for(unsigned peer=3;peer<=16;++peer){auto actor=observed.characters[2];actor.id={100+peer,0,0,0};full.characters.push_back(actor);full.peer_characters.push_back({uint8_t(peer),actor.id});}
+        const auto full_hash=net::HashGameplayObservation(99,full);
+        if(!check(bool(full_hash),"sixteen human peers plus an independent NPC remain represented"))return false;
+        auto other=full;
+        for(const auto& human:full.peer_characters){const std::array<uint32_t,4> id{10000u-human.peer,20,30,40};
+            for(auto& c:other.characters)if(c.id==human.id)c.id=id;
+            for(auto& binding:other.peer_characters)if(binding.peer==human.peer)binding.id=id;
+            if(human.peer<=2)other.player_ids[human.peer-1]=id;
+        }
+        std::sort(other.characters.begin(),other.characters.end(),[](const auto& a,const auto& b){return a.id<b.id;});
+        if(!check(net::HashGameplayObservation(99,other)==full_hash,"all sixteen local human identities normalize independently of native GUID sort order"))return false;
+        for(unsigned peer=3;peer<=16;++peer){auto changed=full;
+            const auto id=changed.peer_characters[peer-1].id;for(auto& c:changed.characters)if(c.id==id)c.velocity[2]^=1;
+            const auto different=net::HashGameplayObservation(99,changed);
+            if(!check(different && different!=full_hash,"every extra human's physics remains in the sixteen-peer proof"))return false;
+        }
+        auto passive=full;passive.passive_character_physics=true;passive.characters.clear();
+        if(!check(net::HashGameplayObservation(99,passive) && net::HashGameplayObservation(99,passive)!=full_hash,"typed passive domain preserves complete peer membership with authored detached bodies"))return false;
+        passive.peer_characters.pop_back();
+        auto omitted=full;omitted.passive_character_physics=true;omitted.characters.clear();
+        if(!check(net::HashGameplayObservation(99,passive)!=net::HashGameplayObservation(99,omitted),"passive human membership changes still change proof"))return false;
+    }
     {
         auto passive=observed;passive.passive_character_physics=true;passive.characters.clear();
         const auto empty=net::HashGameplayObservation(99,passive);

@@ -122,6 +122,11 @@ struct RandomObservation {
     }
 };
 struct GameplayObservation {
+    struct PeerCharacter {
+        uint8_t peer=0;
+        std::array<uint32_t,4> id{}; // Local native ID, bound to an admitted human.
+        bool operator==(const PeerCharacter&)const=default;
+    };
     struct CharacterPhysics {
         std::array<uint32_t,4> id{};
         bool active=false;
@@ -148,6 +153,9 @@ struct GameplayObservation {
     bool passive_character_physics=false;
     std::vector<CharacterPhysics> characters;
     std::array<std::array<uint32_t,4>,2> player_ids{};
+    // Native Room ownership metadata only. Typed proofs use peer IDs for these
+    // humans; NPC IDs and every physics field still participate unchanged.
+    std::vector<PeerCharacter> peer_characters;
 };
 std::optional<std::array<uint8_t,32>> HashGameplayObservation(uint64_t,const GameplayObservation&);
 // Simulation-thread owner. Session and InputSystem must outlive attachment.

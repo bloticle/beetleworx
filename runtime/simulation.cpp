@@ -1363,6 +1363,10 @@ void CompleteNetworkObservation(PPCContext& ctx,uint8_t* base) {
         valid=em2::ReadNativeCharacterPhysics(base,state.characters) && (state.passive_character_physics || state.characters.size()>=2);
         if(!valid)REXLOG_ERROR("Native online observation rejected while reading character physics ({} proxies)",state.characters.size());
         state.includes_character_physics=valid;
+        if(valid && gameplay && (room_report || gameplay_report)){
+            valid=gameplay->BindObservationPeers(state,ctx,base);
+            if(!valid)REXLOG_ERROR("Native online observation rejected while binding admitted human peers");
+        }
     }
     state.random=random_observation;
     const auto observed_tick=gameplay_report?gameplay->committed_tick():(room_report?room->committed_tick():(legacy_report?gate.committed_tick():tick_number));
@@ -1379,7 +1383,7 @@ void CompleteNetworkObservation(PPCContext& ctx,uint8_t* base) {
         const auto& a=observations[0];const auto& b=observations[1];
         if(report && REXCVAR_GET(em2_trace_online_random_owners))REXLOG_INFO("Native online scene clock: tick {}, seconds {:08X}, accumulated {:016X}, counter {}, previous {}",observed_tick,PPC_LOAD_U32(0x833FCA4C),PPC_LOAD_U64(0x833FCA38),PPC_LOAD_U64(0x833FCA60),PPC_LOAD_U64(0x833FCA68));
         REXLOG_INFO("Native gameplay observation v{}: level '{}' state '{}' interior '{}' epoch {}, tick {}, modes {}/{}, bits {:08X}/{:08X}/{:08X}/{:08X}/{:08X}/{:08X}, life {}/{}/{}/{}, ammo {:08X}/{:08X}/{:08X}/{:08X}/{:08X}/{:08X}, CRT calls/seeds {}/{}, last state {:08X}, stream {:016X}, digest {}, agreed {}, character proxies {}",
-            state.includes_character_physics?(state.passive_character_physics?6:5):4,state.world.level.data(),state.world.state.data(),state.world.interior.data(),tick_number,observed_tick,a.mode,b.mode,std::bit_cast<uint32_t>(a.position[0]),std::bit_cast<uint32_t>(a.position[1]),std::bit_cast<uint32_t>(a.position[2]),
+            !state.peer_characters.empty()?(state.passive_character_physics?8:7):state.includes_character_physics?(state.passive_character_physics?6:5):4,state.world.level.data(),state.world.state.data(),state.world.interior.data(),tick_number,observed_tick,a.mode,b.mode,std::bit_cast<uint32_t>(a.position[0]),std::bit_cast<uint32_t>(a.position[1]),std::bit_cast<uint32_t>(a.position[2]),
             std::bit_cast<uint32_t>(b.position[0]),std::bit_cast<uint32_t>(b.position[1]),std::bit_cast<uint32_t>(b.position[2]),
             state.life[0],state.life[1],state.life[2],state.life[3],std::bit_cast<uint32_t>(state.ammo[0]),std::bit_cast<uint32_t>(state.ammo[1]),
             std::bit_cast<uint32_t>(state.ammo[2]),std::bit_cast<uint32_t>(state.ammo[3]),std::bit_cast<uint32_t>(state.ammo[4]),std::bit_cast<uint32_t>(state.ammo[5]),

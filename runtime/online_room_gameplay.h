@@ -27,6 +27,9 @@ public:
     // separate from Readiness, which must not construct/admit world entities.
     bool InitializeActors(PPCContext&,uint8_t*);
     uint16_t extra_actor_mask()const;
+    // Local ownership metadata for typed observations. Resolves retail manager
+    // handles and generation-pinned extra input actors in this native world.
+    bool BindObservationPeers(GameplayObservation&,PPCContext&,uint8_t*);
     // Count only actual admitted humans during this owned native update. Zero means unavailable.
     uint32_t NativeDeathParticipantCount(PPCContext&,uint8_t*)const;
     bool OwnedActorForPeer(uint64_t room_peer,PPCContext&,uint8_t*,OwnedActorInput&)const;
