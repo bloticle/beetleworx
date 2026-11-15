@@ -66,6 +66,9 @@ public:
     std::optional<size_t> BeginAiTargetDecision(uint32_t brain,uint8_t*);
     bool FinishAiTargetDecision(size_t ticket,uint32_t brain,uint32_t setter_calls,uint32_t setter_caller,uint32_t target,uint8_t*);
     bool OverridePrivateAiTarget(uint32_t brain,uint32_t& target,uint8_t*);
+    // Private full-spawner transport/capture comparison. Does not replay or
+    // suppress births; addresses are used only to bind stable player IDs.
+    bool RecordSpawnBatch(SpawnBatch,uint32_t owner,uint32_t anchor,uint8_t*);
     bool passive_input_pending()const;
     uint64_t committed_tick()const;
     // Owner-thread read only, outside the native update. Eligibility proves

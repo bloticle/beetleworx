@@ -4,12 +4,14 @@
 #include "simulation.h"
 #include "online.h"
 #include "online_runtime.h"
+#include "online_room_gameplay.h"
 #include <vector>
 #include <bit>
 #include "ppc_context.h"
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <array>
+#include <algorithm>
 #include <cstring>
 #include <immintrin.h>
 #include <windows.h>
@@ -20,6 +22,7 @@ PPC_EXTERN_FUNC(__imp__sub_827B3298);
 PPC_EXTERN_FUNC(__imp__sub_827B3C60);
 REXCVAR_DECLARE(bool,em2_private_profile);
 REXCVAR_DECLARE(bool,em2_probe_room_world_damage_events);
+REXCVAR_DECLARE(bool,em2_probe_room_spawn_batches);
 REXCVAR_DECLARE(bool,em2_trace_online_random_owners);
 REXCVAR_DECLARE(uint32_t,em2_trace_online_random_start_tick);
 PPC_EXTERN_FUNC(__imp__sub_82B6DD98);
@@ -516,14 +519,24 @@ bool em2::TestNativeRandom() {
 
 // Bounded private diagnosis of template spawns around a captured random mismatch.
 // Observes original calls; does not isolate RNG or change spawn eligibility.
+namespace {
+thread_local std::vector<em2::net::SpawnChild>* spawn_children=nullptr;
+thread_local unsigned spawn_depth=0;
+struct SpawnChildrenScope {
+    std::vector<em2::net::SpawnChild>* previous=spawn_children;
+    explicit SpawnChildrenScope(std::vector<em2::net::SpawnChild>& children){spawn_children=&children;++spawn_depth;}
+    ~SpawnChildrenScope(){spawn_children=previous;--spawn_depth;}
+};
+}
 PPC_FUNC_IMPL(sub_827B3C60){
     uint64_t tick=0;
-    const bool trace=base && REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_world_damage_events) && em2::CurrentAgreedSimulationTick(tick);
+    const bool trace=base && REXCVAR_GET(em2_private_profile) && (REXCVAR_GET(em2_probe_room_world_damage_events) || REXCVAR_GET(em2_probe_room_spawn_batches)) && em2::CurrentAgreedSimulationTick(tick);
     if(!trace){__imp__sub_827B3C60(ctx,base);return;}
     const auto component=ctx.r3.u32,anchor=ctx.r5.u32,caller=uint32_t(ctx.lr);
     const auto selector=ctx.r4.s32;const auto flag=ctx.r6.u32;const bool collection=ctx.r7.u32!=0;
     std::array<uint32_t,4> owner{},anchor_id{};bool valid=false,anchor_valid=false,random_valid=false;
     uint32_t count_before=0,choice_before=0,used_before=0,random_before=0;RandomOwner random_owner;
+    em2::net::SpawnBatch captured;captured.depth=uint8_t(std::min(spawn_depth,255u));uint32_t owner_face=0;
     const auto readable=[&](uint32_t address,size_t size){return address>=4096 && uint64_t(address)+size<=0x100000000ull && em2::GuestReadBatch::Readable(base+address,size);};
     const auto identity=[&](uint32_t entity,std::array<uint32_t,4>& id){
         if(!readable(entity,20) || PPC_LOAD_U32(entity)!=0x8208D908)return false;
@@ -534,6 +547,7 @@ PPC_FUNC_IMPL(sub_827B3C60){
         if(readable(component,148)){
             const auto attached=PPC_LOAD_U32(component+48);
             valid=attached && attached<=UINT32_MAX-8 && identity(attached+8,owner);
+            if(valid)owner_face=attached+8;
             count_before=PPC_LOAD_U32(component+104);choice_before=PPC_LOAD_U32(component+140);used_before=PPC_LOAD_U32(component+144);
         }
         anchor_valid=identity(anchor,anchor_id);
@@ -542,7 +556,7 @@ PPC_FUNC_IMPL(sub_827B3C60){
         REXLOG_INFO("Private native spawn batch begin: tick {} caller {:08X}, owner-valid {} GUID {:08X}/{:08X}/{:08X}/{:08X}, anchor-valid {} GUID {:08X}/{:08X}/{:08X}/{:08X}, selector {}, flag {}, collection {}, count {}, choice {}, used {:08X}, CRT-valid {} state {:08X}; observation only",
             tick,caller,valid,owner[0],owner[1],owner[2],owner[3],anchor_valid,anchor_id[0],anchor_id[1],anchor_id[2],anchor_id[3],selector,flag,collection,count_before,choice_before,used_before,random_valid,random_before);
     }
-    __imp__sub_827B3C60(ctx,base);
+    {SpawnChildrenScope children(captured.children);__imp__sub_827B3C60(ctx,base);}
     {
         RandomHost preserve(ctx);em2::GuestReadBatch reads;RandomOwner after;std::array<uint32_t,4> result{},current_owner{};
         const bool owner_unchanged=valid && readable(component,148) && [&]{const auto attached=PPC_LOAD_U32(component+48);return attached && attached<=UINT32_MAX-8 && identity(attached+8,current_owner) && current_owner==owner;}();
@@ -550,11 +564,21 @@ PPC_FUNC_IMPL(sub_827B3C60){
         const bool same_random=random_valid && ReadRandomOwner(ctx,base,after) && after==random_owner && !online_seed.pending && !world_seed.pending;
         REXLOG_INFO("Private native spawn batch end: tick {} caller {:08X}, owner GUID {:08X}/{:08X}/{:08X}/{:08X}, owner-unchanged {}, count {}, choice {}, used {:08X}, result-valid {} GUID {:08X}/{:08X}/{:08X}/{:08X}, CRT-valid {} state {:08X}; observation only",
             tick,caller,owner[0],owner[1],owner[2],owner[3],owner_unchanged,owner_unchanged?PPC_LOAD_U32(component+104):0,owner_unchanged?PPC_LOAD_U32(component+140):0,owner_unchanged?PPC_LOAD_U32(component+144):0,output_valid,result[0],result[1],result[2],result[3],same_random,same_random?PPC_LOAD_U32(after.ptd+20):0);
+        if(auto* gameplay=em2::net::CurrentNativeRoomGameplay();gameplay && REXCVAR_GET(em2_probe_room_spawn_batches)){
+            captured.owner.id=owner_unchanged?owner:em2::net::SpawnId{};captured.anchor.id=anchor_id;
+            captured.selection=selector;captured.flag=flag==1;captured.collection=collection;
+            captured.before={count_before,choice_before,used_before};
+            if(owner_unchanged)captured.after={PPC_LOAD_U32(component+104),PPC_LOAD_U32(component+140),PPC_LOAD_U32(component+144)};
+            captured.random_present=same_random;captured.random_before=same_random?random_before:0;captured.random_after=same_random?PPC_LOAD_U32(after.ptd+20):0;captured.result=result;
+            // Unsupported native boolean values must not be silently normalized.
+            if(flag>1 || (anchor && !anchor_valid))captured.depth=255;
+            gameplay->RecordSpawnBatch(std::move(captured),owner_face,anchor,base);
+        }
     }
 }
 PPC_FUNC_IMPL(sub_827B3298){
     uint64_t tick=0;const uint64_t start=REXCVAR_GET(em2_trace_online_random_start_tick);
-    const bool operation=REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_world_damage_events) && em2::CurrentAgreedSimulationTick(tick);
+    const bool operation=REXCVAR_GET(em2_private_profile) && (REXCVAR_GET(em2_probe_room_world_damage_events) || REXCVAR_GET(em2_probe_room_spawn_batches)) && em2::CurrentAgreedSimulationTick(tick);
     const auto component=ctx.r3.u32,anchor=ctx.r4.u32,prototype=ctx.r5.u32,caller=uint32_t(ctx.lr);
     const std::array<uint32_t,3> flags{ctx.r6.u32,ctx.r7.u32,ctx.r8.u32};
     std::array<uint32_t,4> owner_id{},anchor_id{},prototype_id{};bool owner_valid=false,anchor_valid=false,random_valid=false;
@@ -598,6 +622,9 @@ PPC_FUNC_IMPL(sub_827B3298){
         if(output_valid)for(unsigned i=0;i<4;++i)output[i]=PPC_LOAD_U32(entity+4+i*4);
         const bool same_random=random_valid && ReadRandomOwner(ctx,base,after) && after==random_owner && !online_seed.pending && !world_seed.pending;
         const auto random_after=same_random?PPC_LOAD_U32(after.ptd+20):0;
+        // Keep one sentinel beyond the wire limit so a native oversized batch
+        // fails capture without growing diagnostic storage without a bound.
+        if(spawn_children && spawn_children->size()<=em2::net::kMaxSpawnChildren)spawn_children->push_back({prototype_id,output,flags});
         REXLOG_INFO("Private native spawner operation: tick {} caller {:08X} component {:08X}, owner-valid {} GUID {:08X}/{:08X}/{:08X}/{:08X}, anchor-valid {} GUID {:08X}/{:08X}/{:08X}/{:08X}, template ID {:08X}/{:08X}/{:08X}/{:08X}, flags {}/{}/{}, result-valid {} entity {:08X} GUID {:08X}/{:08X}/{:08X}/{:08X}, CRT-valid {} states {:08X}/{:08X}; observation only",
             tick,caller,component,owner_valid,owner_id[0],owner_id[1],owner_id[2],owner_id[3],anchor_valid,anchor_id[0],anchor_id[1],anchor_id[2],anchor_id[3],
             prototype_id[0],prototype_id[1],prototype_id[2],prototype_id[3],flags[0],flags[1],flags[2],output_valid,entity,output[0],output[1],output[2],output[3],same_random,random_before,random_after);

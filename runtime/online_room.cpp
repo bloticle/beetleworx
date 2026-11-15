@@ -29,11 +29,11 @@ using Clock=std::chrono::steady_clock;
 using Bytes=std::vector<uint8_t>;
 constexpr size_t Window=64,MaxPacket=8192,MaxQueued=1024*1024;
 constexpr size_t MaxAuthorityPacket=512*1024;
-constexpr uint8_t WireVersion=19;
+constexpr uint8_t WireVersion=20;
 static_assert(100+16*31+kAuthorityCharacterBatch*46<=MaxPacket);
 constexpr size_t MaxEncodedDamage=6+16+16+2+32+1+kMaxDamageStimuli*12+2+2+kMaxDamageShapeKeys*4+3+kMaxDamageTag;
 static_assert(MaxEncodedDamage<=kMaxDamageEventBytes);
-static_assert(100+16*38+kAuthorityCharacterBatch*46+kAuthorityDamageBatch*(2+MaxEncodedDamage)+2+kAuthorityAiDecisionBatch*39<=MaxAuthorityPacket);
+static_assert(100+16*38+kAuthorityCharacterBatch*46+kAuthorityDamageBatch*(2+MaxEncodedDamage)+2+kAuthorityAiDecisionBatch*39+2+kAuthoritySpawnBatch*(2+kMaxSpawnBatchBytes)<=MaxAuthorityPacket);
 static_assert(MaxAuthorityPacket+16*4096<=MaxQueued); // One incomplete frame plus the bounded Poll read burst.
 constexpr auto Timeout=std::chrono::seconds(15);
 constexpr auto StartupTimeout=std::chrono::seconds(180);
@@ -84,6 +84,13 @@ bool ValidAuthorityActors(const RoomAuthorityState& state){
            (!decision.setter && (decision.write_selection || decision.target_peer || nonzero(decision.target))) ||
            (!decision.write_selection && decision.selection))return false;
     }
+    if(state.spawn_batches.size()>kAuthoritySpawnBatch)return false;
+    std::set<SpawnId> births;
+    for(const auto& batch:state.spawn_batches){
+        if(!ValidSpawnBatch(batch))return false;
+        for(auto peer:{batch.owner.peer,batch.anchor.peer})if(peer && !(state.players_mask&(1u<<(peer-1))))return false;
+        for(const auto& child:batch.children)if(!births.insert(child.entity).second)return false;
+    }
     return state.damages.size()<=kAuthorityDamageBatch &&
         std::all_of(state.damages.begin(),state.damages.end(),[&](const auto& damage){
             if(!ValidDamageEvent(damage))return false;
@@ -109,6 +116,8 @@ void WriteAuthorityState(Bytes& bytes,const RoomAuthorityState& state){
         for(auto word:decision.owner)U64(bytes,word,4);for(auto word:decision.target)U64(bytes,word,4);
         U8(bytes,decision.target_peer);U8(bytes,decision.setter);U8(bytes,decision.write_selection);U64(bytes,decision.selection,4);
     }
+    U64(bytes,state.spawn_batches.size(),2);
+    for(const auto& batch:state.spawn_batches){const auto encoded=EncodeSpawnBatch(batch);U64(bytes,encoded.size(),2);bytes.insert(bytes.end(),encoded.begin(),encoded.end());}
 }
 bool ReadAuthorityState(Reader& reader,RoomAuthorityState& state){
     state.tick=reader.Number(8);state.roster_revision=reader.Number(8);for(auto& byte:state.world)byte=reader.Byte();
@@ -134,6 +143,12 @@ bool ReadAuthorityState(Reader& reader,RoomAuthorityState& state){
         for(auto& word:decision.owner)word=uint32_t(reader.Number(4));for(auto& word:decision.target)word=uint32_t(reader.Number(4));
         decision.target_peer=reader.Byte();const auto setter=reader.Byte(),selection=reader.Byte();if(setter>1 || selection>1)return false;
         decision.setter=setter!=0;decision.write_selection=selection!=0;decision.selection=uint32_t(reader.Number(4));state.ai_decisions.push_back(decision);
+    }
+    const auto batches=reader.Number(2);if(!reader.good || batches>kAuthoritySpawnBatch)return false;
+    for(unsigned i=0;i<batches;++i){const auto length=reader.Number(2);
+        if(!reader.good || !length || length>kMaxSpawnBatchBytes || length>reader.bytes.size()-reader.at)return false;
+        SpawnBatch batch;if(!DecodeSpawnBatch(reader.bytes.subspan(reader.at,size_t(length)),batch))return false;
+        reader.at+=size_t(length);state.spawn_batches.push_back(std::move(batch));
     }
     return reader.Done() && ValidAuthorityActors(state);
 }
@@ -1633,6 +1648,7 @@ bool TestOnlineRoomLoads(){
 }
 
 bool TestOnlineRoom(){
+    if(!TestSpawnBatchCodec())return false;
     if(!TestOnlineRoomLoads())return false;
     if(!TestOnlineRoomHistory())return false;
     // Network tests use only ephemeral numeric loopback ports. No game assets,
@@ -2123,12 +2139,17 @@ bool TestOnlineRoom(){
     for(unsigned i=0;i<kAuthorityAiDecisionBatch;++i)event_state.ai_decisions.push_back({{i+1,8,7,6},{9,8,7,6},0,true,true,4096});
     event_state.ai_decisions[0].target={};event_state.ai_decisions[0].target_peer=1;
     for(unsigned field:{33u,34u}){
-        Bytes bad;WriteAuthorityState(bad,event_state);bad[bad.size()-39+field]=2;
+        Bytes bad;WriteAuthorityState(bad,event_state);bad[bad.size()-41+field]=2;
         Reader reader{bad};RoomAuthorityState decoded;
         check(!ReadAuthorityState(reader,decoded),"non-boolean native AI command flags rejected on wire");
     }
     if(!check(rooms[0]->CompleteGameplay(id.first_tick,proof),"host completes actual fixture update before its event batch is published"))return false;
-    for(unsigned mutation=0;mutation<8;++mutation){auto bad=event_state;
+    for(unsigned i=0;i<kAuthoritySpawnBatch;++i){SpawnBatch batch;batch.owner.peer=1;batch.anchor.id={12,13,14,15};
+        batch.before={i,1,0};batch.after={i+1,2,1};batch.selection=-1;batch.flag=true;
+        for(unsigned child=0;child<kMaxSpawnChildren;++child)batch.children.push_back({{0x69771,0,0,0},{i+1,child+1,0x1234,0x5678},{0,child,1}});
+        batch.result=batch.children.back().entity;event_state.spawn_batches.push_back(std::move(batch));
+    }
+    for(unsigned mutation=0;mutation<13;++mutation){auto bad=event_state;
         if(mutation==0)bad.damages.push_back(large_event);
         if(mutation==1)bad.damages.front().stimuli.front().effective_bits=0x7fc00000;
         if(mutation==2){bad.damages.front().target={};bad.damages.front().target_peer=0;}
@@ -2137,6 +2158,11 @@ bool TestOnlineRoom(){
         if(mutation==5)bad.ai_decisions.front().target={1,0,0,0};
         if(mutation==6)bad.ai_decisions.front().setter=false;
         if(mutation==7)bad.ai_decisions.front().selection=4097;
+        if(mutation==8)bad.spawn_batches.push_back(event_state.spawn_batches.front());
+        if(mutation==9)bad.spawn_batches.front().owner.peer=16;
+        if(mutation==10)bad.spawn_batches.front().children.front().prototype={};
+        if(mutation==11)bad.spawn_batches.back().children.front().entity=bad.spawn_batches.front().children.front().entity;
+        if(mutation==12)bad.spawn_batches.front().result={999,0,0,0};
         check(rooms[0]->TryPublishAuthorityState(bad)==AuthorityPublishResult::Rejected && !rooms[0]->impl_->authority_sent,
             "invalid or oversized damage batches do not consume publication order");
     }

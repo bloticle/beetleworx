@@ -4,6 +4,7 @@
 #include "online_room_history.h"
 #include "online_rollback.h"
 #include "online_damage_event.h"
+#include "online_spawn_batch.h"
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -29,6 +30,7 @@ struct RoomActorState {
 inline constexpr size_t kAuthorityCharacterBatch=128;
 inline constexpr size_t kAuthorityDamageBatch=128;
 inline constexpr size_t kAuthorityAiDecisionBatch=128;
+inline constexpr size_t kAuthoritySpawnBatch=32;
 struct RoomAiTargetDecision {
     std::array<uint32_t,4> owner{},target{};
     uint8_t target_peer=0;
@@ -55,6 +57,7 @@ struct RoomAuthorityState {
     std::vector<RoomCharacterState> characters;
     std::vector<DamageEvent> damages;
     std::vector<RoomAiTargetDecision> ai_decisions;
+    std::vector<SpawnBatch> spawn_batches;
     bool operator==(const RoomAuthorityState&)const=default;
 };
 struct RoomRollbackCommands {

@@ -104,6 +104,70 @@ Evidence:
 Observer executable SHA256:
 `AEFAB965B26DB60C2BA636D3751D6CCB9AC197CBABC65B26049E42D46C962236`.
 
+## Portable native batch capture and transport
+
+`online_spawn_batch.h/.cpp` now define the audited TemplateSpawner parent
+operation as bounded portable data. The format retains owner and anchor GUIDs
+or stable lobby-player references, the signed selection argument, flag and
+collection presence, nesting depth, component +104/+140/+144 before/after,
+optional native CRT states, the returned entity ID, and ordered native child
+template IDs, generated IDs and scalar arguments. Local pointers, native
+handles, collection storage and callable addresses are excluded.
+
+The private `em2_probe_room_spawn_batches` adapter captures completed native
+parents and their immediate SpawnOne children. Nested parents retain their
+own depth and child lists. It binds human references through the current
+native lobby roster rather than keeping respawn-generated human GUIDs.
+Storage retains at most 65 children to reject operations exceeding the wire
+limit of 64 without unbounded diagnostic allocation. Unsupported ownership,
+results or native flags fail capture rather than being silently normalized.
+
+Room wire version 20 carries at most 32 batches per completed authority tick.
+Validation rejects duplicate generated IDs, references to absent lobby peers,
+oversized child/batch counts, ambiguous references and malformed payloads.
+The full maximum payload fits the existing 512 KiB authority packet budget;
+the existing publication preflight retains its backpressure behavior.
+
+This adapter compares the guest's completed native batches against the
+received host batch and stops at a divergence. It does not instantiate
+host-only entities, suppress independent guest births, restore CRT/counters,
+or implement full gameplay rollback. Common-world factory births outside
+TemplateSpawner are not covered by this command type. Public/demo launches
+leave the capture adapter disabled. Do not enable it as a multiplayer fix.
+The isolated pair launcher exposes it as `-SpawnBatches`, requiring host
+correction mode.
+
+The same-executable suite passes 160 spawn-codec and 9,083 Room checks. The
+Room fixture sends maximum-size spawn batches alongside maximum damage/AI
+and character data over real TCP, checking fragmentation, exact equality,
+ordering and pressure/rejection behavior. These are codec/transport checks,
+not proof of native replay.
+Evidence:
+`analysis/native-spawn-transport-test-63cd51ac3433493ca94b2a88b1af7a1a/rollback.log`.
+
+The live wire-20 run verifies six nonempty host batch messages on the guest at
+ticks 451, 458, 872, 934, 1198 and 1462. At tick 1720 the new adapter stops on
+a guest-only `dropwingbubbleprojectile` birth (ID
+`00004486/00007792/00000AC8/00002ECA`), while the host completes that tick
+without a parent batch. The eight earlier full observer batches, including two
+pre-admission operations, match exactly. This is an intentionally failed
+integration, not completion of spawn authority; it catches creation-eligibility
+divergence before waiting for a later missing-Damage target. Both owned
+processes close normally and leave normal user files unchanged. The host
+finisher's requested gameplay-stop marker is absent, so its observation times
+out before the normal owned close; that observation is not reported as passed.
+Evidence:
+`analysis/private-native-room-pair-20261115-100911-0ff20939/spawn-transport-integration-result.json`.
+Executable SHA256:
+`6E09FAE0EF2CB462748CEA0FD6C2ED304C65D657A645B673B839C352DB156F43`.
+
+The guest-only call returns to `828B71C4` inside `828B7148`. The original
+caller immediately tests r3 for zero and takes its normal null-return epilogue
+at `828B7238` before any spawned-entity dereference. This audited boundary is
+a candidate for eligibility suppression; the current adapter does not yet
+skip it. Low-level clone suppression remains unsafe at other callers that
+dereference the result unconditionally.
+
 ## GUID mutation fence fixed
 
 Cloning assigns a new GUID after the entity is registered. Original
