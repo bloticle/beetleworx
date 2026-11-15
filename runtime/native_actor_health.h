@@ -3,6 +3,8 @@
 #include <optional>
 struct PPCContext;
 namespace em2 {
+// Owner-thread native damage invoked while applying a host correction.
+bool NativeDamageReplayActive()noexcept;
 // Completed game-thread boundary. Original Health-property dispatch; a living
 // actor corrected to zero uses the retail Damage-export sequence so native
 // death listeners run immediately. No raw component writes. General damage

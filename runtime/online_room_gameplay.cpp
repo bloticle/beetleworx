@@ -1108,6 +1108,15 @@ bool NativeRoomGameplay::active()const{return impl_->Configured();}
 bool NativeRoomGameplay::halted()const{return impl_->stopped;}
 bool NativeRoomGameplay::waiting()const{return gameplay_waiting.load(std::memory_order_acquire);}
 bool NativeRoomGameplay::completion_pending()const{return impl_->pending;}
+bool NativeRoomGameplay::SuppressLocalDamage(uint32_t target)const{
+    const auto& s=*impl_;uint64_t tick=0;
+    const bool owned=s.Owner() && s.Configured() && !s.stopped && s.peer!=1 && s.pending && !s.load_depth &&
+        !s.transition_pending && s.room->state()==RoomState::Running && s.room->host_correction_mode() &&
+        em2::CurrentAgreedSimulationTick(tick) && tick==s.committed;
+    if(!owned || !target)return false;
+    return target==s.label_handles[0] || target==s.label_handles[1] ||
+        std::any_of(s.actors->actors().begin(),s.actors->actors().end(),[&](const auto& entry){return entry.actor.handle==target;});
+}
 bool NativeRoomGameplay::passive_input_pending()const{const auto& s=*impl_;return s.Owner() && !s.stopped && s.pending && s.delivered && (s.consumed_passive || s.game_over_entry.has_value());}
 uint64_t NativeRoomGameplay::committed_tick()const{return impl_->committed;}
 bool NativeRoomGameplay::SampleRecoveryButtons(uint16_t& buttons)const{

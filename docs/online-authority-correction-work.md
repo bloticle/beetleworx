@@ -339,3 +339,41 @@ after the entry sequence progressed, independent input at 4149..4338 moved both.
 There was no gameplay stop before owned shutdown. The guest logged a cancelled
 host-state wait 14 ms after Window closing; this remains noisy shutdown reporting,
 not a crash or a successful reconnect. Normal user files were unchanged.
+
+## Damage authority
+
+A guest-only fatal Damage fixture exposed the reverse failure in demo 13:
+the host remained alive and corrected the guest's health back to five, but the
+guest retained its native terminal control state. The host rejected that input.
+The failed capture is
+`analysis/private-native-room-pair-20261115-073310-37cdb941/guest-only-fatal-result.json`.
+
+The next candidate suppresses independently generated native Damage broadcasts
+targeting admitted human players in a correction guest's owned agreed update.
+NPC and prop dispatch remains enabled until their event/lifecycle replication
+exists; suppressing it now would prevent local destruction without providing a
+replacement. Offline gameplay,
+host damage, raw initialization and native teardown retain original dispatch.
+Applying authoritative lethal state opens a thread-local native replay scope,
+so original death listeners remain available and the scope unwinds on errors.
+This establishes damage ownership; it does not replicate full damage payloads,
+enemy AI, spawning, props, death causes or hit reactions.
+
+`analysis/private-native-room-pair-20261115-073709-115574ee/guest-only-fatal-result.json`
+records successful guest-only fatal-damage rejection with SHA256
+`DE4069F071297BE65A7969687346394C5BA332CA955565F3C20C9061F252799A`:
+health remained five, no terminal GameOver was entered, and subsequent input
+moved both players. Normal user files were unchanged and both processes closed.
+Host-caused death replay requires a separate live check before publishing.
+
+The final player-scoped candidate SHA256 is
+`CE06C9540FACFE7A7FA32E796CB867CA8D81AE6BBEFB621F2233BB53209A6AC6`.
+`analysis/private-native-room-pair-20261115-074122-6d356d11/damage-authority-result.json`
+records one continuous session: host-only fatal damage at 180, both original
+GameOver entries at 180 and native respawn at 241/raw242, followed by guest-only
+fatal damage at 360. Exactly the two new player handles were suppressed; other
+native Damage callbacks still ran. Both players then moved independently and
+the session continued past 1,000 without a gameplay stop before owned shutdown.
+This also checks that the native replay scope closed after the real respawn.
+Normal user files were unchanged. Direct death paths outside this dispatcher,
+enemy AI/lifecycle and complete combat payload replication remain unverified.

@@ -15,8 +15,10 @@ and shared death/respawn have passed limited two-player tests, with broader
 campaign coverage still needed. Keep a backup and report where a session stops.
 Host-only lethal player damage now enters the guest's native death path before
 its matching update; the isolated respawn check passed. This uses generic native
-damage rather than the host's full combat event. Client-only false deaths and
-complete combat/script replication remain unfinished.
+damage rather than the host's full combat event. Independently generated guest
+Damage events targeting admitted players are suppressed; host death replay stays
+enabled. Enemy AI, lifecycle, complete combat/script replication and death paths
+outside the audited native Damage dispatcher remain unfinished.
 
 Rooms currently require an invitation. Public matchmaking and joining games
 that have already started remain unfinished. Invite Friends requests Discord's

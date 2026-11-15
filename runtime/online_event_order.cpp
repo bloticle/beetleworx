@@ -1,5 +1,6 @@
 #include "online_event_order.h"
 #include "online_room_gameplay.h"
+#include "native_actor_health.h"
 #include "simulation.h"
 #include "guest_read_batch.h"
 #include "ppc_context.h"
@@ -127,6 +128,20 @@ PPC_FUNC_IMPL(sub_827340E0){
     const auto event=ctx.r4.u32,caller=uint32_t(ctx.lr);
     const bool observed=em2::CurrentAgreedSimulationTick(tick);
     if(observed)TracePrivateDamage(ctx,base,tick,"before",event,caller);
+    {
+        Environment preserve;em2::GuestReadBatch reads;
+        const auto* game=em2::net::CurrentNativeRoomGameplay();
+        if(game && !em2::NativeDamageReplayActive() && Readable(event,116,base) &&
+           PPC_LOAD_U16(event+4)==14 && PPC_LOAD_U32(event)==0x82076C70 && game->SuppressLocalDamage(PPC_LOAD_U32(event+8))){
+            // The caller still owns and destroys its original event. Do not
+            // dispatch independently generated guest damage into listeners:
+            // undoing Health afterward cannot undo death, control mode, drops
+            // or script side effects. Host corrections retain their own scope.
+            if(REXCVAR_GET(em2_private_profile) && tick==REXCVAR_GET(em2_native_lobby_qa_restart_tick))
+                REXLOG_INFO("Native client player Damage suppressed: tick {}, target {:08X}; host damage authority, native replay remains enabled",tick,PPC_LOAD_U32(event+8));
+            return;
+        }
+    }
     Run(ctx,base,REXCVAR_GET(em2_online_event_order) && em2::net::CurrentNativeRoomGameplay() &&
         !em2::net::NativeRoomGameplayHalted() && em2::CurrentAgreedSimulationTick(tick));
     if(observed)TracePrivateDamage(ctx,base,tick,"after",event,caller);

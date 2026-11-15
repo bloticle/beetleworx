@@ -53,6 +53,10 @@ public:
     bool halted()const;
     bool waiting()const;
     bool completion_pending()const;
+    // Only player damage in the admitted guest's agreed native update.
+    // Props/NPCs retain dispatch until their event/lifecycle replication exists.
+    // replaying a host correction is authorized separately by its native scope.
+    bool SuppressLocalDamage(uint32_t target_handle)const;
     bool passive_input_pending()const;
     uint64_t committed_tick()const;
     // Owner-thread read only, outside the native update. Eligibility proves

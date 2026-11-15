@@ -15,6 +15,7 @@ PPC_EXTERN_FUNC(__imp__sub_828218B0); // original effective damage calculation
 PPC_EXTERN_FUNC(sub_827340E0);       // original event dispatch, native ordering hook
 PPC_EXTERN_FUNC(__imp__sub_827621C0); // non-deleting Damage event destructor
 namespace {
+thread_local unsigned damage_replay_depth=0;
 bool Readable(uint8_t* base,uint32_t at,size_t size){return base && at>=4096 && uint64_t(at)+size<=0x100000000ull && em2::GuestReadBatch::Readable(base+at,size);}
 struct Borrow {
     PPCContext& ctx;PPCContext saved;DWORD error=GetLastError();unsigned csr=_mm_getcsr();
@@ -42,6 +43,7 @@ bool Route(uint8_t* base,uint32_t entity,uint32_t& property){
 // This does not claim to reproduce the host's particular damage stimulus or
 // replace general combat-event replication.
 bool NativeLethalCorrection(Borrow& borrow,uint32_t entity){
+    struct Replay {unsigned saved=damage_replay_depth;Replay(){++damage_replay_depth;}~Replay(){damage_replay_depth=saved;}} replay;
     auto* base=borrow.base;auto& ctx=borrow.ctx;
     em2::NativeEntitySnapshot entities;const char* error=nullptr;uint32_t address=0;
     if(!em2::ReadNativeEntitySnapshot(base,entities,error,address,false) || !Readable(base,0x833DA6F4,4))return false;
@@ -64,6 +66,7 @@ bool NativeLethalCorrection(Borrow& borrow,uint32_t entity){
     destroy();return true;
 }
 }
+bool em2::NativeDamageReplayActive()noexcept{return damage_replay_depth!=0;}
 std::optional<int32_t> em2::ReadNativeActorHealth(PPCContext& ctx,uint8_t* base,uint32_t entity){
     GuestReadBatch reads;Borrow borrow(ctx,base);uint32_t property=0;
     if(!borrow.memory || !Route(base,entity,property))return {};
