@@ -53,6 +53,11 @@ bool DecodeSpawnBatch(std::span<const uint8_t> bytes,SpawnBatch& out){
     if(!r.good || r.at!=bytes.size() || !ValidSpawnBatch(batch))return false;
     out=std::move(batch);return true;
 }
+SpawnEligibility EvaluateSpawnEligibility(std::span<const SpawnBatch> host,std::span<const SpawnBatch> completed,const SpawnReference& owner){
+    if(!Reference(owner,true) || completed.size()>host.size() || !std::equal(completed.begin(),completed.end(),host.begin()))return SpawnEligibility::InvalidPrefix;
+    for(const auto& batch:host.subspan(completed.size()))if(batch.owner==owner)return SpawnEligibility::Original;
+    return SpawnEligibility::Suppress;
+}
 bool TestSpawnBatchCodec(){
     unsigned checks=0;auto check=[&](bool ok,const char* why){++checks;if(!ok)REXLOG_ERROR("Spawn batch codec: {}",why);return ok;};
     SpawnBatch batch;batch.owner.id={1,2,3,4};batch.anchor.peer=16;batch.selection=INT32_MIN;batch.depth=15;batch.flag=true;batch.collection=true;
@@ -83,6 +88,21 @@ bool TestSpawnBatchCodec(){
         if(mutation==5)bad.random_after=1;
         if(!check(EncodeSpawnBatch(bad).empty(),"oversized/duplicate births, absent templates, unsupported flags/results/RNG rejected"))return false;
     }
+    std::vector<SpawnBatch> host{batch},completed;
+    if(!check(EvaluateSpawnEligibility(host,completed,batch.owner)==SpawnEligibility::Original,"owner with an unconsumed host operation retains original execution"))return false;
+    SpawnReference other;other.id={999,2,3,4};
+    if(!check(EvaluateSpawnEligibility(host,completed,other)==SpawnEligibility::Suppress,"guest-only owner is excluded without consuming another owner's operation"))return false;
+    completed=host;
+    if(!check(EvaluateSpawnEligibility(host,completed,batch.owner)==SpawnEligibility::Suppress,"extra call after the host's last operation is excluded"))return false;
+    completed[0].selection^=1;
+    if(!check(EvaluateSpawnEligibility(host,completed,batch.owner)==SpawnEligibility::InvalidPrefix,"an earlier mismatch cannot be concealed by suppressing a later call"))return false;
+    completed=host;completed.push_back(batch);
+    if(!check(EvaluateSpawnEligibility(host,completed,batch.owner)==SpawnEligibility::InvalidPrefix,"excess completed operations do not index past the host sequence"))return false;
+    host[0].children.clear();host[0].result={};completed.clear();
+    if(!check(EvaluateSpawnEligibility(host,completed,batch.owner)==SpawnEligibility::Original,"host zero-birth calls still execute their native counter and callback effects"))return false;
+    host[0].owner={};host[0].owner.peer=16;
+    if(!check(EvaluateSpawnEligibility(host,completed,host[0].owner)==SpawnEligibility::Original,"stable player ownership is independent of respawn-generated GUIDs"))return false;
+    if(!check(EvaluateSpawnEligibility(host,completed,{})==SpawnEligibility::InvalidPrefix,"absent owner identity is never treated as a safe cancellation"))return false;
     REXLOG_INFO("Spawn batch codec passed {} portable parent/child identity, zero-birth, scalar and malformed-payload checks; no native spawn replay assertion",checks);return true;
 }
 }

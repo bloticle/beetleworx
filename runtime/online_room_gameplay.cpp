@@ -52,6 +52,7 @@ REXCVAR_DEFINE_BOOL(em2_probe_room_world_damage_events,false,"Debug","Private na
 REXCVAR_DEFINE_BOOL(em2_probe_room_ai_targets,false,"Debug","Private native Room: host owns non-human native brain target-selection decisions");
 REXCVAR_DEFINE_BOOL(em2_probe_room_ai_target_drift,false,"Debug","Private AI authority fixture: only the host requests Mickey as an NPC target during ticks 120-179");
 REXCVAR_DEFINE_BOOL(em2_probe_room_spawn_batches,false,"Debug","Private native Room: transport and compare complete native spawner batches; no spawn replay or suppression");
+REXCVAR_DEFINE_BOOL(em2_probe_room_spawn_eligibility,false,"Debug","Private spawn authority: suppress guest-only operations at the audited null-safe projectile caller; requires batch capture");
 PPC_EXTERN_FUNC(__imp__sub_827F2FA8);
 REXCVAR_DECLARE(bool,em2_profile_world_memory);
 REXCVAR_DECLARE(bool,em2_probe_room_recovery_controller);
@@ -1211,6 +1212,32 @@ bool NativeRoomGameplay::RecordSpawnBatch(SpawnBatch batch,uint32_t owner,uint32
     if(!canonical(batch.owner,owner) || !canonical(batch.anchor,anchor) || !ValidSpawnBatch(batch))return s.Stop("Native spawn capture has unsupported ownership, identity or child side effects");
     if(s.spawn_batches.size()>=kAuthoritySpawnBatch)return s.Stop("Native spawn capture batch exceeds bound");
     s.spawn_batches.push_back(std::move(batch));return true;
+}
+bool NativeRoomGameplay::SuppressSpawnBatch(const PPCContext& ctx,uint8_t* base,unsigned depth){
+    Environment preserve;em2::GuestReadBatch reads;auto& s=*impl_;uint64_t tick=0;
+    if(!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_spawn_batches) || !REXCVAR_GET(em2_probe_room_spawn_eligibility) ||
+       !s.Owner() || !s.Configured() || s.stopped || s.peer==1 || !s.pending || s.load_depth || s.transition_pending ||
+       s.room->state()!=RoomState::Running || !s.room->host_correction_mode() || !s.pending_authority ||
+       !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed || s.pending_authority->tick!=tick)return false;
+    // 828B7148 checks r3 immediately at return 828B71C4 and takes its null
+    // epilogue at 828B7238, before reading the spawned entity. No output list is
+    // passed. Other callers and nested operations require their own ABI audit.
+    if(depth || uint32_t(ctx.lr)!=0x828B71C4 || ctx.r7.u32 || ctx.r6.u32>1)return false;
+    const auto component=ctx.r3.u32;
+    if(!Readable(component,148,base))return false;
+    const auto attached=PPC_LOAD_U32(component+48);
+    if(!attached || attached>UINT32_MAX-8 || !Readable(attached+8,20,base) || PPC_LOAD_U32(attached+8)!=0x8208D908)return false;
+    SpawnReference owner;owner.peer=s.HumanPeer(attached+8);
+    if(!owner.peer)for(unsigned i=0;i<4;++i)owner.id[i]=PPC_LOAD_U32(attached+12+i*4);
+    switch(EvaluateSpawnEligibility(s.pending_authority->spawn_batches,s.spawn_batches,owner)){
+    case SpawnEligibility::Original:return false;
+    case SpawnEligibility::InvalidPrefix:s.Stop("Native spawn eligibility rejected an invalid completed host prefix");return true;
+    case SpawnEligibility::Suppress:
+        REXLOG_INFO("Native guest-only spawn suppressed: tick {} owner peer {} GUID {:08X}/{:08X}/{:08X}/{:08X}, count {}, choice {}, used {:08X}; audited null-safe caller, original parent not entered, no RNG/counter/birth side effects",
+            tick,owner.peer,owner.id[0],owner.id[1],owner.id[2],owner.id[3],PPC_LOAD_U32(component+104),PPC_LOAD_U32(component+140),PPC_LOAD_U32(component+144));
+        return true;
+    }
+    return false;
 }
 bool NativeRoomGameplay::FinishAiTargetDecision(size_t ticket,uint32_t brain,uint32_t setters,uint32_t caller,uint32_t target,uint8_t* base){
     Environment preserve;em2::GuestReadBatch reads;auto& s=*impl_;uint64_t tick=0;std::array<uint32_t,4> owner;

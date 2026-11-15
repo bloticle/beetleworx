@@ -529,6 +529,7 @@ struct SpawnChildrenScope {
 };
 }
 PPC_FUNC_IMPL(sub_827B3C60){
+    if(auto* gameplay=em2::net::CurrentNativeRoomGameplay();gameplay && gameplay->SuppressSpawnBatch(ctx,base,spawn_depth)){ctx.r3.u64=0;return;}
     uint64_t tick=0;
     const bool trace=base && REXCVAR_GET(em2_private_profile) && (REXCVAR_GET(em2_probe_room_world_damage_events) || REXCVAR_GET(em2_probe_room_spawn_batches)) && em2::CurrentAgreedSimulationTick(tick);
     if(!trace){__imp__sub_827B3C60(ctx,base);return;}

@@ -69,6 +69,9 @@ public:
     // Private full-spawner transport/capture comparison. Does not replay or
     // suppress births; addresses are used only to bind stable player IDs.
     bool RecordSpawnBatch(SpawnBatch,uint32_t owner,uint32_t anchor,uint8_t*);
+    // Private host eligibility: true authorizes a null result only at the
+    // audited caller, without entering the native parent or changing counters.
+    bool SuppressSpawnBatch(const PPCContext&,uint8_t*,unsigned depth);
     bool passive_input_pending()const;
     uint64_t committed_tick()const;
     // Owner-thread read only, outside the native update. Eligibility proves

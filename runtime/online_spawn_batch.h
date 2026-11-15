@@ -37,5 +37,10 @@ bool ValidSpawnBatch(const SpawnBatch&);
 std::vector<uint8_t> EncodeSpawnBatch(const SpawnBatch&);
 // Transactional, bounded, big-endian data only; never allocates native objects.
 bool DecodeSpawnBatch(std::span<const uint8_t>,SpawnBatch&);
+enum class SpawnEligibility {Original,Suppress,InvalidPrefix};
+// Preserve host zero-birth calls and operations for an owner still present in
+// the unconsumed sequence. Never hide a prior capture mismatch by cancelling a
+// later call. Native scope/caller ABI checks belong to the execution adapter.
+SpawnEligibility EvaluateSpawnEligibility(std::span<const SpawnBatch> host,std::span<const SpawnBatch> completed,const SpawnReference& owner);
 bool TestSpawnBatchCodec();
 }

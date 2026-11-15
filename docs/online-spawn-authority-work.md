@@ -164,9 +164,63 @@ Executable SHA256:
 The guest-only call returns to `828B71C4` inside `828B7148`. The original
 caller immediately tests r3 for zero and takes its normal null-return epilogue
 at `828B7238` before any spawned-entity dereference. This audited boundary is
-a candidate for eligibility suppression; the current adapter does not yet
+a candidate for eligibility suppression; the capture-only adapter does not
 skip it. Low-level clone suppression remains unsafe at other callers that
 dereference the result unconditionally.
+
+## Guest-only projectile eligibility
+
+The separate, default-off private flag `em2_probe_room_spawn_eligibility`
+now excludes guest-only operations at the audited `828B71C4` call site.
+It requires the existing capture flag, a host-corrected admitted guest, the
+matching pending authority tick, no transition/load, depth zero and no output
+collection. It resolves the owner to its native GUID or stable lobby identity.
+If that owner has an unconsumed host operation, original execution remains
+enabled, including zero-birth operations. If no such operation exists, the
+wrapper returns null without entering the native parent. The caller follows
+its original checked null-result path, and no constructor/RNG/counter effects
+from the excluded parent occur. The adapter does not fake a consumed command.
+
+Eligibility first requires the completed local batch sequence to be an exact
+host prefix; a prior mismatch halts instead of being hidden by suppressing
+subsequent calls. Other call sites and nested operations retain original
+execution until their native behavior is audited. The isolated launcher
+exposes this as `-SpawnEligibility`, requiring `-SpawnBatches`.
+
+The same-executable suite passes 168 codec/eligibility and 9,083 Room checks.
+New decision checks cover absent owners, outstanding and exhausted commands,
+different owners, zero-birth calls, stable human references and invalid/excess
+completed prefixes. Evidence:
+`analysis/native-spawn-eligibility-test-d60dd09f575544fa917d93742c3c864c/rollback.log`.
+
+Reusing the failed capture run's lobby nonce reproduces its matching early
+batches and exact guest-only projectile at tick 1720, with owner
+`000054B5/0000342B/00006C33/000068CF` and counter/selection/used fields 3/1/0.
+The new adapter excludes that operation, returns safely through the real native
+caller, and completes the tick. At tick 1728, the host creates a projectile for
+the same owner while the guest makes no parent call; capture correctly halts.
+Thus eligibility suppression is exercised in actual native gameplay, while
+host-only birth replay remains unimplemented. This is a failed full-world
+integration with a passed targeted suppression case, not a playable authority
+claim. Both owned processes close normally and leave normal user files alone.
+Evidence:
+`analysis/private-native-room-pair-20261115-101639-c9dce970/spawn-eligibility-integration-result.json`.
+Executable SHA256:
+`1A2D1E1882C295C1F07656BC076DF12B5CA1EC43FBD975AC526CE0CBC28AE516`.
+
+## Additional projectile initialization outside the parent
+
+The `828B7148` caller does more than obtain a new entity: after the parent
+returns it configures the projectile's native source/instigator references,
+collision relationships through `8275D948`, and an FX owner through
+`827D87D8`. Its burst caller `828B92A8` invokes it at `828B936C` and records
+successful native entity handles in the shooter's component +80/+84 array via
+`82747B60`. A null result takes that caller's existing failure path instead.
+
+Consequently replaying `827B3C60` alone and assigning a host GUID would still
+omit native projectile setup and burst ownership. Host-only replay must cover
+these outer effects or an audited complete firing operation; constructor-only
+replay must not be presented as a functional host-owned projectile.
 
 ## GUID mutation fence fixed
 
