@@ -17,6 +17,9 @@ struct DamageStimulus {
 struct DamageEvent {
     DamageEntityId target{};
     std::optional<DamageEntityId> instigator;
+    // Human actors use the scoped lobby peer instead of a respawn-generated
+    // native GUID. Exactly one target identity representation is permitted.
+    uint8_t target_peer=0,instigator_peer=0;
     std::array<uint8_t,2> flags{};
     std::array<uint32_t,8> vectors{};
     std::vector<DamageStimulus> stimuli;
@@ -26,7 +29,7 @@ struct DamageEvent {
     std::string tag;
     bool operator==(const DamageEvent&)const=default;
 };
-inline constexpr size_t kMaxDamageStimuli=16,kMaxDamageTag=255,kMaxDamageShapeKeys=96,kMaxDamageEventBytes=1024;
+inline constexpr size_t kMaxDamageStimuli=16,kMaxDamageTag=255,kMaxDamageShapeKeys=512,kMaxDamageEventBytes=4096;
 bool ValidDamageEvent(const DamageEvent&);
 std::vector<uint8_t> EncodeDamageEvent(const DamageEvent&);
 // Transactional: malformed/truncated/extra bytes never change the output.

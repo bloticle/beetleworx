@@ -869,7 +869,15 @@ bool NativeRoomGameplay::Deliver(PPCContext& ctx,uint8_t* base){
         if(!s.pending_authority || s.pending_authority->tick!=tick)return s.Stop("Host update result did not arrive before matching native guest update");
         if(!s.pending_authority->damages.empty()){
             const char* error=nullptr;
-            if(!em2::ReplayNativeDamageEvents(ctx,base,s.pending_authority->damages,error))return s.Stop(std::string("Native host Damage replay failed: ")+(error?error:"unknown"));
+            std::vector<OnlineNameActor> players;uint64_t local_player=0;
+            if(!NameTagActors(players,local_player,base))return s.Stop("Host Damage replay lost current native player bindings");
+            std::vector<em2::NativeDamageActor> bindings;
+            for(const auto& player:players){uint32_t handle=0;
+                if(player.peer<=2)handle=s.label_handles[player.peer-1];
+                else for(const auto& actor:s.actors->actors())if(actor.room_peer==player.peer){handle=actor.actor.handle;break;}
+                bindings.push_back({uint8_t(player.peer),player.entity,handle});
+            }
+            if(!em2::ReplayNativeDamageEvents(ctx,base,s.pending_authority->damages,bindings,error))return s.Stop(std::string("Native host Damage replay failed: ")+(error?error:"unknown"));
             size_t shape_keys=0;for(const auto& damage:s.pending_authority->damages)shape_keys+=damage.shape_keys.size();
             REXLOG_INFO("Native host Damage batch replayed: tick {}, events {}, child shape keys {}; exact native reconstruction and original listeners before guest update",tick,s.pending_authority->damages.size(),shape_keys);
         }
@@ -1166,6 +1174,16 @@ bool NativeRoomGameplay::RecordDamageEvent(uint32_t event,uint32_t listener,uint
         }
         s.Stop(std::string("Private native Damage capture unsupported: ")+(listener?"targeted listener":error?error:"event batch bound"));return false;
     }
+    const auto player_peer=[&](uint32_t handle)->uint8_t{
+        if(!handle)return 0;
+        uint64_t peer=0;
+        for(unsigned slot=0;slot<2;++slot)if(handle==s.label_handles[slot])peer=slot+1;
+        if(!peer)for(const auto& actor:s.actors->actors())if(actor.actor.handle==handle){peer=actor.room_peer;break;}
+        if(!peer || peer>16 || std::none_of(s.roster.players.begin(),s.roster.players.end(),[&](const auto& player){return player.peer==peer;}))return 0;
+        return uint8_t(peer);
+    };
+    if((value.target_peer=player_peer(target)))value.target={};
+    if((value.instigator_peer=player_peer(PPC_LOAD_U32(event+12))))value.instigator.reset();
     s.damage_events.push_back(std::move(value));return true;
 }
 bool NativeRoomGameplay::passive_input_pending()const{const auto& s=*impl_;return s.Owner() && !s.stopped && s.pending && s.delivered && (s.consumed_passive || s.game_over_entry.has_value());}

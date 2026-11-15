@@ -189,3 +189,63 @@ missing GUID and local snapshot revision to distinguish host-only creation from
 guest-only destruction in the next capture. No new gameplay release is claimed;
 normal public sessions still use the published correction policy, and the new
 world-Damage replication remains behind private flags.
+
+## Respawn player identities and larger collision arrays
+
+A later inventory capture hit 101 child keys at tick 1869, exceeding the old
+96-key bound. The current bounded protocol supports 512 child keys per Damage
+record and 4 KiB record decoding, with 512 KiB authority frames and 1 MiB peer
+queues. Other message types retain the 8 KiB bound and expanded authority frames
+still require an authenticated guest state. The maximum authority fixture uses
+the larger arrays rather than merely adjusting a constant without coverage.
+
+Evidence: `analysis/private-native-room-pair-20261115-084548-e3d3b0fe/world-damage-result.json`.
+
+That run's inventories have two differing GUIDs after original respawn, despite
+identical player handles, component inventories and positions. Original native
+spawn-body logs identify those handles as P0 and P1. Evidence:
+`analysis/private-native-room-pair-20261115-084548-e3d3b0fe/respawn-player-identity-proof.json`.
+This proves a player-reference mismatch exists, but does not retroactively
+identify the earlier missing-target event, which lacked GUID logging.
+
+Damage references now distinguish lobby peers from authored world GUIDs. Host
+capture normalizes recognized human actors to their roster peer and removes
+their process-local GUIDs. The guest resolves that peer through the current
+native player binding, requiring the exact entity/handle pair in its current
+registry snapshot. Native reconstruction is compared against the resulting
+local GUID payload before dispatch. Native registry identities are not renamed.
+Both target and instigator support this representation, including extra humans.
+The protocol rejects ambiguous references and peers outside the current actor
+mask. World references remain strict GUID matches; missing entities are not
+retargeted by name, position or an unrelated matching local handle.
+
+These changes use BWDE version 5 and Room wire version 18. Live respawn
+validation remains pending. Private lifecycle tracing records native insert and
+remove callers/GUIDs; `scripts/inspect-native-damage-identity.py` compares a missing
+world GUID against both peers' sampled inventories without inferring exact
+lifecycle causality from the 30-tick samples.
+
+## Stable player-reference validation
+
+The wire-18 build passes 16 native capture checks, 156 portable codec checks and
+9,071 TCP Room checks with stable target/instigator peers and maximum 512-key
+arrays in the payload:
+`analysis/native-damage-player-identity-test-9d49091e6e6f45d0ae83984d942f0fdc/`.
+Tested executable: `FD37C6BC248F19B47673A9FC8E49D0C36A18163B931C078183F13B86D6370E07`.
+
+The actual two-window Autotopia run passes its bounded 2,400-tick window: host
+fatal damage at 180 enters original GameOver/respawn, guest-only fatal damage at
+360 is suppressed, and subsequent host world Damage continues to replay. Both
+post-respawn native player GUIDs AND their local handles differ across peers.
+The current player bindings still resolve the player references without native
+identity renaming or assuming matching local handles. Several collision-key
+batches also replay through original listeners with exact recaptured payloads.
+Evidence:
+`analysis/private-native-room-pair-20261115-085342-f55556ac/player-identity-damage-result.json`
+and `respawn-player-bindings.json` in the same directory.
+Both owned processes close normally and normal user files remain unchanged.
+
+This pass covers the named fixture and time window only. It does not establish
+host-owned enemy decisions, general dynamic spawn/destruction replication, all
+levels, midgame join, rollback or campaign completion. The new native world
+Damage path remains private while those cases are addressed.

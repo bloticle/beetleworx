@@ -14,33 +14,36 @@ struct Reader {
 };
 }
 bool ValidDamageEvent(const DamageEvent& value){
-    return Id(value.target) && (!value.instigator || Id(*value.instigator)) && value.flags[0]<=1 && value.flags[1]<=1 &&
+    return value.target_peer<=16 && value.instigator_peer<=16 && (bool(value.target_peer)!=Id(value.target)) &&
+        (!value.instigator || Id(*value.instigator)) && (!value.instigator_peer || !value.instigator) && value.flags[0]<=1 && value.flags[1]<=1 &&
         std::all_of(value.vectors.begin(),value.vectors.end(),Float) && !value.stimuli.empty() && value.stimuli.size()<=kMaxDamageStimuli &&
         std::all_of(value.stimuli.begin(),value.stimuli.end(),[](const auto& s){return s.type<=31 && Float(s.raw_bits) && Float(s.effective_bits);}) &&
         value.shape_keys.size()<=kMaxDamageShapeKeys && (value.tag_present || value.tag.empty()) && value.tag.size()<=kMaxDamageTag && value.tag.find('\0')==std::string::npos;
 }
 std::vector<uint8_t> EncodeDamageEvent(const DamageEvent& value){
     if(!ValidDamageEvent(value))return {};
-    std::vector<uint8_t> out{'B','W','D','E',3};out.reserve(kMaxDamageEventBytes);
+    std::vector<uint8_t> out{'B','W','D','E',5};out.reserve(kMaxDamageEventBytes);
     Put(out,value.instigator.has_value(),1);for(auto word:value.target)Put(out,word);
     if(value.instigator)for(auto word:*value.instigator)Put(out,word);
     for(auto flag:value.flags)Put(out,flag,1);for(auto word:value.vectors)Put(out,word);
     Put(out,uint32_t(value.stimuli.size()),1);
     for(const auto& s:value.stimuli){Put(out,s.type);Put(out,s.raw_bits);Put(out,s.effective_bits);}
-    Put(out,uint32_t(value.shape_keys.size()),1);for(auto key:value.shape_keys)Put(out,key);
+    Put(out,value.target_peer,1);Put(out,value.instigator_peer,1);
+    Put(out,uint32_t(value.shape_keys.size()),2);for(auto key:value.shape_keys)Put(out,key);
     Put(out,value.tag_present,1);Put(out,uint32_t(value.tag.size()),2);out.insert(out.end(),value.tag.begin(),value.tag.end());return out;
 }
 bool DecodeDamageEvent(std::span<const uint8_t> bytes,DamageEvent& out){
     if(bytes.size()>kMaxDamageEventBytes)return false;
     Reader r{bytes};DamageEvent value;
-    if(r.Get()!=0x42574445 || r.Get(1)!=3)return false;
+    if(r.Get()!=0x42574445 || r.Get(1)!=5)return false;
     const auto instigator=r.Get(1);if(instigator>1)return false;
     for(auto& word:value.target)word=r.Get();
     if(instigator){DamageEntityId id;for(auto& word:id)word=r.Get();value.instigator=id;}
     for(auto& flag:value.flags)flag=uint8_t(r.Get(1));for(auto& word:value.vectors)word=r.Get();
     const auto count=r.Get(1);if(!count || count>kMaxDamageStimuli)return false;
     for(unsigned i=0;i<count;++i)value.stimuli.push_back({r.Get(),r.Get(),r.Get()});
-    const auto shapes=r.Get(1);if(!r.good || shapes>kMaxDamageShapeKeys)return false;
+    value.target_peer=uint8_t(r.Get(1));value.instigator_peer=uint8_t(r.Get(1));
+    const auto shapes=r.Get(2);if(!r.good || shapes>kMaxDamageShapeKeys)return false;
     for(unsigned i=0;i<shapes;++i)value.shape_keys.push_back(r.Get());
     const auto tag_present=r.Get(1);if(!r.good || tag_present>1)return false;value.tag_present=tag_present!=0;
     const auto tag=r.Get(2);if(!r.good || tag>kMaxDamageTag || tag!=bytes.size()-r.at)return false;
@@ -57,8 +60,9 @@ bool TestDamageEventCodec(){
     if(!check(!bytes.empty() && DecodeDamageEvent(bytes,out) && out==value,"target/instigator GUIDs, flags, float bits, raw and adjusted amounts and tag round-trip exactly"))return false;
     const auto sentinel=out;
     auto bad_shapes=bytes;
-    const auto shape_count_offset=bytes.size()-value.tag.size()-3-value.shape_keys.size()*4-1;
-    bad_shapes[shape_count_offset]=uint8_t(kMaxDamageShapeKeys+1);
+    const auto shape_count_offset=bytes.size()-value.tag.size()-3-value.shape_keys.size()*4-2;
+    bad_shapes[shape_count_offset]=uint8_t((kMaxDamageShapeKeys+1)>>8);
+    bad_shapes[shape_count_offset+1]=uint8_t(kMaxDamageShapeKeys+1);
     if(!check(!DecodeDamageEvent(bad_shapes,out) && out==sentinel,"oversized wire child-key count rejected before allocation"))return false;
     auto bad_tag=bytes;const auto tag_present_offset=bytes.size()-value.tag.size()-3;
     bad_tag[tag_present_offset]=2;
@@ -83,6 +87,12 @@ bool TestDamageEventCodec(){
     value.shape_keys.clear();value.tag_present=false;value.tag.clear();
     if(!check(DecodeDamageEvent(EncodeDamageEvent(value),out) && out==value,"null native tag remains distinct from an interned empty tag"))return false;
     value.tag="invalid";if(!check(EncodeDamageEvent(value).empty(),"absent tag cannot carry nonempty bytes"))return false;
+    value.tag.clear();value.target={};value.target_peer=1;value.instigator_peer=16;
+    if(!check(DecodeDamageEvent(EncodeDamageEvent(value),out) && out==value,"stable lobby player references survive without process-local GUIDs"))return false;
+    value.target_peer=17;if(!check(EncodeDamageEvent(value).empty(),"out-of-range lobby player reference rejected"))return false;
+    value.target_peer=1;value.target[0]=1;if(!check(EncodeDamageEvent(value).empty(),"ambiguous player and GUID target rejected"))return false;
+    value.target={};value.instigator=DamageEntityId{1,0,0,0};
+    if(!check(EncodeDamageEvent(value).empty(),"ambiguous player and GUID instigator rejected"))return false;
     REXLOG_INFO("Damage event codec passed {} portable GUID/bit-preservation, boundary and malformed-payload checks; no native replay or network delivery assertion",checks);return true;
 }
 }

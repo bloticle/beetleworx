@@ -27,11 +27,12 @@ namespace em2::net {
 namespace {
 using Clock=std::chrono::steady_clock;
 using Bytes=std::vector<uint8_t>;
-constexpr size_t Window=64,MaxPacket=8192,MaxQueued=256*1024;
-constexpr size_t MaxAuthorityPacket=128*1024;
-constexpr uint8_t WireVersion=16;
+constexpr size_t Window=64,MaxPacket=8192,MaxQueued=1024*1024;
+constexpr size_t MaxAuthorityPacket=512*1024;
+constexpr uint8_t WireVersion=18;
 static_assert(100+16*31+kAuthorityCharacterBatch*46<=MaxPacket);
-constexpr size_t MaxEncodedDamage=6+16+16+2+32+1+kMaxDamageStimuli*12+1+kMaxDamageShapeKeys*4+3+kMaxDamageTag;
+constexpr size_t MaxEncodedDamage=6+16+16+2+32+1+kMaxDamageStimuli*12+2+2+kMaxDamageShapeKeys*4+3+kMaxDamageTag;
+static_assert(MaxEncodedDamage<=kMaxDamageEventBytes);
 static_assert(100+16*38+kAuthorityCharacterBatch*46+kAuthorityDamageBatch*(2+MaxEncodedDamage)<=MaxAuthorityPacket);
 static_assert(MaxAuthorityPacket+16*4096<=MaxQueued); // One incomplete frame plus the bounded Poll read burst.
 constexpr auto Timeout=std::chrono::seconds(15);
@@ -76,7 +77,11 @@ bool ValidAuthorityActors(const RoomAuthorityState& state){
             std::abs(character.position[i])>1e7f || std::abs(character.velocity[i])>1e5f)return false;
     }
     return state.damages.size()<=kAuthorityDamageBatch &&
-        std::all_of(state.damages.begin(),state.damages.end(),ValidDamageEvent);
+        std::all_of(state.damages.begin(),state.damages.end(),[&](const auto& damage){
+            if(!ValidDamageEvent(damage))return false;
+            for(auto peer:{damage.target_peer,damage.instigator_peer})if(peer && !(state.players_mask&(1u<<(peer-1))))return false;
+            return true;
+        });
 }
 void WriteAuthorityState(Bytes& bytes,const RoomAuthorityState& state){
     U64(bytes,state.tick);U64(bytes,state.roster_revision);bytes.insert(bytes.end(),state.world.begin(),state.world.end());
@@ -2094,11 +2099,13 @@ bool TestOnlineRoom(){
     large_event.tag.assign(kMaxDamageTag,'x');large_event.stimuli.assign(kMaxDamageStimuli,{31,0x80000000,0});
     large_event.shape_keys.assign(kMaxDamageShapeKeys,UINT32_MAX);
     event_state.damages.assign(kAuthorityDamageBatch,large_event);
+    event_state.damages[0].target={};event_state.damages[0].target_peer=1;
+    event_state.damages[1].instigator.reset();event_state.damages[1].instigator_peer=1;
     if(!check(rooms[0]->CompleteGameplay(id.first_tick,proof),"host completes actual fixture update before its event batch is published"))return false;
     for(unsigned mutation=0;mutation<3;++mutation){auto bad=event_state;
         if(mutation==0)bad.damages.push_back(large_event);
         if(mutation==1)bad.damages.front().stimuli.front().effective_bits=0x7fc00000;
-        if(mutation==2)bad.damages.front().target={};
+        if(mutation==2){bad.damages.front().target={};bad.damages.front().target_peer=0;}
         check(rooms[0]->TryPublishAuthorityState(bad)==AuthorityPublishResult::Rejected && !rooms[0]->impl_->authority_sent,
             "invalid or oversized damage batches do not consume publication order");
     }

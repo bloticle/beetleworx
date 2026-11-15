@@ -138,9 +138,15 @@ bool em2::CaptureNativeDamageEvent(uint8_t* base,uint32_t event,net::DamageEvent
     if(!SampleNativeEntityLifetimeRevision(after) || before!=after || PPC_LOAD_U32(0x833DA7E4)!=registry)return fail("registry changed during capture");
     out=std::move(sample);return true;
 }
-bool em2::ReplayNativeDamageEvents(PPCContext& ctx,uint8_t* base,std::span<const net::DamageEvent> events,const char*& error){
+bool em2::ReplayNativeDamageEvents(PPCContext& ctx,uint8_t* base,std::span<const net::DamageEvent> events,std::span<const NativeDamageActor> actors,const char*& error){
     error=nullptr;if(events.empty())return true;
     if(events.size()>128 || !std::all_of(events.begin(),events.end(),net::ValidDamageEvent)){error="invalid native Damage batch";return false;}
+    std::array<bool,17> peers{};
+    if(actors.size()>16){error="native Damage player bindings exceed roster bound";return false;}
+    for(const auto& actor:actors){
+        if(!actor.peer || actor.peer>16 || peers[actor.peer] || actor.entity<4096 || !actor.handle){error="invalid native Damage player binding";return false;}
+        peers[actor.peer]=true;
+    }
     GuestReadBatch reads;Borrow borrow(ctx,base);if(!borrow.memory){error="native Damage replay stack unavailable";return false;}
     NativeEntitySnapshot entities;uint64_t observed=0;bool cached=false;
     for(const auto& event:events){uint64_t revision=0;
@@ -151,14 +157,28 @@ bool em2::ReplayNativeDamageEvents(PPCContext& ctx,uint8_t* base,std::span<const
         }
         const auto handle=[&](const net::DamageEntityId& id){const auto found=std::lower_bound(entities.records.begin(),entities.records.end(),id,[](const auto& value,const auto& key){return value.id<key;});
             return found==entities.records.end() || found->id!=id?uint32_t(0):found->handle;};
-        const auto target=handle(event.target),instigator=event.instigator?handle(*event.instigator):0;
-        if(!target || (event.instigator && !instigator)){
-            const auto& missing=!target?event.target:*event.instigator;
+        auto native=event;
+        const auto player=[&](uint8_t peer,net::DamageEntityId& id){
+            const auto binding=std::find_if(actors.begin(),actors.end(),[&](const auto& actor){return actor.peer==peer;});
+            if(binding==actors.end())return false;
+            const auto record=std::find_if(entities.records.begin(),entities.records.end(),[&](const auto& entity){return entity.debug_address==binding->entity && entity.handle==binding->handle;});
+            if(record==entities.records.end())return false;
+            id=record->id;return true;
+        };
+        if(event.target_peer && !player(event.target_peer,native.target)){error="host Damage player target has no current native binding";return false;}
+        if(event.instigator_peer){net::DamageEntityId id;
+            if(!player(event.instigator_peer,id)){error="host Damage player instigator has no current native binding";return false;}
+            native.instigator=id;
+        }
+        native.target_peer=0;native.instigator_peer=0;
+        const auto target=handle(native.target),instigator=native.instigator?handle(*native.instigator):0;
+        if(!target || (native.instigator && !instigator)){
+            const auto& missing=!target?native.target:*native.instigator;
             REXLOG_WARN("Native Damage replay missing {} GUID {:08X}/{:08X}/{:08X}/{:08X}; {} live local entities, registry revision {}",
                 !target?"target":"instigator",missing[0],missing[1],missing[2],missing[3],entities.records.size(),observed);
             error=!target?"host Damage target has no live local GUID":"host Damage instigator has no live local GUID";return false;
         }
-        if(!ReplayOne(borrow,event,target,instigator,error))return false;
+        if(!ReplayOne(borrow,native,target,instigator,error))return false;
     }return true;
 }
 bool em2::TestNativeDamageEvent(){
