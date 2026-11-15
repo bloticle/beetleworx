@@ -472,6 +472,46 @@ The next unresolved path is direct/native zero-health reconciliation during
 respawn; the existing synthetic lethal Damage operation did not produce the
 required zero-health readback in this case. Its cause is not yet established.
 
+## Zero-health correction before the native update
+
+The repeat diagnostic establishes that the old synthetic lethal Damage operation
+finished while the guest remained at Health 1. Registry binding and readback
+succeeded; the exact reason for the rejected hit is not established. Evidence:
+`analysis/private-native-room-pair-20261115-115040-f12c52d5/native-lethal-diagnostic-result.json`.
+
+The original Health descriptor setter `827D21A0` calls `827CEF08`, which updates
+the native property and HUD route; original Health update `827CF7F0` reads the
+health value and executes the authored zero-health behavior. A fabricated hit
+is not equivalent to setting the host's authoritative property during a direct
+native path such as FallRescue.
+
+`CorrectNativeActorHealth` now takes an explicit correction phase. BeforeUpdate
+uses the original property setter and verifies zero readback, then leaves all
+death/respawn behavior to the upcoming original update. CompletedUpdate retains
+the existing immediate Damage/listener path. The Room adapter selects the new
+phase only with private full world-Damage authority, after it has replayed the
+host's actual Damage events. The legacy/public health-only path keeps its
+previous immediate notification behavior. No invulnerability flags or raw
+component fields are changed and no extra health update is invoked.
+
+The live candidate stages zero at tick 1162. Host and guest native mode,
+position and life observations match for every tick 1158 through 1166, including
+zero health and the original respawn motion. The guest continues to 1528, then
+stops on a separate `Native spawn replay lost its owned tick or host command`
+failure. This is a passed bounded health case and a failed longer integration;
+it does not verify all death causes, global GameOver or complete respawn sync.
+Both owned processes close normally with normal user files unchanged. Evidence:
+`analysis/private-native-room-pair-20261115-115357-e14ba13b/native-preupdate-health-integration-result.json`.
+Live executable SHA256:
+`6852DF4FC538195CD85CA48B69FC9FCF633BCCCCB7232D767FB38061FE4EDDDF`.
+
+The final source narrows phase selection to full event authority after that
+run; its full-event path is the path exercised above. Legacy correction retains
+the old phase. The final build/regression is recorded separately rather than
+substituting its hash for the observed live executable.
+The final same-executable regression exits 0, including 9,091 Room checks:
+`analysis/native-preupdate-health-test-f80a016d21a1423790c3b6528acca720/rollback.log`.
+
 ## GUID mutation fence fixed
 
 Cloning assigns a new GUID after the entity is registered. Original

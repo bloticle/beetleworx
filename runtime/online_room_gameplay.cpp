@@ -963,8 +963,16 @@ bool NativeRoomGameplay::Deliver(PPCContext& ctx,uint8_t* base){
             const auto health=em2::ReadNativeActorHealth(ctx,base,actor->entity);
             if(!health)return s.Stop("Host pre-update death correction could not inspect native health");
             if(*health>0){
-                if(!em2::CorrectNativeActorHealth(ctx,base,actor->entity,0))return s.Stop("Host pre-update native death correction failed");
-                REXLOG_INFO("Native host death applied before guest update: tick {}, peer {}; original Damage listeners",tick,sample.peer);
+                // Full event authority already delivered the host's actual
+                // Damage operations above. A remaining zero can come from a
+                // direct native path such as FallRescue; do not invent another
+                // hit that native immunity may reject. Legacy health-only
+                // correction retains its immediate Damage notification path.
+                const bool full_damage=REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_world_damage_events);
+                const auto phase=full_damage?em2::NativeHealthCorrectionPhase::BeforeUpdate:em2::NativeHealthCorrectionPhase::CompletedUpdate;
+                if(!em2::CorrectNativeActorHealth(ctx,base,actor->entity,0,phase))return s.Stop("Host pre-update native death correction failed");
+                REXLOG_INFO("Native host zero health reconciled before guest update: tick {}, peer {}; {}",tick,sample.peer,
+                    full_damage?"original Health setter; death processing remains in the upcoming native update":"original Damage listeners");
             }
         }
         return true;

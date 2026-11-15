@@ -2,6 +2,7 @@
 #include "guest_read_batch.h"
 #include "native_entity_probe.h"
 #include "ppc_context.h"
+#include <rex/logging.h>
 #include <windows.h>
 #include <immintrin.h>
 #include <algorithm>
@@ -37,19 +38,25 @@ bool Route(uint8_t* base,uint32_t entity,uint32_t& property){
     property=PPC_LOAD_U32(0x833DBB14);return Readable(base,property,8);
 }
 // The retail Damage Lua export (827D06A8) uses this exact native sequence.
-// A numeric Health=0 write alone postpones death notification until the next
-// update, shifting GameOver and its original reload timer relative to the host.
-// Reconcile a living actor's authoritative zero through native listeners now.
+// At a completed-update boundary a numeric Health=0 write postpones death
+// notification until the next update. Keep the immediate notification path for
+// that phase and legacy health-only correction. Full event authority can stage
+// direct native zero-health state before the upcoming original health update.
 // This does not claim to reproduce the host's particular damage stimulus or
 // replace general combat-event replication.
 bool NativeLethalCorrection(Borrow& borrow,uint32_t entity){
     struct Replay {unsigned saved=damage_replay_depth;Replay(){++damage_replay_depth;}~Replay(){damage_replay_depth=saved;}} replay;
     auto* base=borrow.base;auto& ctx=borrow.ctx;
     em2::NativeEntitySnapshot entities;const char* error=nullptr;uint32_t address=0;
-    if(!em2::ReadNativeEntitySnapshot(base,entities,error,address,false) || !Readable(base,0x833DA6F4,4))return false;
+    if(!em2::ReadNativeEntitySnapshot(base,entities,error,address,false)){
+        REXLOG_ERROR("Native lethal correction registry rejected: {} at {:08X}; target {:08X}",error?error:"unknown",address,entity);return false;
+    }
+    if(!Readable(base,0x833DA6F4,4))return false;
     const auto found=std::find_if(entities.records.begin(),entities.records.end(),[&](const auto& value){return value.debug_address==entity;});
     const auto manager=PPC_LOAD_U32(0x833DA6F4);
-    if(found==entities.records.end() || !found->handle || !Readable(base,manager,1016))return false;
+    if(found==entities.records.end() || !found->handle || !Readable(base,manager,1016)){
+        REXLOG_ERROR("Native lethal correction binding rejected: entity {:08X}, handle {:08X}, manager {:08X}",entity,found==entities.records.end()?0:found->handle,manager);return false;
+    }
     const auto event=borrow.scratch,target=event+128,instigator=target+4,position=event+144;
     std::memset(base+event,0,176);PPC_STORE_U32(target,found->handle);
     borrow.Reset();ctx.r3.u64=event;ctx.r4.u64=target;ctx.r5.u64=instigator;
@@ -79,13 +86,18 @@ std::optional<int32_t> em2::ReadNativeActorHealth(PPCContext& ctx,uint8_t* base,
     {GuestReadBatch::CallbackBoundary callback;__imp__sub_827C9CE0(ctx,base);}
     if(!ctx.r3.u32)return {};return int32_t(PPC_LOAD_U32(borrow.scratch));
 }
-bool em2::CorrectNativeActorHealth(PPCContext& ctx,uint8_t* base,uint32_t entity,int32_t health){
+bool em2::CorrectNativeActorHealth(PPCContext& ctx,uint8_t* base,uint32_t entity,int32_t health,NativeHealthCorrectionPhase phase){
     GuestReadBatch reads;Borrow borrow(ctx,base);uint32_t property=0;
     if(!borrow.memory || !Route(base,entity,property))return false;
     const auto current=ReadNativeActorHealth(ctx,base,entity);if(!current)return false;if(*current==health)return true;
-    if(health==0 && *current>0 && *current<=1000){
+    // A fabricated hit can be ignored by native immunity during respawn.
+    // Before an update, use the authoritative property value and let original
+    // HealthComponent update 827CF7F0 process its own zero-health behavior once.
+    if(health==0 && *current>0 && *current<=1000 && phase!=NativeHealthCorrectionPhase::BeforeUpdate){
         if(!NativeLethalCorrection(borrow,entity))return false;
-        const auto corrected=ReadNativeActorHealth(ctx,base,entity);return corrected && *corrected==0;
+        const auto corrected=ReadNativeActorHealth(ctx,base,entity);
+        if(!corrected || *corrected!=0)REXLOG_ERROR("Native lethal correction readback rejected: entity {:08X}, health before {}, after present {}, after {}; original Damage dispatched",entity,*current,bool(corrected),corrected.value_or(-1));
+        return corrected && *corrected==0;
     }
     borrow.Reset();ctx.r3.u64=entity;ctx.r4.u64=property+4;ctx.r5.s64=health;ctx.r6.u64=0;
     {GuestReadBatch::CallbackBoundary callback;__imp__sub_827CA5F0(ctx,base);}
