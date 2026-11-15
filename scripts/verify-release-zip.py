@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import re
 import stat
+from urllib.parse import urlsplit
 import zipfile
 
 
@@ -83,7 +84,7 @@ def verify(path, expected_exe=None, expected_version=None, expected_tag=None, de
         need(digest(exe_sha) and (not expected_exe or exe_sha.lower() == expected_exe.lower()),
              'Executable hash differs from approved build')
         if demo:
-            need(manifest.get('demo') is True and manifest.get('online_multiplayer') == 'hidden' and
+            need(manifest.get('demo') is True and manifest.get('online_multiplayer') in ('hidden', 'experimental-internet-relay') and
                  manifest.get('expected_exe_sha256', '').lower() == exe_sha.lower(), 'Demo manifest contract mismatch')
             need({'demo-channel.txt', 'TESTING & KNOWN ISSUES.txt'} <= by_name.keys(), 'Missing demo marker/guide')
         need(not any(manifest.get(key) for key in ('includes_full_modified_game_archives', 'includes_full_original_game',
@@ -94,6 +95,19 @@ def verify(path, expected_exe=None, expected_version=None, expected_tag=None, de
         shader = f'pc-assets/pc-shader-library/{abi}/native-profile-v1/translated-dxbc-v1/library.em2dxbcpack'
         fixed = ROOT_FILES | CRT_FILES | REQUIRED_PATCHES | {CATALOG, shader}
         required = {EXE, 'dxcompiler.dll', 'dxil.dll', 'START HERE.txt', CATALOG, shader} | REQUIRED_CRT | REQUIRED_PATCHES
+        if manifest.get('online_multiplayer') == 'experimental-internet-relay':
+            need('online-service.json' in by_name and by_name['online-service.json'].file_size <= 4096,
+                 'Missing/oversized internet relay configuration')
+            service = json.loads(archive.read('online-service.json').decode('utf-8-sig'), object_pairs_hook=unique_json)
+            origin = service.get('relay_origin')
+            need(service.get('format') == 1 and isinstance(origin, str) and 0 < len(origin) <= 512 and
+                 all(33 <= ord(c) <= 126 for c in origin), 'Invalid internet relay configuration')
+            relay = urlsplit(origin)
+            need(relay.scheme == 'https' and relay.hostname and not relay.username and not relay.password and
+                 not relay.query and not relay.fragment and relay.path in ('', '/') and
+                 relay.port in (None, 443), 'Internet relay must be a plain HTTPS origin')
+            fixed.add('online-service.json')
+            required.add('online-service.json')
         need(required <= by_name.keys(), 'Missing required runtime, patch, or shader file')
         seen = set()
         for record in manifest['files']:
