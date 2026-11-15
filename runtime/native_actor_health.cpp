@@ -93,7 +93,7 @@ bool em2::CorrectNativeActorHealth(PPCContext& ctx,uint8_t* base,uint32_t entity
     // A fabricated hit can be ignored by native immunity during respawn.
     // Before an update, use the authoritative property value and let original
     // HealthComponent update 827CF7F0 process its own zero-health behavior once.
-    if(health==0 && *current>0 && *current<=1000 && phase!=NativeHealthCorrectionPhase::BeforeUpdate){
+    if(health==0 && *current>0 && *current<=1000 && phase==NativeHealthCorrectionPhase::CompletedUpdate){
         if(!NativeLethalCorrection(borrow,entity))return false;
         const auto corrected=ReadNativeActorHealth(ctx,base,entity);
         if(!corrected || *corrected!=0)REXLOG_ERROR("Native lethal correction readback rejected: entity {:08X}, health before {}, after present {}, after {}; original Damage dispatched",entity,*current,bool(corrected),corrected.value_or(-1));

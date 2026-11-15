@@ -56,6 +56,8 @@ struct RoomAuthorityState {
     std::array<uint8_t,32> world{};
     std::array<uint8_t,32> completion{};
     uint16_t players_mask=0;
+    // First completed host update in native terminal state; world-scoped.
+    std::optional<uint64_t> game_over_entry;
     std::vector<RoomActorState> actors;
     std::vector<RoomCharacterState> characters;
     std::vector<DamageEvent> damages;

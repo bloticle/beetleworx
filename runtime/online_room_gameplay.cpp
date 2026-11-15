@@ -236,7 +236,7 @@ struct NativeRoomGameplay::Impl {
     }
     // Frozen for the rest of this native world. Only its original load and a
     // new bootstrap may re-arm gameplay sources after terminal GameOver.
-    std::optional<uint64_t> game_over_entry;
+    std::optional<uint64_t> game_over_entry,host_game_over_entry;
     std::array<std::array<uint8_t,32>,kOnlineRoomCapacity> game_over_schemas{};
     bool GameOver(PPCContext& ctx,uint8_t* base)const{
         NativeGameOverState state;
@@ -707,7 +707,7 @@ RoomGameplayAdmission NativeRoomGameplay::Prepare(PPCContext& ctx,uint8_t* base,
         for(const auto& actor:s.actors->actors()){OwnedActorInput current;owned=OwnedActorForPeer(actor.room_peer,ctx,base,current) && owned;}
         if(!owned){s.Stop("Native GameOver lost its admitted all-human death ownership");return RoomGameplayAdmission::Stopped;}
         for(const auto& player:s.roster.players)s.game_over_schemas[player.peer-1]=s.button_schemas[player.character==LobbyCharacter::Mickey?0:1];
-        s.game_over_entry=*s.native_completed;
+        s.game_over_entry=s.peer!=1 && s.host_game_over_entry?s.host_game_over_entry:s.native_completed;
         REXLOG_INFO("Native Room terminal GameOver admitted: entry tick {}, participants {}; original state 7, all humans dead, gameplay callbacks frozen until original load",*s.game_over_entry,count);
     }
     if(s.game_over_entry){
@@ -723,6 +723,15 @@ RoomGameplayAdmission NativeRoomGameplay::Prepare(PPCContext& ctx,uint8_t* base,
         if(*s.submitted!=tick){s.Stop("Native GameOver source crossed native ticks");return RoomGameplayAdmission::Stopped;}
         RoomFrame frame;if(!s.room->PeekFrame(frame))return RoomGameplayAdmission::Waiting;
         if(frame.tick!=tick || !s.GameOverFrame(frame,ctx,base)){
+            NativeGameOverState observed;uint32_t observed_mode=0;
+            const bool observed_valid=ReadNativeControlState(ctx,base,observed,observed_mode);
+            REXLOG_ERROR("Native GameOver phase failure: tick {} frame {} entry {} delay {} input epoch {}, native valid {} mode {} dead {} registry {:08X}/{:08X}",
+                tick,frame.tick,*s.game_over_entry,s.identity.input_delay,s.input_epoch,observed_valid,observed_mode,observed.dead,observed.registry,s.registry);
+            for(unsigned peer=0;peer<kOnlineRoomCapacity;++peer)if(frame.players_mask&(1u<<peer)){
+                const auto& command=frame.players[peer];
+                REXLOG_ERROR("Native GameOver rejected command: peer {} source {} epoch {} actor {} valid {} source tick {} schema-match {}",
+                    peer+1,unsigned(command.source),command.input_epoch,command.actor_epoch,ValidRoomMovement(command),command.button_actions.source_tick,command.button_actions.schema==s.game_over_schemas[peer]);
+            }
             s.Stop("Native GameOver authoritative frame failed phase admission");return RoomGameplayAdmission::Stopped;}
         s.prepared=frame;output=frame;gameplay_waiting.store(false,std::memory_order_release);return RoomGameplayAdmission::Ready;
     }
@@ -985,8 +994,13 @@ bool NativeRoomGameplay::Deliver(PPCContext& ctx,uint8_t* base){
                 // hit that native immunity may reject. Legacy health-only
                 // correction retains its immediate Damage notification path.
                 const bool full_damage=REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_world_damage_events);
-                const auto phase=full_damage?em2::NativeHealthCorrectionPhase::BeforeUpdate:em2::NativeHealthCorrectionPhase::CompletedUpdate;
-                if(!em2::CorrectNativeActorHealth(ctx,base,actor->entity,0,phase))return s.Stop("Host pre-update native death correction failed");
+                // A direct host zero observed AFTER this update (FallRescue,
+                // for example) must not be moved before the guest update.
+                // That would advance Health death/countdown and respawn by
+                // one native tick. Actual Damage events were replayed above;
+                // remaining property drift is reconciled at completion.
+                if(full_damage)continue;
+                if(!em2::CorrectNativeActorHealth(ctx,base,actor->entity,0))return s.Stop("Host pre-update native death correction failed");
                 REXLOG_INFO("Native host zero health reconciled before guest update: tick {}, peer {}; {}",tick,sample.peer,
                     full_damage?"original Health setter; death processing remains in the upcoming native update":"original Damage listeners");
             }
@@ -1144,6 +1158,10 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
             }
         }
         if(authority){
+            NativeGameOverState terminal;
+            if(ReadNativeGameOverState(ctx,base,terminal) && terminal.registry==s.registry &&
+               (s.game_over_entry || terminal.dead==s.roster.players.size()))
+                state.game_over_entry=s.game_over_entry.value_or(tick);
             state.damages=std::move(s.damage_events);
             state.ai_decisions=std::move(s.ai_decisions);
             state.spawn_batches=std::move(s.spawn_batches);
@@ -1176,6 +1194,16 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
             if(!state)std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         if(!state || state->tick!=tick)return s.Stop("Host correction did not arrive at the matching completed update");
+        if(state->game_over_entry){
+            if(s.host_game_over_entry && s.host_game_over_entry!=state->game_over_entry)
+                return s.Stop("Host terminal phase changed its original world entry tick");
+            s.host_game_over_entry=state->game_over_entry;
+            if(s.game_over_entry && s.game_over_entry!=s.host_game_over_entry){
+                REXLOG_INFO("Native GameOver phase aligned: local entry {} host entry {}; delayed commands retain original per-peer terminal stream",*s.game_over_entry,*s.host_game_over_entry);
+                s.game_over_entry=s.host_game_over_entry;
+            }
+        }
+
         std::vector<OnlineNameActor> actors;uint64_t local=0;
         if(!NameTagActors(actors,local,base) || actors.size()!=state->actors.size())return s.Stop("Host correction roster has no current native bindings");
         bool discontinuity=false;unsigned corrected=0,health_corrected=0;
@@ -1189,7 +1217,11 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
                 REXLOG_INFO("Private native authority health drift injected: tick {}, peer {}, health {} (host {}) through original property setter",tick,player,*current,*target);
             }
             if(*current==*target)return true;
-            if(!em2::CorrectNativeActorHealth(ctx,base,entity,*target))return false;
+            const auto phase=REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_world_damage_events)?
+                em2::NativeHealthCorrectionPhase::CompletedPropertyOnly:em2::NativeHealthCorrectionPhase::CompletedUpdate;
+            if(!em2::CorrectNativeActorHealth(ctx,base,entity,*target,phase))return false;
+            if(*target==0 && *current>0 && phase==em2::NativeHealthCorrectionPhase::CompletedPropertyOnly)
+                REXLOG_INFO("Native host zero health reconciled after guest update: tick {}, peer {}; original property setter, native death processing remains on the following tick",tick,player);
             ++health_corrected;
             if(player && s.authority_health_drift_injected && REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_authority_drift))
                 REXLOG_INFO("Private native authority health correction verified: tick {}, peer {}, {} -> {}; original property setter/readback, damage effects not replicated",tick,player,*current,*target);

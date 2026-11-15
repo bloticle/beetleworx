@@ -61,7 +61,11 @@ bool ValidNativeGameOverFrame(const RoomFrame& frame,uint16_t roster,uint64_t en
             return false;
         }
         if(frame.tick>end){if(c!=NativeGameOverCommand(input_epoch))return false;continue;}
-        if(c.source==RoomMovementSource::NativeGameOverV4)return false;
+        // A guest can observe terminal state one native update before the
+        // host. Its no-action command may therefore overlap the host's old
+        // delayed prefix. The transport already makes that peer terminal
+        // irreversibly; native admission here has certified GameOver.
+        if(c.source==RoomMovementSource::NativeGameOverV4)continue;
         // Explicit startup-neutral frames have no interpreted actions.
         RoomMovement neutral;neutral.actor_epoch=1;neutral.input_epoch=input_epoch;neutral.source=RoomMovementSource::NativeActionV1;
         if(c==neutral || c.source==RoomMovementSource::NativeCutsceneV5 || c.source==RoomMovementSource::NativeCutsceneUiV6)continue;
@@ -118,7 +122,7 @@ bool TestNativeGameOverInput(){
     for(unsigned peer=0;peer<3;++peer){auto bad=frame;bad.players[peer].source=RoomMovementSource::NativeActionV1;
         if(!check(!ValidNativeGameOverFrame(bad,7,700,2,schemas,true),"no old gameplay command after delayed prefix"))return false;}
     frame.tick=701;
-    if(!check(!ValidNativeGameOverFrame(frame,7,700,2,schemas,true),"terminal commands cannot replace previously produced input"))return false;
+    if(!check(ValidNativeGameOverFrame(frame,7,700,2,schemas,true),"early peer terminal intent may overlap admitted no-callback delayed prefix"))return false;
     for(unsigned i=0;i<3;++i){auto& c=frame.players[i];c.source=RoomMovementSource::NativeActionV3;c.jump_button_mask=0x1000;c.button_actions.schema=schemas[i];c.button_actions.source_tick=699;}
     if(!check(ValidNativeGameOverFrame(frame,7,700,2,schemas,true),"already produced delayed native actions may drain without callback dispatch"))return false;
     for(unsigned field=0;field<5;++field){auto bad=frame;
@@ -136,6 +140,16 @@ bool TestNativeGameOverInput(){
     if(!check(!ValidNativeGameOverFrame(frame,7,700,2,schemas,true,3),"previous cutscene epoch cannot outlive terminal delayed prefix"))return false;
     frame.tick=701;frame.players[2].input_epoch=4;
     if(!check(!ValidNativeGameOverFrame(frame,7,700,2,schemas,true,3),"future UI epoch cannot enter terminal prefix"))return false;
+    frame={};frame.tick=716;frame.players_mask=3;
+    frame.players[0].actor_epoch=1;frame.players[0].input_epoch=2;frame.players[0].source=RoomMovementSource::NativeCutsceneV5;
+    frame.players[1]=NativeGameOverCommand(2);
+    if(!check(ValidNativeGameOverFrame(frame,3,714,2,schemas,true,2),"reproduced cutscene death: mixed host UI and early guest terminal at authoritative boundary"))return false;
+    frame.tick=717;
+    if(!check(!ValidNativeGameOverFrame(frame,3,714,2,schemas,true,2),"old host UI cannot outlive authoritative delayed prefix"))return false;
+    frame.players[0]=NativeGameOverCommand(2);
+    if(!check(ValidNativeGameOverFrame(frame,3,714,2,schemas,true,2),"all peers become terminal after authoritative prefix"))return false;
+    frame.players[1].pad.buttons=1;
+    if(!check(!ValidNativeGameOverFrame(frame,3,714,2,schemas,true,2),"terminal overlap cannot carry gameplay input"))return false;
     REXLOG_INFO("Native game-over input passed {} typed intent, delayed-prefix, schema, roster and timeline checks; native game-over and reload require live validation",checks);return true;
 }
 }

@@ -9,10 +9,11 @@ bool NativeDamageReplayActive()noexcept;
 // lease. Caller must validate its local owner, manager and event storage.
 void DispatchNativeAuthorityDamage(PPCContext&,uint8_t*);
 // Original Health-property dispatch, with no raw component writes. BeforeUpdate
-// stages authoritative zero for the upcoming original health/death processing;
-// it must not be used after the native update has already completed. Completed
-// correction retains the immediate retail Damage-export notification path.
-enum class NativeHealthCorrectionPhase {CompletedUpdate,BeforeUpdate};
+// stages zero before native processing. CompletedPropertyOnly reconciles an
+// end-of-update property after that update, without inventing a lethal Damage
+// event; original health/death processing then runs on the next native tick.
+// Legacy CompletedUpdate retains immediate Damage-export notification.
+enum class NativeHealthCorrectionPhase {CompletedUpdate,BeforeUpdate,CompletedPropertyOnly};
 std::optional<int32_t> ReadNativeActorHealth(PPCContext&,uint8_t* base,uint32_t entity);
 bool CorrectNativeActorHealth(PPCContext&,uint8_t* base,uint32_t entity,int32_t health,
     NativeHealthCorrectionPhase phase=NativeHealthCorrectionPhase::CompletedUpdate);

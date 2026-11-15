@@ -29,11 +29,11 @@ using Clock=std::chrono::steady_clock;
 using Bytes=std::vector<uint8_t>;
 constexpr size_t Window=64,MaxPacket=8192,MaxQueued=2*1024*1024;
 constexpr size_t MaxAuthorityPacket=1024*1024;
-constexpr uint8_t WireVersion=24;
-static_assert(100+16*31+kAuthorityCharacterBatch*46<=MaxPacket);
+constexpr uint8_t WireVersion=25;
+static_assert(109+16*31+kAuthorityCharacterBatch*46<=MaxPacket);
 constexpr size_t MaxEncodedDamage=6+16+16+2+32+1+kMaxDamageStimuli*12+2+2+kMaxDamageShapeKeys*4+3+kMaxDamageTag;
 static_assert(MaxEncodedDamage<=kMaxDamageEventBytes);
-static_assert(100+16*38+kAuthorityCharacterBatch*46+kAuthorityDamageBatch*(2+MaxEncodedDamage)+2+kAuthorityAiDecisionBatch*39+2+kAuthoritySpawnBatch*(2+kMaxSpawnBatchBytes)+2+kAuthorityImpactBatch*(2+kMaxImpactBytes)+2+kAuthorityLaunchBatch*(2+kMaxLaunchBytes)+2+kAuthorityRetirementBatch*16<=MaxAuthorityPacket);
+static_assert(109+16*38+kAuthorityCharacterBatch*46+kAuthorityDamageBatch*(2+MaxEncodedDamage)+2+kAuthorityAiDecisionBatch*39+2+kAuthoritySpawnBatch*(2+kMaxSpawnBatchBytes)+2+kAuthorityImpactBatch*(2+kMaxImpactBytes)+2+kAuthorityLaunchBatch*(2+kMaxLaunchBytes)+2+kAuthorityRetirementBatch*16<=MaxAuthorityPacket);
 static_assert(MaxAuthorityPacket+16*4096<=MaxQueued); // One incomplete frame plus the bounded Poll read burst.
 constexpr auto Timeout=std::chrono::seconds(15);
 constexpr auto StartupTimeout=std::chrono::seconds(180);
@@ -61,7 +61,8 @@ Bytes Packet(Wire kind){return {'B','W','R','M',WireVersion,uint8_t(kind)};}
 using Hash=std::array<uint8_t,32>;
 bool Nonzero(const Hash& hash){return std::any_of(hash.begin(),hash.end(),[](auto n){return n!=0;});}
 bool ValidAuthorityActors(const RoomAuthorityState& state){
-    if(!state.players_mask || state.actors.size()!=std::popcount(state.players_mask))return false;
+    if(!state.players_mask || state.actors.size()!=std::popcount(state.players_mask) ||
+       (state.game_over_entry && (*state.game_over_entry>state.tick || *state.game_over_entry==UINT64_MAX)))return false;
     uint16_t mask=0;
     for(const auto& actor:state.actors){
         if(actor.peer<1 || actor.peer>kOnlineRoomCapacity)return false;
@@ -112,7 +113,9 @@ bool ValidAuthorityActors(const RoomAuthorityState& state){
 void WriteAuthorityState(Bytes& bytes,const RoomAuthorityState& state){
     U64(bytes,state.tick);U64(bytes,state.roster_revision);bytes.insert(bytes.end(),state.world.begin(),state.world.end());
     bytes.insert(bytes.end(),state.completion.begin(),state.completion.end());
-    U64(bytes,state.players_mask,2);U8(bytes,uint8_t(state.actors.size()));
+    U64(bytes,state.players_mask,2);U8(bytes,state.game_over_entry.has_value());
+    if(state.game_over_entry)U64(bytes,*state.game_over_entry);
+    U8(bytes,uint8_t(state.actors.size()));
     for(const auto& actor:state.actors){U8(bytes,uint8_t(actor.peer));U8(bytes,uint8_t(actor.active));
         for(const auto* vector:{&actor.position,&actor.velocity})for(float value:*vector)U64(bytes,std::bit_cast<uint32_t>(value),4);
         U8(bytes,actor.health.has_value());if(actor.health)U64(bytes,std::bit_cast<uint32_t>(*actor.health),4);}
@@ -138,7 +141,9 @@ void WriteAuthorityState(Bytes& bytes,const RoomAuthorityState& state){
 bool ReadAuthorityState(Reader& reader,RoomAuthorityState& state){
     state.tick=reader.Number(8);state.roster_revision=reader.Number(8);for(auto& byte:state.world)byte=reader.Byte();
     for(auto& byte:state.completion)byte=reader.Byte();
-    state.players_mask=uint16_t(reader.Number(2));const auto count=reader.Byte();if(count>kOnlineRoomCapacity)return false;
+    state.players_mask=uint16_t(reader.Number(2));const auto terminal=reader.Byte();if(terminal>1)return false;
+    if(terminal)state.game_over_entry=reader.Number(8);else state.game_over_entry.reset();
+    const auto count=reader.Byte();if(count>kOnlineRoomCapacity)return false;
     for(unsigned i=0;i<count;++i){RoomActorState actor;actor.peer=reader.Byte();const auto active=reader.Byte();if(active>1)return false;actor.active=active!=0;
         for(auto* vector:{&actor.position,&actor.velocity})for(float& value:*vector)value=std::bit_cast<float>(uint32_t(reader.Number(4)));
         const auto health=reader.Byte();if(health>1)return false;if(health)actor.health=std::bit_cast<int32_t>(uint32_t(reader.Number(4)));
@@ -2112,6 +2117,20 @@ bool TestOnlineRoom(){
     host_state.actors={{1,true,{1,2,3},{4,5,6}},{2,true,{-1,2,3},{4,0,6}}};
     host_state.actors[0].health=5;host_state.actors[1].health=3;
     host_state.characters={{{55,2,3,4},true,{55,6,7},{0,0,1}},{{66,2,3,4},false,{0,0,0},{0,0,0}}};
+    auto invalid_terminal_state=host_state;invalid_terminal_state.game_over_entry=host_state.tick+1;
+    check(!ValidAuthorityActors(invalid_terminal_state),"future terminal authority tick rejected");
+    // Exercise the optional host phase clock through the real TCP codec.
+    host_state.game_over_entry=host_state.tick;
+    Bytes terminal_encoded;WriteAuthorityState(terminal_encoded,host_state);
+    RoomAuthorityState terminal_decoded;Reader terminal_reader{terminal_encoded};
+    check(ReadAuthorityState(terminal_reader,terminal_decoded) && terminal_decoded==host_state,
+        "terminal authority clock codec preserves full scoped state");
+    auto malformed_terminal=terminal_encoded;malformed_terminal[82]=2;
+    RoomAuthorityState rejected_terminal;Reader malformed_terminal_reader{malformed_terminal};
+    check(!ReadAuthorityState(malformed_terminal_reader,rejected_terminal),"invalid terminal-clock presence rejected");
+    auto truncated_terminal=terminal_encoded;truncated_terminal.resize(87);
+    RoomAuthorityState incomplete_terminal;Reader truncated_terminal_reader{truncated_terminal};
+    check(!ReadAuthorityState(truncated_terminal_reader,incomplete_terminal),"truncated terminal-clock payload rejected");
     if(!check(rooms[0]->PublishAuthorityState(host_state),"host sends actual completed authority result"))return false;
     std::optional<RoomAuthorityState> correction;
     if(!check(pump([&]{correction=rooms[1]->TakeAuthorityState();return correction.has_value();}) && correction==host_state,
