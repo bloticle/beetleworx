@@ -1443,11 +1443,11 @@ bool NativeRoomGameplay::PrepareSpawnReplay(PPCContext& ctx,uint8_t* base,unsign
         if(!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_spawn_batches) || !REXCVAR_GET(em2_probe_room_spawn_eligibility) ||
            !REXCVAR_GET(em2_probe_room_spawn_replay) || !s.Owner() || !s.Configured() || s.stopped || s.peer==1 || !s.pending ||
            s.load_depth || s.transition_pending || s.room->state()!=RoomState::Running)return true;
-        // Both audited native callers consume the host's parent inputs.
+        // Audited native callers consume the host's parent inputs.
         // 827B4178 passes its live output array from the original Lua route;
         // missing-birth replay below uses a separate, owned temporary array.
         // Reconstructing a missing Lua continuation remains separate work.
-        if(depth || (uint32_t(ctx.lr)!=0x828B71C4 && uint32_t(ctx.lr)!=0x827B4178))return true;
+        if(depth || (uint32_t(ctx.lr)!=0x828B71C4 && uint32_t(ctx.lr)!=0x827B4178 && uint32_t(ctx.lr)!=0x827B4B40))return true;
     }
     if(s.AnnouncedLoadCancellation(s.committed))return true;
     const auto fail=[&](const char* reason){
@@ -1461,7 +1461,11 @@ bool NativeRoomGameplay::PrepareSpawnReplay(PPCContext& ctx,uint8_t* base,unsign
        s.spawn_batches.size()>=s.pending_authority->spawn_batches.size())return fail("Native spawn replay lost its owned tick or host command");
     const bool firing_path=uint32_t(ctx.lr)==0x828B71C4 && !ctx.r7.u32 && ctx.r6.u32<=1;
     const bool collection_path=uint32_t(ctx.lr)==0x827B4178 && ctx.r7.u32 && Readable(ctx.r7.u32,12,base) && ctx.r6.u32==1;
-    if(depth || (!firing_path && !collection_path))return fail("Native spawn replay reached an unsupported parent caller");
+    // 827B4AB0's indexed native spawn loop passes flag 1 and no output
+    // array. Its 827B4B40 return site ignores r3 and checks component state
+    // before the next iteration. Keep that original loop and its callbacks.
+    const bool indexed_path=uint32_t(ctx.lr)==0x827B4B40 && !ctx.r7.u32 && ctx.r6.u32==1;
+    if(depth || (!firing_path && !collection_path && !indexed_path))return fail("Native spawn replay reached an unsupported parent caller");
     const auto component=ctx.r3.u32,anchor=ctx.r5.u32;
     if(!Readable(component,148,base))return fail("Native spawn replay component unavailable");
     const auto attached=PPC_LOAD_U32(component+48);
@@ -1485,7 +1489,8 @@ bool NativeRoomGameplay::PrepareSpawnReplay(PPCContext& ctx,uint8_t* base,unsign
     }
     const auto expected=s.pending_authority->spawn_batches[s.spawn_batches.size()];
     const bool admitted=(firing_path && expected.shooter && !expected.collection && expected.owner==expected.anchor) ||
-        (collection_path && !expected.shooter && expected.collection && expected.flag);
+        (collection_path && !expected.shooter && expected.collection && expected.flag) ||
+        (indexed_path && !expected.shooter && !expected.collection && expected.flag);
     if(expected.depth || !expected.random_present || !admitted)
         return fail("Native spawn replay reached an unsupported parent path");
     if(reference(attached+8)!=expected.owner || reference(anchor)!=expected.anchor)
