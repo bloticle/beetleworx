@@ -88,6 +88,9 @@ LONG WINAPI RecordCrash(EXCEPTION_POINTERS* exception) {
         length += std::snprintf(buffer+length, sizeof(buffer)-length, "guest ctr=%llX lr=%llX r3=%llX r4=%llX r5=%llX r29=%llX\n", cpu->ctr.u64, cpu->lr, cpu->r3.u64, cpu->r4.u64, cpu->r5.u64, cpu->r29.u64);
         length += std::snprintf(buffer+length, sizeof(buffer)-length, "guest r10=%llX r11=%llX r28=%llX r30=%llX r31=%llX\n", cpu->r10.u64, cpu->r11.u64, cpu->r28.u64, cpu->r30.u64, cpu->r31.u64);
         length += std::snprintf(buffer+length, sizeof(buffer)-length, "guest r6=%llX r7=%llX r8=%llX r9=%llX sp=%llX\n", cpu->r6.u64, cpu->r7.u64, cpu->r8.u64, cpu->r9.u64, cpu->r1.u64);
+        length += std::snprintf(buffer+length, sizeof(buffer)-length, "guest r12=%llX r13=%llX r14=%llX r15=%llX r16=%llX r17=%llX\n", cpu->r12.u64, cpu->r13.u64, cpu->r14.u64, cpu->r15.u64, cpu->r16.u64, cpu->r17.u64);
+        length += std::snprintf(buffer+length, sizeof(buffer)-length, "guest r18=%llX r19=%llX r20=%llX r21=%llX r22=%llX r23=%llX\n", cpu->r18.u64, cpu->r19.u64, cpu->r20.u64, cpu->r21.u64, cpu->r22.u64, cpu->r23.u64);
+        length += std::snprintf(buffer+length, sizeof(buffer)-length, "guest r24=%llX r25=%llX r26=%llX r27=%llX r0=%llX r2=%llX\n", cpu->r24.u64, cpu->r25.u64, cpu->r26.u64, cpu->r27.u64, cpu->r0.u64, cpu->r2.u64);
         if(cpu->lr==0x826CBC98 && exception->ExceptionRecord->ExceptionCode==EXCEPTION_ACCESS_VIOLATION &&
            exception->ExceptionRecord->NumberParameters>=2 && exception->ExceptionRecord->ExceptionInformation[0]==8 &&
            !exception->ExceptionRecord->ExceptionAddress){
@@ -226,7 +229,7 @@ bool TestStartupCallbackReports(const std::filesystem::path& directory){
     if(!VirtualAlloc(base+(slot&~4095u),4096,MEM_COMMIT,PAGE_READWRITE) ||
        !VirtualAlloc(base+(dispatch&~uint64_t(4095)),4096,MEM_COMMIT,PAGE_READWRITE))return false;
     if(std::filesystem::exists(directory))return false;std::filesystem::create_directories(directory);
-    PPCContext cpu{};cpu.lr=0x826CBC98;cpu.r31.u64=slot;cpu.ctr.u64=other;cpu.r11.u64=other;
+    PPCContext cpu{};cpu.lr=0x826CBC98;cpu.r31.u64=slot;cpu.ctr.u64=other;cpu.r11.u64=other;cpu.r18.u64=0xA5A5ABCD;cpu.r26.u64=0x123456789ABCDEF0ull;
     CONTEXT host{};host.Rcx=reinterpret_cast<uintptr_t>(&cpu);host.Rdx=reinterpret_cast<uintptr_t>(base);
     EXCEPTION_RECORD record{};record.ExceptionCode=EXCEPTION_ACCESS_VIOLATION;record.NumberParameters=2;record.ExceptionInformation[0]=8;
     EXCEPTION_POINTERS pointers{&record,&host};PPC_STORE_U32(slot,target);
@@ -238,6 +241,8 @@ bool TestStartupCallbackReports(const std::filesystem::path& directory){
     auto text=report(0);
     if(!check(text.find("slot_readable=1 slot_target=832F6158 slot_dispatch_readable=1 slot_dispatch=1111222233334444 ctr_dispatch_readable=1 ctr_dispatch=0000000000000000")!=text.npos,
         "real report distinguishes captured bad target from readable correct memory and dispatch"))return false;
+    if(!check(text.find("r18=A5A5ABCD")!=text.npos && text.find("r26=123456789ABCDEF0")!=text.npos,
+        "real report retains missing nonvolatile owner registers at full width"))return false;
     PPC_STORE_U32(slot,other);text=report(1);
     if(!check(text.find("slot_readable=1 slot_target=832F6194 slot_dispatch_readable=1 slot_dispatch=0000000000000000")!=text.npos,
         "changed initializer memory is reported separately from register disagreement"))return false;
