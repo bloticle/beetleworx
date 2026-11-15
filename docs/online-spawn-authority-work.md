@@ -512,6 +512,106 @@ substituting its hash for the observed live executable.
 The final same-executable regression exits 0, including 9,091 Room checks:
 `analysis/native-preupdate-health-test-f80a016d21a1423790c3b6528acca720/rollback.log`.
 
+## Guest-only Lua collection spawns (private)
+
+The existing eligibility adapter covered Shooter preparation but not a
+collection spawn with no remaining host command. The collection adapter's
+matching-command path then rejected the guest-only call before it entered the
+original parent.
+
+The audited Lua route calls `827B40B0` at return `827B42DC`. That function saves
+its outer LR at entry SP-8 and allocates a 160-byte frame. At its inner return
+`827B4178`, the outer LR is therefore at current SP+152. The inner loop ignores
+the spawned entity return. Afterward `827B58D8` builds the Lua table from only
+the existing output-array count, including an empty array; it does not read an
+invented first element.
+
+Private eligibility now covers that exact inner/outer caller pair, with a
+readable non-null output collection and original flag 1. If the owner has no
+remaining host command and the entire completed prefix still matches, the
+wrapper returns null without entering the parent or modifying the collection,
+RNG or spawner counters. Remaining host commands, zero-birth host records,
+nested operations and unknown callers are not silently discarded. Existing
+command replay and complete payload comparison remain in place. Failure
+context now records the inner/outer caller and command counts for unsupported
+paths instead of only reporting that the command was missing.
+
+The first eligibility run records an actual guest-only collection suppression
+at 1638 for owner `000EC56D`. It passes the former failure tick 1528, but no
+suppression occurs at 1528 in this rerun; that is not an exact repeat of the
+old call. The run stops at 1658 because the host alone creates
+`meanstreetnorth_ai.MSN_Ped_Floyd02` (template `000EDFE7`, owner `000EC555`)
+through the collection parent. Existing missing-spawn replay only supports
+Shooter preparation. Evidence:
+`analysis/private-native-room-pair-20261115-120032-11f8135c/collection-eligibility-integration-result.json`.
+
+## Missing host collection births (private)
+
+Missing-spawn replay now also admits a depth-zero self-owned collection
+operation with the original flag 1 and a captured CRT input. It resolves the
+live guest TemplateSpawner, checks original owner and pre-state, and enters
+the original parent through the capture adapter with the host selection/RNG.
+A temporary native array receives the local handles. Its count and ordered
+handle-to-GUID mapping must match all host children, and its allocated buffer
+is released through original `832212E8`. Full parent payload/result/RNG
+comparison remains mandatory. The normal Shooter preparation/pending-list path
+remains separate.
+
+This replicates native construction and its original callbacks; it does not
+recreate the missing Lua caller's return table, local variables or continuation.
+It remains incomplete script/world authority. Other ownership forms, nested
+parent commands and unaudited spawning routes still require implementation.
+
+The ordinary run passes a bounded observation through host tick 4071 / guest
+4069 with no pre-close gameplay stop, but performs zero missing-collection
+replays. It is not evidence for the new missing-birth path:
+`analysis/private-native-room-pair-20261115-120527-d95664c5/ordinary-collection-authority-result.json`.
+
+A default-off `em2_probe_room_collection_drift` / launcher `-CollectionDrift`
+fixture now omits one matching self-owned collection birth in the isolated
+direct guest probe at tick 800 or later. It leaves the real host command pending;
+it does not fake a matching capture or advance its cursor. The first fixture
+attempt used an inappropriate native-menu guard / later threshold and never
+injected or replayed a birth; its separate later AI owner/order failure is
+retained in
+`analysis/private-native-room-pair-20261115-120935-c43233d4/unexercised-collection-fixture-result.json`.
+
+The corrected fixture omits the first matching collection at 880, then exposes
+another admitted local collection in the same tick. That call previously saw
+the earlier missing command's owner and failed before completion replay.
+Evidence:
+`analysis/private-native-room-pair-20261115-121403-6fcb61ae/collection-prefix-order-failure-result.json`.
+Before admitting a supported local parent, the adapter now replays the missing
+host prefix only up to that caller's owner. Its original PPC context/stack is
+restored, then its own command and pre-state are checked as usual. Completion
+replay still consumes the remaining tail. This does not sort away mismatched
+captures or overwrite native counters.
+
+The corrected injected rerun omits Floyd at 880 and replays him before the
+second native collection (Annette) in that same tick. Both complete parent
+batches match exactly, including inputs, child GUIDs, counters and CRT states.
+Read-only clone records also match all four constructors: Floyd, his collision
+helper, Annette and her collision helper. The native replay verifies the local
+output handle and releases the temporary array buffer. This exercises the
+new missing-birth path rather than counting an unexercised ordinary run.
+
+The guest observes updates through 1482 (last verified tick 1481) before
+stopping at 1483 on
+`Guest AI selector has no matching host decision`. Thus the targeted spawn and
+same-tick prefix cases pass, while the longer multiplayer integration fails.
+The later AI issue also occurred without an injected birth in the earlier run;
+this evidence does not establish its cause. Native script continuation and
+broader AI/event ordering remain unresolved. Both windows close normally and
+normal user files are unchanged. Evidence:
+`analysis/private-native-room-pair-20261115-121829-ef9134d2/missing-collection-prefix-integration-result.json`.
+Live executable SHA256:
+`B6C1AB8D6A85B56C484CA2D4093050D0487842DA9DC2407A52A0B816556044F7`.
+The final source also clarifies shared diagnostics and equivalent condition
+formatting after the live test; its build/regression is recorded separately.
+The final build and same-executable regression exit successfully, including
+9,091 Room checks and the existing spawn/launch/impact/lifetime fixtures:
+`analysis/native-collection-authority-test-77f07d705d504814807e669328422696/rollback.log`.
+
 ## GUID mutation fence fixed
 
 Cloning assigns a new GUID after the entity is registered. Original

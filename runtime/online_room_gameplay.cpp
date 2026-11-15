@@ -58,9 +58,13 @@ REXCVAR_DEFINE_BOOL(em2_probe_room_ai_target_drift,false,"Debug","Private AI aut
 REXCVAR_DEFINE_BOOL(em2_probe_room_spawn_batches,false,"Debug","Private native Room: transport and compare complete native spawner batches; no spawn replay or suppression");
 REXCVAR_DEFINE_BOOL(em2_probe_room_spawn_eligibility,false,"Debug","Private spawn authority: suppress guest-only operations at the audited null-safe projectile caller; requires batch capture");
 REXCVAR_DEFINE_BOOL(em2_probe_room_spawn_replay,false,"Debug","Private spawn authority: replay missing Shooter preparation and pending-shot setup; requires batch capture and eligibility");
+REXCVAR_DECLARE(std::string,em2_room_probe_role);
+REXCVAR_DEFINE_BOOL(em2_probe_room_collection_drift,false,"Debug","Isolated native Room QA only: omit one matching Lua collection birth at tick 800 or later to require native host replay");
 REXCVAR_DEFINE_BOOL(em2_probe_room_projectile_impacts,false,"Debug","Private authority: host-owned impact/retirement and native FX replay for captured Shooter projectiles");
 REXCVAR_DEFINE_BOOL(em2_probe_room_shooter_launches,false,"Debug","Private authority: host-owned pending-shot launch timing, native velocity setup and launch FX");
 PPC_EXTERN_FUNC(__imp__sub_828B92A8);
+PPC_EXTERN_FUNC(sub_827B3C60);
+PPC_EXTERN_FUNC(__imp__sub_832212E8);
 PPC_EXTERN_FUNC(__imp__sub_827F2FA8);
 REXCVAR_DECLARE(bool,em2_profile_world_memory);
 REXCVAR_DECLARE(bool,em2_probe_room_recovery_controller);
@@ -252,7 +256,7 @@ struct NativeRoomGameplay::Impl {
     std::vector<DamageEvent> damage_events;
     std::vector<RoomAiTargetDecision> ai_decisions;
     std::vector<SpawnBatch> spawn_batches;
-    bool spawn_replaying=false;
+    bool spawn_replaying=false,collection_drift_injected=false;
     std::vector<ProjectileImpact> projectile_impacts;
     std::set<SpawnId> owned_projectiles;
     uint64_t projectile_load=0;
@@ -1368,21 +1372,37 @@ bool NativeRoomGameplay::SuppressSpawnBatch(const PPCContext& ctx,uint8_t* base,
        !s.Owner() || !s.Configured() || s.stopped || s.peer==1 || !s.pending || s.load_depth || s.transition_pending ||
        s.room->state()!=RoomState::Running || !s.room->host_correction_mode() || !s.pending_authority ||
        !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed || s.pending_authority->tick!=tick)return false;
-    // 828B7148 checks r3 immediately at return 828B71C4 and takes its null
-    // epilogue at 828B7238, before reading the spawned entity. No output list is
-    // passed. Other callers and nested operations require their own ABI audit.
-    if(depth || uint32_t(ctx.lr)!=0x828B71C4 || ctx.r7.u32 || ctx.r6.u32>1)return false;
+    // The Shooter caller checks null before using the returned entity.
+    // The audited Lua collection route (outer return 827B42DC) ignores r3
+    // inside 827B40B0 and converts only the actual output array afterward.
+    // Skipping a guest-only parent leaves that array unchanged; no null entry
+    // or synthetic child is appended. Other outer/indirect callers stay native.
+    const bool firing=uint32_t(ctx.lr)==0x828B71C4 && !ctx.r7.u32 && ctx.r6.u32<=1;
+    const bool collection=uint32_t(ctx.lr)==0x827B4178 && ctx.r6.u32==1 && ctx.r7.u32 && Readable(ctx.r7.u32,12,base) &&
+        ctx.r1.u32<=UINT32_MAX-156 && Readable(ctx.r1.u32+152,4,base) && PPC_LOAD_U32(ctx.r1.u32+152)==0x827B42DC;
+    if(depth || (!firing && !collection))return false;
     const auto component=ctx.r3.u32;
     if(!Readable(component,148,base))return false;
     const auto attached=PPC_LOAD_U32(component+48);
     if(!attached || attached>UINT32_MAX-8 || !Readable(attached+8,20,base) || PPC_LOAD_U32(attached+8)!=0x8208D908)return false;
     SpawnReference owner;owner.peer=s.HumanPeer(attached+8);
     if(!owner.peer)for(unsigned i=0;i<4;++i)owner.id[i]=PPC_LOAD_U32(attached+12+i*4);
-    switch(EvaluateSpawnEligibility(s.pending_authority->spawn_batches,s.spawn_batches,owner)){
+    const auto eligibility=EvaluateSpawnEligibility(s.pending_authority->spawn_batches,s.spawn_batches,owner);
+    if(collection && eligibility==SpawnEligibility::Original && REXCVAR_GET(em2_probe_room_collection_drift) &&
+       REXCVAR_GET(em2_room_probe_role)=="guest" && !s.spawn_replaying && !s.collection_drift_injected && tick>=800 &&
+       s.spawn_batches.size()<s.pending_authority->spawn_batches.size()){
+        const auto& next=s.pending_authority->spawn_batches[s.spawn_batches.size()];
+        if(!next.depth && !next.shooter && next.collection && next.flag && next.owner==owner && next.anchor==owner){
+            s.collection_drift_injected=true;
+            REXLOG_INFO("Private matching collection birth omitted: tick {} owner {:08X}/{:08X}/{:08X}/{:08X}; host command remains pending for native replay",tick,owner.id[0],owner.id[1],owner.id[2],owner.id[3]);
+            return true;
+        }
+    }
+    switch(eligibility){
     case SpawnEligibility::Original:return false;
     case SpawnEligibility::InvalidPrefix:s.Stop("Native spawn eligibility rejected an invalid completed host prefix");return true;
     case SpawnEligibility::Suppress:
-        REXLOG_INFO("Native guest-only spawn suppressed: tick {} owner peer {} GUID {:08X}/{:08X}/{:08X}/{:08X}, count {}, choice {}, used {:08X}; audited null-safe caller, original parent not entered, no RNG/counter/birth side effects",
+        REXLOG_INFO("Native guest-only spawn suppressed: tick {} owner peer {} GUID {:08X}/{:08X}/{:08X}/{:08X}, count {}, choice {}, used {:08X}; audited caller, original parent not entered, no RNG/counter/birth or output-collection side effects",
             tick,owner.peer,owner.id[0],owner.id[1],owner.id[2],owner.id[3],PPC_LOAD_U32(component+104),PPC_LOAD_U32(component+140),PPC_LOAD_U32(component+144));
         return true;
     }
@@ -1394,35 +1414,51 @@ bool NativeRoomGameplay::PrepareSpawnReplay(PPCContext& ctx,uint8_t* base,unsign
         if(!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_spawn_batches) || !REXCVAR_GET(em2_probe_room_spawn_eligibility) ||
            !REXCVAR_GET(em2_probe_room_spawn_replay) || !s.Owner() || !s.Configured() || s.stopped || s.peer==1 || !s.pending ||
            s.load_depth || s.transition_pending || s.room->state()!=RoomState::Running)return true;
-        // Both audited native callers retain their original outer operation.
-        // 827B4178 is the collection-spawn loop in 827B40B0: it passes the
-        // live output array and ignores r3. Do not synthesize that array or
-        // replay the parent without its owning script operation.
+        // Both audited native callers consume the host's parent inputs.
+        // 827B4178 passes its live output array from the original Lua route;
+        // missing-birth replay below uses a separate, owned temporary array.
+        // Reconstructing a missing Lua continuation remains separate work.
         if(depth || (uint32_t(ctx.lr)!=0x828B71C4 && uint32_t(ctx.lr)!=0x827B4178))return true;
     }
     if(s.AnnouncedLoadCancellation(s.committed))return true;
-    const auto fail=[&](const char* reason){s.Stop(reason);return false;};
+    const auto fail=[&](const char* reason){
+        REXLOG_ERROR("Native spawn replay failure context: tick {}, caller {:08X}, parent frame return {:08X}, depth {}, local batches {}, host present {}, host batches {}; {}",
+            s.committed,uint32_t(ctx.lr),ctx.r1.u32<=UINT32_MAX-156 && Readable(ctx.r1.u32+152,4,base)?PPC_LOAD_U32(ctx.r1.u32+152):0,
+            depth,s.spawn_batches.size(),bool(s.pending_authority),s.pending_authority?s.pending_authority->spawn_batches.size():0,reason);
+        s.Stop(reason);return false;
+    };
     if(s.stopped || !s.Owner() || s.peer==1 || !s.pending || s.load_depth || s.transition_pending ||
        !s.pending_authority || !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed || s.pending_authority->tick!=tick ||
        s.spawn_batches.size()>=s.pending_authority->spawn_batches.size())return fail("Native spawn replay lost its owned tick or host command");
-    const auto expected=s.pending_authority->spawn_batches[s.spawn_batches.size()];
-    const bool firing=uint32_t(ctx.lr)==0x828B71C4 && expected.shooter && !expected.collection &&
-        !ctx.r7.u32 && ctx.r6.u32<=1 && expected.owner==expected.anchor;
-    const bool collection=uint32_t(ctx.lr)==0x827B4178 && !expected.shooter && expected.collection &&
-        ctx.r7.u32 && Readable(ctx.r7.u32,12,base) && ctx.r6.u32==1 && expected.flag;
-    if(depth || expected.depth || !expected.random_present || (!firing && !collection))
-        return fail("Native spawn replay reached an unsupported parent path");
+    const bool firing_path=uint32_t(ctx.lr)==0x828B71C4 && !ctx.r7.u32 && ctx.r6.u32<=1;
+    const bool collection_path=uint32_t(ctx.lr)==0x827B4178 && ctx.r7.u32 && Readable(ctx.r7.u32,12,base) && ctx.r6.u32==1;
+    if(depth || (!firing_path && !collection_path))return fail("Native spawn replay reached an unsupported parent caller");
     const auto component=ctx.r3.u32,anchor=ctx.r5.u32;
     if(!Readable(component,148,base))return fail("Native spawn replay component unavailable");
     const auto attached=PPC_LOAD_U32(component+48);
-    if(!attached || attached>UINT32_MAX-8 || !Readable(attached+8,20,base) || PPC_LOAD_U32(attached+8)!=0x8208D908 ||
-       !Readable(anchor,20,base) || PPC_LOAD_U32(anchor)!=0x8208D908 || (firing && attached!=anchor-8))
-        return fail("Native spawn replay owner/component binding differs from host");
+    const auto binding=[&]{return attached && attached<=UINT32_MAX-8 && Readable(attached+8,20,base) &&
+        PPC_LOAD_U32(attached+8)==0x8208D908 && Readable(anchor,20,base) && PPC_LOAD_U32(anchor)==0x8208D908 &&
+        Readable(component,148,base) && PPC_LOAD_U32(component+48)==attached && (!firing_path || attached==anchor-8);};
+    if(!binding())return fail("Native spawn replay owner/component binding differs from host");
     const auto reference=[&](uint32_t face){
         SpawnReference ref;ref.peer=s.HumanPeer(face);
         if(!ref.peer)for(unsigned i=0;i<4;++i)ref.id[i]=PPC_LOAD_U32(face+4+i*4);
         return ref;
     };
+    const auto owner=reference(attached+8);
+    if(!s.spawn_replaying && s.pending_authority->spawn_batches[s.spawn_batches.size()].owner!=owner){
+        // A missing host birth may precede this local caller in the same tick.
+        // Replay only that host prefix, restoring the caller's context/stack,
+        // then admit its own command. Do not replay the current caller twice.
+        if(!ReplayMissingSpawns(ctx,base,&owner))return false;
+        if(!s.pending_authority || s.pending_authority->tick!=tick || s.spawn_batches.size()>=s.pending_authority->spawn_batches.size() || !binding())
+            return fail("Native spawn prefix replay lost the pending local caller");
+    }
+    const auto expected=s.pending_authority->spawn_batches[s.spawn_batches.size()];
+    const bool admitted=(firing_path && expected.shooter && !expected.collection && expected.owner==expected.anchor) ||
+        (collection_path && !expected.shooter && expected.collection && expected.flag);
+    if(expected.depth || !expected.random_present || !admitted)
+        return fail("Native spawn replay reached an unsupported parent path");
     if(reference(attached+8)!=expected.owner || reference(anchor)!=expected.anchor)
         return fail("Native spawn replay owner/anchor differs from the next host command");
     for(unsigned i=0;i<3;++i)if(PPC_LOAD_U32(component+(i==0?104:i==1?140:144))!=expected.before[i])
@@ -1431,7 +1467,7 @@ bool NativeRoomGameplay::PrepareSpawnReplay(PPCContext& ctx,uint8_t* base,unsign
     ctx.r4.s64=expected.selection;ctx.r6.u64=expected.flag;
     return true;
 }
-bool NativeRoomGameplay::ReplayMissingSpawns(PPCContext& ctx,uint8_t* base){
+bool NativeRoomGameplay::ReplayMissingSpawns(PPCContext& ctx,uint8_t* base,const SpawnReference* stop_before){
     auto& s=*impl_;uint64_t tick=0;Environment environment;
     if(!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_spawn_batches) || !REXCVAR_GET(em2_probe_room_spawn_eligibility) ||
        !REXCVAR_GET(em2_probe_room_spawn_replay) || !s.Owner() || s.stopped || s.peer==1 || !s.pending || s.load_depth || s.transition_pending ||
@@ -1440,8 +1476,11 @@ bool NativeRoomGameplay::ReplayMissingSpawns(PPCContext& ctx,uint8_t* base){
     while(s.pending_authority && s.spawn_batches.size()<s.pending_authority->spawn_batches.size()){
         // Copy commands before native callbacks can enter a transition/detach.
         const auto expected=s.pending_authority->spawn_batches[s.spawn_batches.size()];
-        if(!expected.shooter || expected.depth || expected.collection || !expected.random_present || expected.owner!=expected.anchor)
-            return s.Stop("Missing host spawn is not an audited self-owned Shooter burst");
+        if(stop_before && expected.owner==*stop_before)return true;
+        const bool collection_replay=!expected.shooter && expected.collection && expected.flag;
+        if(expected.depth || !expected.random_present || expected.owner!=expected.anchor ||
+           (!collection_replay && (!expected.shooter || expected.collection)))
+            return s.Stop("Missing host spawn is not an audited self-owned Shooter or collection operation");
         NativeEntitySnapshot snapshot;const char* error=nullptr;uint32_t address=0;uint64_t before=0,after=0;
         if(!em2::SampleNativeEntityLifetimeRevision(before) || !ReadNativeEntitySnapshot(base,snapshot,error,address,false) ||
            !em2::SampleNativeEntityLifetimeRevision(after) || before!=after)return s.Stop("Native missing-spawn registry changed during resolution");
@@ -1451,25 +1490,59 @@ bool NativeRoomGameplay::ReplayMissingSpawns(PPCContext& ctx,uint8_t* base){
             if(!NameTagActors(players,local,base))return s.Stop("Native missing-spawn player bindings unavailable");
             for(const auto& player:players)if(player.peer==expected.owner.peer)entity=player.entity;
         }else for(const auto& record:snapshot.records)if(record.id==expected.owner.id){entity=record.debug_address;break;}
-        const auto shooter=NamedComponent(base,entity,"ShooterComponent"),spawner=NamedComponent(base,entity,"TemplateSpawnerComponent");
-        if(!shooter || !spawner || !Readable(shooter,96,base) || !Readable(spawner,148,base) ||
-           PPC_LOAD_U32(shooter+48)!=entity-8 || PPC_LOAD_U32(spawner+48)!=entity-8 || PPC_LOAD_U32(shooter+72)!=spawner)
-            return s.Stop("Native missing-spawn Shooter and TemplateSpawner class bindings unavailable");
-        if(PPC_LOAD_U32(shooter+84))return s.Stop("Native Shooter has unlaunched shots while host requests fresh preparation");
+        const auto spawner=NamedComponent(base,entity,"TemplateSpawnerComponent");
+        const auto shooter=collection_replay?0:NamedComponent(base,entity,"ShooterComponent");
+        if(!spawner || !Readable(spawner,148,base) || PPC_LOAD_U32(spawner+48)!=entity-8)
+            return s.Stop("Native missing-spawn TemplateSpawner class binding unavailable");
+        if(!collection_replay && (!shooter || !Readable(shooter,96,base) ||
+           PPC_LOAD_U32(shooter+48)!=entity-8 || PPC_LOAD_U32(shooter+72)!=spawner))
+            return s.Stop("Native missing-spawn Shooter class binding unavailable");
+        if(!collection_replay && PPC_LOAD_U32(shooter+84))return s.Stop("Native Shooter has unlaunched shots while host requests fresh preparation");
         const auto old_count=s.spawn_batches.size();
+        std::vector<uint32_t> output_handles;bool output_valid=true;
         const auto top=ctx.r1.u32&~15u;constexpr size_t bytes=65536;
-        if(top<bytes+4096 || !Readable(top-uint32_t(bytes),bytes,base))return s.Stop("Native Shooter replay has no bounded borrowed stack");
+        if(top<bytes+4096 || !Readable(top-uint32_t(bytes),bytes,base))return s.Stop("Native spawn replay has no bounded borrowed stack");
         {
             Context context(ctx);std::vector<uint8_t> backup(bytes);const auto start=top-uint32_t(bytes);
             std::memcpy(backup.data(),base+start,bytes);
             struct Restore {uint8_t* destination;const std::vector<uint8_t>& bytes;~Restore(){std::memcpy(destination,bytes.data(),bytes.size());}} restore{base+start,backup};
             struct Reset {bool& value;~Reset(){value=false;}} reset{s.spawn_replaying};s.spawn_replaying=true;
-            ctx.r1.u64=top-512;PPC_STORE_U32(ctx.r1.u32,top);ctx.r3.u64=shooter;
-            {em2::GuestReadBatch::CallbackBoundary callback;__imp__sub_828B92A8(ctx,base);}
+            ctx.r1.u64=top-512;PPC_STORE_U32(ctx.r1.u32,top);
+            if(collection_replay){
+                // Native parent appends local entity handles to this owned
+                // temporary array. Release its buffer with the original array
+                // destructor; never retain handles or replace Lua VM storage.
+                const auto array=top-256;std::memset(base+array,0,12);
+                const auto release=[&]{ctx.r1.u64=top-512;ctx.r3.u64=array;em2::GuestReadBatch::CallbackBoundary callback;__imp__sub_832212E8(ctx,base);};
+                try{
+                    ctx.r3.u64=spawner;ctx.r4.s64=expected.selection;ctx.r5.u64=entity;
+                    ctx.r6.u64=expected.flag;ctx.r7.u64=array;ctx.lr=0x827B4178;
+                    {em2::GuestReadBatch::CallbackBoundary callback;sub_827B3C60(ctx,base);}
+                    const auto data=PPC_LOAD_U32(array),count=PPC_LOAD_U32(array+4),capacity=PPC_LOAD_U32(array+8);
+                    output_valid=count<=kMaxSpawnChildren && count<=capacity && (!count || Readable(data,size_t(count)*4,base));
+                    if(output_valid)for(unsigned i=0;i<count;++i)output_handles.push_back(PPC_LOAD_U32(data+i*4));
+                }catch(...){release();throw;}
+                release();
+            }else{
+                ctx.r3.u64=shooter;
+                {em2::GuestReadBatch::CallbackBoundary callback;__imp__sub_828B92A8(ctx,base);}
+            }
         }
         if(CurrentNativeRoomGameplay()!=this || !s.Configured() || s.stopped || !s.pending_authority || s.pending_authority->tick!=tick || s.load_depth || s.transition_pending)
-            return s.Stop("Native Shooter replay left its original owned world");
-        if(s.spawn_batches.size()<=old_count)return s.Stop("Native Shooter replay made no host-command progress");
+            return s.Stop("Native spawn replay left its original owned world");
+        if(s.spawn_batches.size()<=old_count)return s.Stop("Native spawn replay made no host-command progress");
+        if(collection_replay){
+            if(!output_valid || s.spawn_batches.size()!=old_count+1 || output_handles.size()!=expected.children.size())
+                return s.Stop("Native collection replay output count differs from the host children");
+            if(!ReadNativeEntitySnapshot(base,snapshot,error,address,false))return s.Stop("Native collection replay cannot verify its registered children");
+            for(size_t i=0;i<expected.children.size();++i){
+                const auto record=std::find_if(snapshot.records.begin(),snapshot.records.end(),[&](const auto& row){return row.id==expected.children[i].entity;});
+                if(record==snapshot.records.end() || record->handle!=output_handles[i])
+                    return s.Stop("Native collection replay output handle/order differs from the host child identities");
+            }
+            REXLOG_INFO("Native host collection spawn replayed: tick {}, children {}; original parent payload and ordered local handles verified, temporary output buffer released",tick,expected.children.size());
+            continue;
+        }
         // Validate the outer preparation operation's real pending-shot list as well
         // as the captured parent, rather than stopping at constructor success.
         if(!ReadNativeEntitySnapshot(base,snapshot,error,address,false))return s.Stop("Native Shooter replay cannot verify its registered children");
