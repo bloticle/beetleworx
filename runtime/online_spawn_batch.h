@@ -43,5 +43,9 @@ enum class SpawnEligibility {Original,Suppress,InvalidPrefix};
 // the unconsumed sequence. Never hide a prior capture mismatch by cancelling a
 // later call. Native scope/caller ABI checks belong to the execution adapter.
 SpawnEligibility EvaluateSpawnEligibility(std::span<const SpawnBatch> host,std::span<const SpawnBatch> completed,const SpawnReference& owner);
+// A missing Shooter birth may precede native slot cleanup in this same tick.
+// Admit only the next exact host operation while its pre-state still exists.
+bool SpawnBeforeCleanupReady(std::span<const SpawnBatch> host,std::span<const SpawnBatch> completed,
+    const SpawnReference& owner,const std::array<uint32_t,3>& state);
 bool TestSpawnBatchCodec();
 }

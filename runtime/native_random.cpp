@@ -646,3 +646,30 @@ PPC_FUNC_IMPL(sub_827B3298){
             prototype_id[0],prototype_id[1],prototype_id[2],prototype_id[3],flags[0],flags[1],flags[2],output_valid,entity,output[0],output[1],output[2],output[3],same_random,random_before,random_after);
     }
 }
+
+// Observe the original slot cleanup that can change a later parent's mask.
+// Default-off private tracing only; never repairs or replaces native storage.
+PPC_EXTERN_FUNC(__imp__sub_827B2E28);
+PPC_FUNC_IMPL(sub_827B2E28){
+    if(REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_spawn_batches))
+        if(auto* gameplay=em2::net::CurrentNativeRoomGameplay();gameplay && !gameplay->PrepareSpawnerCleanup(ctx,base)){ctx.r3.u64=0;return;}
+    uint64_t tick=0;
+    if(!base || !REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_spawn_batches) ||
+       !em2::CurrentAgreedSimulationTick(tick)){__imp__sub_827B2E28(ctx,base);return;}
+    const auto component=ctx.r3.u32,caller=uint32_t(ctx.lr);
+    std::array<uint32_t,4> owner{},before{},after{};bool valid=false;
+    const auto capture=[&](std::array<uint32_t,4>& fields,bool identity){
+        RandomHost preserve(ctx);em2::GuestReadBatch reads;
+        if(component<4096 || uint64_t(component)+148>0x100000000ull || !em2::GuestReadBatch::Readable(base+component,148))return false;
+        const auto attached=PPC_LOAD_U32(component+48);
+        if(!attached || uint64_t(attached)+28>0x100000000ull || !em2::GuestReadBatch::Readable(base+attached+8,20) || PPC_LOAD_U32(attached+8)!=0x8208D908)return false;
+        for(unsigned i=0;i<4;++i){const auto id=PPC_LOAD_U32(attached+12+i*4);if(identity)owner[i]=id;else if(owner[i]!=id)return false;}
+        fields={PPC_LOAD_U32(component+104),PPC_LOAD_U32(component+140),PPC_LOAD_U32(component+144),PPC_LOAD_U32(component+72)};return true;
+    };
+    valid=capture(before,true);
+    __imp__sub_827B2E28(ctx,base);
+    if(valid && capture(after,false) && before!=after){RandomHost preserve(ctx);
+        REXLOG_INFO("Private native spawn slot cleanup: tick {} caller {:08X} owner {:08X}/{:08X}/{:08X}/{:08X}, component {:08X}, before {}/{}/{:08X}/{} after {}/{}/{:08X}/{}; original operation unchanged",
+            tick,caller,owner[0],owner[1],owner[2],owner[3],component,before[0],before[1],before[2],before[3],after[0],after[1],after[2],after[3]);
+    }
+}

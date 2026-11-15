@@ -74,6 +74,7 @@ public:
     // audited caller, without entering the native parent or changing counters.
     bool SuppressSpawnBatch(const PPCContext&,uint8_t*,unsigned depth);
     bool PrepareSpawnReplay(PPCContext&,uint8_t*,unsigned depth);
+    bool PrepareSpawnerCleanup(PPCContext&,uint8_t*);
     NativeImpactMode ProjectileImpactMode(const SpawnId&,uint32_t caller);
     bool RecordProjectileImpact(ProjectileImpact);
     NativeImpactMode ShooterLaunchMode(std::span<const SpawnId>,uint32_t caller);
@@ -89,7 +90,7 @@ public:
     std::optional<uint64_t> last_native_completed_tick()const;
     const std::string& error()const;
 private:
-    bool ReplayMissingSpawns(PPCContext&,uint8_t*,const SpawnReference* stop_before=nullptr);
+    bool ReplayMissingSpawns(PPCContext&,uint8_t*,const SpawnReference* stop_before=nullptr,const SpawnReference* stop_after=nullptr);
     bool ReplayProjectileImpacts(PPCContext&,uint8_t*);
     bool ReplayEntityRetirements(PPCContext&,uint8_t*,bool required);
     bool ReplayShooterLaunches(PPCContext&,uint8_t*,bool required);

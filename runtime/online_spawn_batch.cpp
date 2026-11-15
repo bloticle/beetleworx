@@ -60,6 +60,13 @@ SpawnEligibility EvaluateSpawnEligibility(std::span<const SpawnBatch> host,std::
     for(const auto& batch:host.subspan(completed.size()))if(batch.owner==owner)return SpawnEligibility::Original;
     return SpawnEligibility::Suppress;
 }
+bool SpawnBeforeCleanupReady(std::span<const SpawnBatch> host,std::span<const SpawnBatch> completed,
+    const SpawnReference& owner,const std::array<uint32_t,3>& state){
+    if(EvaluateSpawnEligibility(host,completed,owner)!=SpawnEligibility::Original || completed.size()>=host.size())return false;
+    const auto& next=host[completed.size()];
+    return next.owner==owner && next.anchor==owner && next.shooter && !next.collection &&
+        !next.depth && next.flag && next.random_present && next.before==state;
+}
 bool TestSpawnBatchCodec(){
     unsigned checks=0;auto check=[&](bool ok,const char* why){++checks;if(!ok)REXLOG_ERROR("Spawn batch codec: {}",why);return ok;};
     SpawnBatch batch;batch.owner.id={1,2,3,4};batch.anchor.peer=16;batch.selection=INT32_MIN;batch.depth=15;batch.flag=true;batch.collection=true;
@@ -106,6 +113,21 @@ bool TestSpawnBatchCodec(){
     host[0].owner={};host[0].owner.peer=16;
     if(!check(EvaluateSpawnEligibility(host,completed,host[0].owner)==SpawnEligibility::Original,"stable player ownership is independent of respawn-generated GUIDs"))return false;
     if(!check(EvaluateSpawnEligibility(host,completed,{})==SpawnEligibility::InvalidPrefix,"absent owner identity is never treated as a safe cancellation"))return false;
+    SpawnBatch pending;pending.owner.id={1,2,3,4};pending.anchor=pending.owner;
+    pending.shooter=true;pending.flag=true;pending.random_present=true;pending.before={2,2,1};pending.after={3,3,1};
+    host={pending};completed.clear();
+    if(!check(SpawnBeforeCleanupReady(host,completed,pending.owner,{2,2,1}),"missing Shooter birth admitted before cleanup at exact original pre-state"))return false;
+    for(unsigned field=0;field<3;++field){auto changed=pending.before;changed[field]^=1;
+        if(!check(!SpawnBeforeCleanupReady(host,completed,pending.owner,changed),"already changed slot/counter state cannot be overwritten by cleanup replay"))return false;}
+    for(unsigned mutation=0;mutation<7;++mutation){auto changed=host;
+        if(mutation==0)changed[0].owner.id[0]^=1;if(mutation==1)changed[0].anchor.id[0]^=1;
+        if(mutation==2)changed[0].shooter=false;if(mutation==3)changed[0].collection=true;
+        if(mutation==4)changed[0].depth=1;if(mutation==5)changed[0].flag=false;if(mutation==6)changed[0].random_present=false;
+        if(!check(!SpawnBeforeCleanupReady(changed,completed,pending.owner,pending.before),"foreign owner/anchor, unaudited shape and missing RNG cannot enter cleanup replay"))return false;}
+    completed=host;
+    if(!check(!SpawnBeforeCleanupReady(host,completed,pending.owner,pending.before),"completed host birth cannot run twice before cleanup"))return false;
+    host.push_back(pending);completed[0].selection^=1;
+    if(!check(!SpawnBeforeCleanupReady(host,completed,pending.owner,pending.before),"earlier divergent parent cannot be concealed by a later cleanup replay"))return false;
     REXLOG_INFO("Spawn batch codec passed {} portable parent/child identity, zero-birth, scalar and malformed-payload checks; no native spawn replay assertion",checks);return true;
 }
 }
