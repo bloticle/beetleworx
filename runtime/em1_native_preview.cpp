@@ -25,7 +25,7 @@ PPC_EXTERN_FUNC(__imp__sub_827403B0); // create/query script entity handle
 PPC_EXTERN_FUNC(sub_82744E90); // stock deferred destruction request
 PPC_EXTERN_FUNC(__imp__sub_826547C8); // parser output vector allocator's free
 PPC_EXTERN_FUNC(__imp__sub_82533EB0); // original fresh runtime GUID generator
-PPC_EXTERN_FUNC(__imp__sub_82517E50); // native entity GUID assignment
+PPC_EXTERN_FUNC(sub_82517E50); // native GUID assignment with the identity mutation fence
 PPC_EXTERN_FUNC(__imp__sub_82A89930); // original SetRotatorMaxSpeed component lookup
 PPC_EXTERN_FUNC(__imp__sub_828DB1C0); // original Rotator max-speed setter
 
@@ -171,7 +171,7 @@ bool CreateNativeArchitectureEntity(PPCContext& ctx,uint8_t* base,const Architec
   // path's fresh GUID generation and native assignment before world insertion.
   // The immutable original identifier remains in the retained scene blueprint.
   ctx.r3.u64=allocation+kGuid;__imp__sub_82533EB0(ctx,base);
-  ctx.r3.u64=face;ctx.r4.u64=allocation+kGuid;__imp__sub_82517E50(ctx,base);
+  ctx.r3.u64=face;ctx.r4.u64=allocation+kGuid;sub_82517E50(ctx,base);
   // This is the same current-world insertion/admission pair used by the
   // original CreateEntity implementation82743AD8. Admission calls native
   // resource loading, component activation, render registration and completion.
@@ -190,7 +190,7 @@ bool ActivateNativeTrigger(PPCContext& ctx,uint8_t* base,NativeArchitectureEntit
   if(!state.entity_reference || state.admitted || !Mapped(base,state.entity,104) || !Mapped(base,state.core,228) || !Stack(ctx,base,error)){error="Native trigger admission prerequisites unavailable";return false;}
   const auto face=state.entity+8;
   ctx.r3.u64=state.scratch+kGuid;__imp__sub_82533EB0(ctx,base);
-  ctx.r3.u64=face;ctx.r4.u64=state.scratch+kGuid;__imp__sub_82517E50(ctx,base);
+  ctx.r3.u64=face;ctx.r4.u64=state.scratch+kGuid;sub_82517E50(ctx,base);
   ctx.r3.u64=PPC_LOAD_U32(state.core+152);ctx.r4.u64=face;__imp__sub_82510C20(ctx,base);
   state.admitted=true;
   if(!PPC_LOAD_U32(state.entity+88)){error="Native trigger did not join world group";return false;}

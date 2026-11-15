@@ -48,9 +48,12 @@ def inspect_peer(root, identity):
                 break
     log = (root / "game.log").read_text(encoding="utf-8", errors="replace")
     lifecycle = []
+    lifecycle_positions = []
     pattern = r"Private native entity lifecycle: (insert|remove) tick (\d+) agreed (true|false) entity ([0-9A-F]{8}) GUID ([0-9A-F/]+) vtable [0-9A-F]+ caller ([0-9A-F]{8})"
-    for action, tick, agreed, entity, guid, caller in re.findall(pattern, log):
+    for match in re.finditer(pattern, log):
+        action, tick, agreed, entity, guid, caller = match.groups()
         lifecycle.append({"action": action, "tick": int(tick), "agreed": agreed == "true", "local_entity": entity, "guid": guid, "caller": caller})
+        lifecycle_positions.append(match.start())
     exact = [index for index, row in enumerate(lifecycle) if row["guid"].replace("/", "").lower() == identity.hex()]
     context = []
     for index in exact:
@@ -62,6 +65,34 @@ def inspect_peer(root, identity):
                  "guid_differs_from_insert": bool(birth and birth["guid"] != event["guid"])}
         if entry not in context:
             context.append(entry)
+    # Clone output identifies the final generated GUID, which can differ from
+    # the constructor's registration-time GUID recorded by the lifecycle hook.
+    clone_context = []
+    clone_pattern = r"Private native entity clone: tick (\d+) caller ([0-9A-F]+) template ([0-9A-F]+) readable (true|false) name '(.*?)' ID ([0-9A-F/]+), flags (\d+)/(\d+), result-valid true entity ([0-9A-F]+) GUID ([0-9A-F/]+)"
+    for match in re.finditer(clone_pattern, log):
+        tick, caller, prototype, readable, template_name, template_id, initialize, new_guid, entity, guid = match.groups()
+        if guid.replace("/", "").lower() != identity.hex():
+            continue
+        stack = re.findall(rf"Private native entity factory stack: tick {tick} entity {entity} callers ([0-9A-F/]+)", log)
+        birth = next((row for row, position in zip(reversed(lifecycle), reversed(lifecycle_positions))
+                      if position < match.start() and row["local_entity"] == entity and row["action"] == "insert"), None)
+        clone_context.append({"tick": int(tick), "caller": caller, "local_prototype": prototype,
+                              "template_readable": readable == "true", "template_name": template_name, "template_guid": template_id,
+                              "initialize": int(initialize), "generate_guid": int(new_guid), "local_entity": entity,
+                              "registration_guid": birth["guid"] if birth else None,
+                              "guid_changed_during_clone": bool(birth and birth["guid"] != guid),
+                              "factory_callers": stack[-1].split("/") if stack else []})
+    spawner_context = []
+    operation_pattern = r"Private native spawner operation: tick (\d+) caller ([0-9A-F]+) component ([0-9A-F]+), owner-valid (true|false) GUID ([0-9A-F/]+), anchor-valid (true|false) GUID ([0-9A-F/]+), template ID ([0-9A-F/]+), flags (\d+)/(\d+)/(\d+), result-valid true entity ([0-9A-F]+) GUID ([0-9A-F/]+), CRT-valid (true|false) states ([0-9A-F]+)/([0-9A-F]+)"
+    for tick, caller, component, owner_valid, owner, anchor_valid, anchor, template, index, ordinal, flag, entity, guid, crt_valid, before, after in re.findall(operation_pattern, log):
+        if guid.replace("/", "").lower() != identity.hex():
+            continue
+        spawner_context.append({"tick": int(tick), "caller": caller, "local_component": component,
+                                "owner_valid": owner_valid == "true", "owner_guid": owner,
+                                "anchor_valid": anchor_valid == "true", "anchor_guid": anchor,
+                                "template_guid": template, "flags": [int(index), int(ordinal), int(flag)],
+                                "local_entity": entity, "crt_owner_unchanged": crt_valid == "true",
+                                "crt_before": before, "crt_after": after})
     return {
         "root": str(root), "sample_count": len(observations),
         "matching_sample_count": len(present), "catalog_name": name,
@@ -70,6 +101,8 @@ def inspect_peer(root, identity):
         "last_sample": observations[-1] if observations else None,
         "presence_transitions": transitions,
         "lifecycle_context": context,
+        "clone_context": clone_context,
+        "spawner_context": spawner_context,
     }
 
 
