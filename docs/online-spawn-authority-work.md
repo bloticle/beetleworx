@@ -1,9 +1,9 @@
 # Native spawn authority development
 
-The current private authority adapter still stops when a host Damage target
-does not exist on the guest. Spawn replication is not implemented yet. This
-work identifies the failing native path and closes an identity-fence gap;
-it does not claim a playable server-authoritative world or a new demo release.
+The private authority adapter now includes targeted native Shooter burst replay
+and guest-only projectile eligibility. Generic world births, projectile motion
+and lifecycle authority remain incomplete. This work does not claim a playable
+server-authoritative world or a new demo release.
 
 ## Confirmed failing object
 
@@ -221,6 +221,74 @@ Consequently replaying `827B3C60` alone and assigning a host GUID would still
 omit native projectile setup and burst ownership. Host-only replay must cover
 these outer effects or an audited complete firing operation; constructor-only
 replay must not be presented as a functional host-owned projectile.
+
+## Original native Shooter burst replay
+
+The new, default-off `em2_probe_room_spawn_replay` flag requires capture,
+eligibility, an admitted host-corrected guest and a pending authority command
+for the exact current tick. Spawn-batch format 2 and Room wire 21 carry a
+Shooter-origin boolean, not a remotely supplied function pointer. The adapter
+resolves the current owner through its GUID or lobby peer, decodes native
+component RTTI leaves without calling getters, and requires uniquely bound
+`ShooterComponent` and `TemplateSpawnerComponent` objects on that owner.
+The Shooter's +72 link must point to that spawner, and its active-shot list
+must be empty before replaying a fresh burst.
+
+Missing host births invoke original `828B92A8` on a bounded borrowed native
+stack at the completed guest boundary. Its original `828B7148` path performs
+source/instigator, collision relationship and FX setup; the burst's original
+array append records returned handles. No Havok object, native pointer or
+allocator state is copied from the host. Matching local firing calls also
+consume host selection/flag and random inputs at their existing parent entry.
+The initialized native CRT owner is validated, seeded through original srand,
+and read back; the wrapper preserves the caller's full PPC context and host
+FP/error state around that seed operation. Native constructors generate IDs
+normally from those inputs; this adapter does not replace generated GUIDs.
+
+Before execution, the local parent counters/selection fields must already equal
+the host pre-state. Counters are not blindly restored. Every captured replay
+must equal the complete host parent payload, including native child template
+IDs, generated IDs, arguments, RNG and bookkeeping. The outer firing result is
+then checked against registered local entities and the real active-shot handle
+array. Unsupported paths, replaced ownership, missing classes, nonempty shot
+lists, no-progress calls, callbacks leaving the owned world, or payload
+mismatches halt the private adapter. Other factories and nested operations are
+not treated as this firing RPC. Launcher switch: `-SpawnReplay`.
+
+The first live replay test reuses the earlier nonce, suppresses the extra
+projectile at 1720, then creates the missing host projectile at 1728 with ID
+`000001C6/00002A78/00001DCF/00006F74`. Exact parent data and one active-shot
+handle pass native readback. Both peers subsequently sample the moving entity.
+Its positions differ, however, so birth identity/setup do not prove motion sync.
+The run fails at host tick 1985 when a real collision produces 522 child keys,
+exceeding the old limit of 512. Both windows close normally with user files
+unchanged. Evidence:
+`analysis/private-native-room-pair-20261115-103026-4d330a6d/native-shooter-replay-integration-result.json`.
+Executable SHA256:
+`2B9F0964484AC928C909794CE22D86ABF71D114E29DD9B7BB4A8D838EB7F38ED`.
+
+The collision-key limit is now 1024, with an 8192-byte Damage envelope, a 1 MiB
+authority envelope and a bounded 2 MiB per-connection queue. The compile-time
+budget covers maximum damage, character, AI and spawn batches together;
+publication still preflights all queues before appending. The native fixture
+now captures the observed 522-key case and the full 1024-key boundary without
+dropping or reordering keys. Native capture/codec and Room checks pass 18, 156
+and 9,083 checks; the spawn-codec/eligibility checks pass 170.
+Evidence:
+`analysis/native-shooter-dense-damage-test-ec5f0ef021b94b7aabe0ca5e3f2042d7/`.
+
+The updated live run repeats native burst replay at 1728, then passes the old
+failure at 1985: 15 Damage events with 1166 total collision keys are rebuilt
+and delivered on the guest with exact native recapture. At 1990 the host's
+next parent pre-state is count 4, choice/occupied field 1, mask 0; the guest's
+pre-state check fails, so replay halts instead of assigning those fields.
+Impact/lifecycle behavior and projectile motion remain unsynchronized; the
+available observations do not prove that registry deletion alone would repair
+the slot difference. The parent captures through the preceding burst match
+across peers. Both owned windows close normally with user files unchanged.
+This is a failed full integration with passed birth and dense-Damage cases.
+Evidence:
+`analysis/private-native-room-pair-20261115-103808-5a3b27b5/native-shooter-dense-damage-integration-result.json`.
 
 ## GUID mutation fence fixed
 

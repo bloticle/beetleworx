@@ -29,6 +29,7 @@ struct SpawnBatch {
     bool random_present=false;
     uint32_t random_before=0,random_after=0;
     SpawnId result{}; // Null is a valid native zero-birth result.
+    bool shooter=false; // Audited 828B7148 parent call; no remote callable address.
     std::vector<SpawnChild> children;
     bool operator==(const SpawnBatch&)const=default;
 };

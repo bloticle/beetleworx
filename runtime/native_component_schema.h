@@ -34,5 +34,7 @@ bool ReadNativeComponentPropertyCaches(uint8_t*,const NativeEntityOwnership&,std
 // unknown methods are reported, never called with a guessed ABI.
 // Declared properties are not all mutable component state or a checkpoint.
 bool ReadNativeComponentSchemas(uint8_t*,const NativeEntityOwnership&,std::vector<NativeComponentSchema>&,std::string&);
+// Decode one primary object's original RTTI leaf without executing a getter.
+bool ReadNativeComponentTypeName(uint8_t*,uint32_t object,std::string&);
 bool ProbeNativeComponentSchemas(PPCContext&,uint8_t*,const NativeEntityOwnership&);
 }

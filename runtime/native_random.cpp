@@ -346,6 +346,13 @@ bool ReadRandomOwner(PPCContext& ctx,uint8_t* base,RandomOwner& owner){
     owner={slot,ptd,PPC_LOAD_U32(ptd)};return true;
 }
 }
+bool em2::SeedNativeSpawnReplay(PPCContext& ctx,uint8_t* base,uint32_t seed){
+    RandomHost preserve(ctx);GuestReadBatch reads;RandomOwner before,after;
+    if(online_seed.pending || world_seed.pending || !ReadRandomOwner(ctx,base,before))return false;
+    ctx.r3.u64=seed;
+    {GuestReadBatch::CallbackBoundary boundary;__imp__sub_82B6DD98(ctx,base);}
+    return ReadRandomOwner(ctx,base,after) && before==after && PPC_LOAD_U32(after.ptd+20)==seed;
+}
 struct em2::NativeRandomCheckpoint::Impl {
     uint8_t* base=nullptr;uint64_t epoch=0;uint32_t thread=0,state=0,visual=0;
     RandomOwner owner;bool initialized=false,isolate=false,fixture=false;
@@ -530,6 +537,7 @@ struct SpawnChildrenScope {
 }
 PPC_FUNC_IMPL(sub_827B3C60){
     if(auto* gameplay=em2::net::CurrentNativeRoomGameplay();gameplay && gameplay->SuppressSpawnBatch(ctx,base,spawn_depth)){ctx.r3.u64=0;return;}
+    if(auto* gameplay=em2::net::CurrentNativeRoomGameplay();gameplay && !gameplay->PrepareSpawnReplay(ctx,base,spawn_depth)){ctx.r3.u64=0;return;}
     uint64_t tick=0;
     const bool trace=base && REXCVAR_GET(em2_private_profile) && (REXCVAR_GET(em2_probe_room_world_damage_events) || REXCVAR_GET(em2_probe_room_spawn_batches)) && em2::CurrentAgreedSimulationTick(tick);
     if(!trace){__imp__sub_827B3C60(ctx,base);return;}
@@ -538,6 +546,7 @@ PPC_FUNC_IMPL(sub_827B3C60){
     std::array<uint32_t,4> owner{},anchor_id{};bool valid=false,anchor_valid=false,random_valid=false;
     uint32_t count_before=0,choice_before=0,used_before=0,random_before=0;RandomOwner random_owner;
     em2::net::SpawnBatch captured;captured.depth=uint8_t(std::min(spawn_depth,255u));uint32_t owner_face=0;
+    captured.shooter=caller==0x828B71C4;
     const auto readable=[&](uint32_t address,size_t size){return address>=4096 && uint64_t(address)+size<=0x100000000ull && em2::GuestReadBatch::Readable(base+address,size);};
     const auto identity=[&](uint32_t entity,std::array<uint32_t,4>& id){
         if(!readable(entity,20) || PPC_LOAD_U32(entity)!=0x8208D908)return false;

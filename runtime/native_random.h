@@ -31,4 +31,7 @@ private:
     struct Impl;std::unique_ptr<Impl> impl_;
 };
 bool TestNativeRandom();
+// Initialized native owner PTD only. Uses the original srand and verifies the
+// owner and resulting state; preserves the caller's complete PPC context.
+bool SeedNativeSpawnReplay(PPCContext&,uint8_t*,uint32_t seed);
 }

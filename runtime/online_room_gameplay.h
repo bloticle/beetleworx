@@ -72,6 +72,7 @@ public:
     // Private host eligibility: true authorizes a null result only at the
     // audited caller, without entering the native parent or changing counters.
     bool SuppressSpawnBatch(const PPCContext&,uint8_t*,unsigned depth);
+    bool PrepareSpawnReplay(PPCContext&,uint8_t*,unsigned depth);
     bool passive_input_pending()const;
     uint64_t committed_tick()const;
     // Owner-thread read only, outside the native update. Eligibility proves
@@ -83,6 +84,7 @@ public:
     std::optional<uint64_t> last_native_completed_tick()const;
     const std::string& error()const;
 private:
+    bool ReplayMissingSpawns(PPCContext&,uint8_t*);
     bool RearmInputContext(uint64_t source_tick,PPCContext&,uint8_t*);
     struct Impl;
     std::unique_ptr<Impl> impl_;

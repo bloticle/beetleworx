@@ -29,7 +29,7 @@ struct DamageEvent {
     std::string tag;
     bool operator==(const DamageEvent&)const=default;
 };
-inline constexpr size_t kMaxDamageStimuli=16,kMaxDamageTag=255,kMaxDamageShapeKeys=512,kMaxDamageEventBytes=4096;
+inline constexpr size_t kMaxDamageStimuli=16,kMaxDamageTag=255,kMaxDamageShapeKeys=1024,kMaxDamageEventBytes=8192;
 bool ValidDamageEvent(const DamageEvent&);
 std::vector<uint8_t> EncodeDamageEvent(const DamageEvent&);
 // Transactional: malformed/truncated/extra bytes never change the output.

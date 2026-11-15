@@ -26,7 +26,7 @@ bool ValidSpawnBatch(const SpawnBatch& batch){
 }
 std::vector<uint8_t> EncodeSpawnBatch(const SpawnBatch& batch){
     if(!ValidSpawnBatch(batch))return {};
-    std::vector<uint8_t> bytes{'B','W','S','B',1};
+    std::vector<uint8_t> bytes{'B','W','S','B',2};
     Put(bytes,batch.depth,1);
     for(const auto* ref:{&batch.owner,&batch.anchor}){Put(bytes,ref->peer,1);for(auto word:ref->id)Put(bytes,word);}
     Put(bytes,std::bit_cast<uint32_t>(batch.selection));Put(bytes,batch.flag,1);Put(bytes,batch.collection,1);
@@ -34,13 +34,14 @@ std::vector<uint8_t> EncodeSpawnBatch(const SpawnBatch& batch){
     Put(bytes,batch.random_present,1);Put(bytes,batch.random_before);Put(bytes,batch.random_after);
     for(auto word:batch.result)Put(bytes,word);
     Put(bytes,uint32_t(batch.children.size()),1);
+    Put(bytes,batch.shooter,1);
     for(const auto& child:batch.children){for(const auto* id:{&child.prototype,&child.entity})for(auto word:*id)Put(bytes,word);for(auto word:child.arguments)Put(bytes,word);}
     return bytes;
 }
 bool DecodeSpawnBatch(std::span<const uint8_t> bytes,SpawnBatch& out){
     if(bytes.size()>kMaxSpawnBatchBytes)return false;
     Reader r{bytes};SpawnBatch batch;
-    if(r.Get()!=0x42575342 || r.Get(1)!=1)return false;
+    if(r.Get()!=0x42575342 || r.Get(1)!=2)return false;
     batch.depth=uint8_t(r.Get(1));
     for(auto* ref:{&batch.owner,&batch.anchor}){ref->peer=uint8_t(r.Get(1));for(auto& word:ref->id)word=r.Get();}
     batch.selection=std::bit_cast<int32_t>(r.Get());const auto flag=r.Get(1),collection=r.Get(1);
@@ -48,7 +49,8 @@ bool DecodeSpawnBatch(std::span<const uint8_t> bytes,SpawnBatch& out){
     for(auto* state:{&batch.before,&batch.after})for(auto& word:*state)word=r.Get();
     const auto random=r.Get(1);if(random>1)return false;batch.random_present=random!=0;
     batch.random_before=r.Get();batch.random_after=r.Get();for(auto& word:batch.result)word=r.Get();
-    const auto count=r.Get(1);if(!r.good || count>kMaxSpawnChildren || bytes.size()-r.at!=size_t(count)*44)return false;
+    const auto count=r.Get(1),shooter=r.Get(1);if(!r.good || shooter>1 || count>kMaxSpawnChildren || bytes.size()-r.at!=size_t(count)*44)return false;
+    batch.shooter=shooter!=0;
     for(unsigned i=0;i<count;++i){SpawnChild child;for(auto* id:{&child.prototype,&child.entity})for(auto& word:*id)word=r.Get();for(auto& word:child.arguments)word=r.Get();batch.children.push_back(child);}
     if(!r.good || r.at!=bytes.size() || !ValidSpawnBatch(batch))return false;
     out=std::move(batch);return true;
@@ -63,15 +65,16 @@ bool TestSpawnBatchCodec(){
     SpawnBatch batch;batch.owner.id={1,2,3,4};batch.anchor.peer=16;batch.selection=INT32_MIN;batch.depth=15;batch.flag=true;batch.collection=true;
     batch.before={3,1,0};batch.after={4,2,1};batch.random_present=true;batch.random_before=0x7184540C;batch.random_after=0x9F646079;
     batch.children.push_back({{0x69771,0,0,0},{0x4E10,0x5C3,0x7DD3,0x629B},{0,0,1}});batch.result=batch.children.back().entity;
-    auto bytes=EncodeSpawnBatch(batch);SpawnBatch out;
+    batch.shooter=true;auto bytes=EncodeSpawnBatch(batch);SpawnBatch out;
     if(!check(!bytes.empty() && DecodeSpawnBatch(bytes,out) && out==batch,"native parent inputs, stable player anchor, counters, CRT state and projectile identity round-trip"))return false;
     const auto sentinel=out;
     for(size_t n=0;n<bytes.size();++n)if(!check(!DecodeSpawnBatch(std::span(bytes).first(n),out) && out==sentinel,"every truncated prefix rejected without changing destination"))return false;
-    for(unsigned mutation=0;mutation<11;++mutation){auto bad=bytes;
-        if(mutation==0)bad[0]^=1;if(mutation==1)bad[4]=2;if(mutation==2)bad[5]=16;
+    for(unsigned mutation=0;mutation<12;++mutation){auto bad=bytes;
+        if(mutation==0)bad[0]^=1;if(mutation==1)bad[4]=1;if(mutation==2)bad[5]=16;
         if(mutation==3)bad[6]=17;if(mutation==4)bad[6]=1; // Ambiguous owner GUID + peer.
         if(mutation==5)bad[44]=2;if(mutation==6)bad[45]=2;if(mutation==7)bad[70]=2;
         if(mutation==8)bad.push_back(0);if(mutation==9)bad.resize(kMaxSpawnBatchBytes+1);if(mutation==10)bad[95]=65;
+        if(mutation==11)bad[96]=2;
         if(!check(!DecodeSpawnBatch(bad,out) && out==sentinel,"invalid version/depth/reference/boolean/count/size rejected transactionally"))return false;
     }
     batch.children.clear();batch.result={};batch.random_present=false;batch.random_before=batch.random_after=0;batch.selection=-1;

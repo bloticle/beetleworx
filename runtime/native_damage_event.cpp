@@ -209,6 +209,11 @@ bool em2::TestNativeDamageEvent(){
     PPC_STORE_U32(event+64,0x6400);PPC_STORE_U32(event+68,3);
     PPC_STORE_U32(0x6400,0x3152);PPC_STORE_U32(0x6404,UINT32_MAX);PPC_STORE_U32(0x6408,0);
     if(!check(CaptureNativeDamageEvent(base,event,sample,error) && sample.shape_keys==std::vector<uint32_t>{0x3152,UINT32_MAX,0},"native child shape keys retain order and sentinel bits"))return false;
+    std::vector<uint32_t> dense_keys;for(unsigned i=0;i<net::kMaxDamageShapeKeys;++i){dense_keys.push_back(i==521?UINT32_MAX:0x3600+i);PPC_STORE_U32(0x6400+i*4,dense_keys.back());}
+    PPC_STORE_U32(event+68,522);PPC_STORE_U32(event+72,522);
+    if(!check(CaptureNativeDamageEvent(base,event,sample,error) && sample.shape_keys==std::vector<uint32_t>(dense_keys.begin(),dense_keys.begin()+522),"real 522-key projectile collision remains complete beyond the former 512-key limit"))return false;
+    PPC_STORE_U32(event+68,uint32_t(net::kMaxDamageShapeKeys));PPC_STORE_U32(event+72,uint32_t(net::kMaxDamageShapeKeys));
+    if(!check(CaptureNativeDamageEvent(base,event,sample,error) && sample.shape_keys==dense_keys,"maximum supported native collision-key array retains every key"))return false;
     sample=good;
     for(unsigned mutation=0;mutation<10;++mutation){std::memcpy(base,memory.data(),memory.size());
         if(mutation==0)PPC_STORE_U32(event+8,0x55555555);if(mutation==1)PPC_STORE_U32(event+68,1);

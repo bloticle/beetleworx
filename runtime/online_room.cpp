@@ -27,9 +27,9 @@ namespace em2::net {
 namespace {
 using Clock=std::chrono::steady_clock;
 using Bytes=std::vector<uint8_t>;
-constexpr size_t Window=64,MaxPacket=8192,MaxQueued=1024*1024;
-constexpr size_t MaxAuthorityPacket=512*1024;
-constexpr uint8_t WireVersion=20;
+constexpr size_t Window=64,MaxPacket=8192,MaxQueued=2*1024*1024;
+constexpr size_t MaxAuthorityPacket=1024*1024;
+constexpr uint8_t WireVersion=21;
 static_assert(100+16*31+kAuthorityCharacterBatch*46<=MaxPacket);
 constexpr size_t MaxEncodedDamage=6+16+16+2+32+1+kMaxDamageStimuli*12+2+2+kMaxDamageShapeKeys*4+3+kMaxDamageTag;
 static_assert(MaxEncodedDamage<=kMaxDamageEventBytes);
@@ -2145,6 +2145,7 @@ bool TestOnlineRoom(){
     }
     if(!check(rooms[0]->CompleteGameplay(id.first_tick,proof),"host completes actual fixture update before its event batch is published"))return false;
     for(unsigned i=0;i<kAuthoritySpawnBatch;++i){SpawnBatch batch;batch.owner.peer=1;batch.anchor.id={12,13,14,15};
+        batch.shooter=(i%2)==0;
         batch.before={i,1,0};batch.after={i+1,2,1};batch.selection=-1;batch.flag=true;
         for(unsigned child=0;child<kMaxSpawnChildren;++child)batch.children.push_back({{0x69771,0,0,0},{i+1,child+1,0x1234,0x5678},{0,child,1}});
         batch.result=batch.children.back().entity;event_state.spawn_batches.push_back(std::move(batch));

@@ -94,6 +94,13 @@ std::string Text(uint8_t* base,uint32_t at){
     return {};
 }
 }
+bool ReadNativeComponentTypeName(uint8_t* base,uint32_t object,std::string& out){
+    Host host;GuestReadBatch reads;
+    if(!Readable(base,object,12))return false;
+    const auto table=PPC_LOAD_U32(object);uint32_t type=0;
+    if(!Readable(base,table,12) || !MetadataLeaf(base,PPC_LOAD_U32(table+8),type) || !Readable(base,type,8))return false;
+    auto name=Text(base,PPC_LOAD_U32(type));if(name.empty())return false;out=std::move(name);return true;
+}
 bool ReadNativeComponentSchemas(uint8_t* base,const NativeEntityOwnership& expected,std::vector<NativeComponentSchema>& out,std::string& error){
     Host host;GuestReadBatch reads;
     try{
