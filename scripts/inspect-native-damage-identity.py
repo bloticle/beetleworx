@@ -46,6 +46,22 @@ def inspect_peer(root, identity):
             if len(fields) == 4 and fields[0].lower() == identity.hex():
                 name = fields[3]
                 break
+    log = (root / "game.log").read_text(encoding="utf-8", errors="replace")
+    lifecycle = []
+    pattern = r"Private native entity lifecycle: (insert|remove) tick (\d+) agreed (true|false) entity ([0-9A-F]{8}) GUID ([0-9A-F/]+) vtable [0-9A-F]+ caller ([0-9A-F]{8})"
+    for action, tick, agreed, entity, guid, caller in re.findall(pattern, log):
+        lifecycle.append({"action": action, "tick": int(tick), "agreed": agreed == "true", "local_entity": entity, "guid": guid, "caller": caller})
+    exact = [index for index, row in enumerate(lifecycle) if row["guid"].replace("/", "").lower() == identity.hex()]
+    context = []
+    for index in exact:
+        event = lifecycle[index]
+        # Addresses correlate events within one local observed lifetime only.
+        # Never use an equal address to pair objects across host and guest.
+        birth = next((row for row in reversed(lifecycle[:index + 1]) if row["local_entity"] == event["local_entity"] and row["action"] == "insert"), None)
+        entry = {"matching_event": event, "nearest_prior_local_insert": birth,
+                 "guid_differs_from_insert": bool(birth and birth["guid"] != event["guid"])}
+        if entry not in context:
+            context.append(entry)
     return {
         "root": str(root), "sample_count": len(observations),
         "matching_sample_count": len(present), "catalog_name": name,
@@ -53,6 +69,7 @@ def inspect_peer(root, identity):
         "last_matching_sample": present[-1] if present else None,
         "last_sample": observations[-1] if observations else None,
         "presence_transitions": transitions,
+        "lifecycle_context": context,
     }
 
 
@@ -80,7 +97,7 @@ def main():
         "missing_kind": kind, "guid": "/".join(words),
         "host": inspect_peer(Path(pair["host"]["root"]), identity),
         "guest": inspect_peer(guest_root, identity),
-        "limits": "30-tick samples and the initial name catalog cannot prove exact creation/destruction order or observe every transient entity.",
+        "limits": "30-tick samples can miss transient entities. Lifecycle hooks report native insert/remove but not every GUID write. Local addresses correlate one local lifetime only, never cross-peer identities.",
     }
     encoded = json.dumps(result, indent=2, allow_nan=False) + "\n"
     if args.output:

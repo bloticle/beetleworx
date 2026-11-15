@@ -28,6 +28,7 @@
 #include "world_observation.h"
 #include "native_character_physics.h"
 #include "native_entity_probe.h"
+#include "native_entity_lifetime.h"
 #include "native_actor_health.h"
 #include "native_damage_event.h"
 #include <rex/logging.h>
@@ -48,6 +49,9 @@ REXCVAR_DEFINE_BOOL(em2_probe_room_authority_state,false,"Debug","Private native
 REXCVAR_DEFINE_BOOL(em2_probe_room_authority_drift,false,"Debug","Private correction-mode guest only: inject one player/world position error and one player health error, then require native host-state repair");
 REXCVAR_DEFINE_BOOL(em2_probe_room_player_damage_events,false,"Debug","Private native Room: transmit causal root player Damage events and replay exact native payloads before guest updates");
 REXCVAR_DEFINE_BOOL(em2_probe_room_world_damage_events,false,"Debug","Private native Room: extend native Damage event replication and local suppression to world entities; lifecycle support remains experimental");
+REXCVAR_DEFINE_BOOL(em2_probe_room_ai_targets,false,"Debug","Private native Room: host owns non-human native brain target-selection decisions");
+REXCVAR_DEFINE_BOOL(em2_probe_room_ai_target_drift,false,"Debug","Private AI authority fixture: only the host requests Mickey as an NPC target during ticks 120-179");
+PPC_EXTERN_FUNC(__imp__sub_827F2FA8);
 REXCVAR_DECLARE(bool,em2_profile_world_memory);
 REXCVAR_DECLARE(bool,em2_probe_room_recovery_controller);
 REXCVAR_DEFINE_BOOL(em2_probe_unfenced_cutscene_return,false,"Debug","Private native lobby QA only: reproduce old carried-button behavior for the held-return regression");
@@ -226,6 +230,8 @@ struct NativeRoomGameplay::Impl {
     std::optional<RoomFrame> prepared,consumed;
     std::optional<RoomAuthorityState> pending_authority;
     std::vector<DamageEvent> damage_events;
+    std::vector<RoomAiTargetDecision> ai_decisions;
+    size_t ai_cursor=0;
     bool stopped=false,pending=false,delivered=false,started=false,ready_logged=false;
     bool authority_drift_injected=false;
     bool authority_world_drift_injected=false;
@@ -286,6 +292,26 @@ struct NativeRoomGameplay::Impl {
         }
     };
     bool Retry(std::string why){if(note!=why){note=std::move(why);REXLOG_INFO("Native Room gameplay admission waiting: {}",note);}return false;}
+    uint8_t HumanPeer(uint32_t entity)const{
+        uint64_t result=0;
+        for(unsigned slot=0;slot<2;++slot)if(entity && entity==label_entities[slot])result=slot+1;
+        if(!result)for(const auto& actor:actors->actors())if(actor.actor.entity==entity){result=actor.room_peer;break;}
+        if(!result || result>16 || std::none_of(roster.players.begin(),roster.players.end(),[&](const auto& player){return player.peer==result;}))return 0;
+        return uint8_t(result);
+    }
+    bool AiScope(uint32_t brain,uint8_t* base,std::array<uint32_t,4>& id,uint64_t& tick){
+        if(!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_ai_targets) || !Owner() || !Configured() || stopped ||
+           !pending || !delivered || load_depth || transition_pending || !room->host_correction_mode() ||
+           room->state()!=RoomState::Running || !em2::CurrentAgreedSimulationTick(tick) || tick!=committed)return false;
+        if(!Readable(brain,296,base))return Stop("Native AI target brain unavailable");
+        const auto attached=PPC_LOAD_U32(brain+60);
+        if(!attached || uint64_t(attached)+28>0x100000000ull || !Readable(attached+8,20,base) || PPC_LOAD_U32(attached+8)!=0x8208D908)
+            return Stop("Native AI target owner layout unsupported");
+        if(HumanPeer(attached+8))return false;
+        for(unsigned i=0;i<4;++i)id[i]=PPC_LOAD_U32(attached+12+i*4);
+        if(std::all_of(id.begin(),id.end(),[](auto word){return word==0;}))return Stop("Native AI target owner has no identity");
+        return true;
+    }
 };
 NativeRoomGameplay::NativeRoomGameplay():impl_(std::make_unique<Impl>()){}
 NativeRoomGameplay::~NativeRoomGameplay(){Detach();}
@@ -847,7 +873,7 @@ bool NativeRoomGameplay::Commit(const RoomFrame& frame,PPCContext& ctx,uint8_t* 
     if(!s.started)REXLOG_INFO("Native Room gameplay first frame consumed: tick {}, delay {}, physical source {}, native slot {}; native update and world verification still required",
         frame.tick,s.identity.input_delay,s.physical,s.slot);
     s.consumed_passive=s.prepared_passive;s.prepared_passive=false;
-    s.committed=frame.tick;s.consumed=frame;s.pending=true;s.delivered=false;s.started=true;s.prepared.reset();s.submitted.reset();s.damage_events.clear();return true;
+    s.committed=frame.tick;s.consumed=frame;s.pending=true;s.delivered=false;s.started=true;s.prepared.reset();s.submitted.reset();s.damage_events.clear();s.ai_decisions.clear();s.ai_cursor=0;return true;
 }
 bool NativeRoomGameplay::Deliver(PPCContext& ctx,uint8_t* base){
     Environment environment;Context context(ctx);auto& s=*impl_;Impl::FaultOnThrow fault{s};uint64_t tick=0;
@@ -867,6 +893,8 @@ bool NativeRoomGameplay::Deliver(PPCContext& ctx,uint8_t* base){
             if(!s.pending_authority)std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         if(!s.pending_authority || s.pending_authority->tick!=tick)return s.Stop("Host update result did not arrive before matching native guest update");
+        if(!s.pending_authority->ai_decisions.empty() && (!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_ai_targets)))
+            return s.Stop("Host AI target decisions require the matching native AI adapter");
         if(!s.pending_authority->damages.empty()){
             const char* error=nullptr;
             std::vector<OnlineNameActor> players;uint64_t local_player=0;
@@ -948,6 +976,8 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
     if(!s.Owner() || s.stopped || !s.pending || !s.delivered || !s.consumed ||
         !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed)return false;
     if(const auto failure=s.WorldFailure(base))return s.Stop(std::string("Native gameplay completion rejected: ")+failure);
+    if(REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_ai_targets) && s.peer!=1 &&
+       (!s.pending_authority || s.ai_cursor!=s.pending_authority->ai_decisions.size()))return s.Stop("Native AI target completion did not consume the host decision batch");
     if(s.game_over_entry || s.consumed_passive){
         if(!FinishRetailPassiveTick(tick,ctx,base))return s.Stop("Native passive input quarantine completion failed");
     }else{
@@ -1024,6 +1054,7 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
         }
         if(authority){
             state.damages=std::move(s.damage_events);
+            state.ai_decisions=std::move(s.ai_decisions);
             if(!ready)return s.Stop("Could not capture completed host actor state");
             const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(10);
             AuthorityPublishResult result;
@@ -1149,6 +1180,82 @@ bool NativeRoomGameplay::SuppressLocalDamage(uint32_t target)const{
     if(REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_world_damage_events))return true;
     return target==s.label_handles[0] || target==s.label_handles[1] ||
         std::any_of(s.actors->actors().begin(),s.actors->actors().end(),[&](const auto& entry){return entry.actor.handle==target;});
+}
+std::optional<size_t> NativeRoomGameplay::BeginAiTargetDecision(uint32_t brain,uint8_t* base){
+    Environment preserve;em2::GuestReadBatch reads;auto& s=*impl_;uint64_t tick=0;std::array<uint32_t,4> owner;
+    if(s.peer!=1 || !s.AiScope(brain,base,owner,tick))return {};
+    if(s.ai_decisions.size()>=kAuthorityAiDecisionBatch){s.Stop("Native AI target decision batch exceeds bound");return {};}
+    const auto ticket=s.ai_decisions.size();RoomAiTargetDecision decision;decision.owner=owner;s.ai_decisions.push_back(decision);return ticket;
+}
+bool NativeRoomGameplay::FinishAiTargetDecision(size_t ticket,uint32_t brain,uint32_t setters,uint32_t caller,uint32_t target,uint8_t* base){
+    Environment preserve;em2::GuestReadBatch reads;auto& s=*impl_;uint64_t tick=0;std::array<uint32_t,4> owner;
+    if(!s.AiScope(brain,base,owner,tick))return false;
+    if(s.peer!=1 || ticket>=s.ai_decisions.size() || s.ai_decisions[ticket].owner!=owner || setters>1 ||
+       (setters && caller!=0x827F3350 && caller!=0x827F361C))return s.Stop("Native AI target selector produced unsupported side effects");
+    auto& decision=s.ai_decisions[ticket];decision.setter=setters!=0;
+    if(!decision.setter)return true;
+    decision.write_selection=caller==0x827F361C;
+    if(decision.write_selection){
+        decision.selection=PPC_LOAD_U32(brain+184);
+        if(decision.selection>4096 || decision.selection>PPC_LOAD_U32(brain+208))return s.Stop("Native AI selector ordinal exceeds local inventory");
+    }
+    if(target){
+        decision.target_peer=s.HumanPeer(target);
+        if(!decision.target_peer){
+            if(!Readable(target,20,base) || PPC_LOAD_U32(target)!=0x8208D908)return s.Stop("Native AI target entity layout unsupported");
+            for(unsigned i=0;i<4;++i)decision.target[i]=PPC_LOAD_U32(target+4+i*4);
+            if(std::all_of(decision.target.begin(),decision.target.end(),[](auto word){return word==0;}))return s.Stop("Native AI target has no portable identity");
+        }
+    }
+    return true;
+}
+bool NativeRoomGameplay::ReplayAiTargetDecision(PPCContext& ctx,uint8_t* base){
+    Environment preserve;em2::GuestReadBatch reads;auto& s=*impl_;uint64_t tick=0;std::array<uint32_t,4> owner;
+    if(s.peer==1 || !REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_ai_targets))return false;
+    if(!s.AiScope(ctx.r3.u32,base,owner,tick))return s.stopped;
+    const auto fail=[&](const char* message){s.Stop(message);return true;};
+    if(!s.pending_authority || s.ai_cursor>=s.pending_authority->ai_decisions.size())return fail("Guest AI selector has no matching host decision");
+    // Native target-change callbacks can enter a load. Keep this small command
+    // independent of the pending packet's storage across those callbacks.
+    const auto decision=s.pending_authority->ai_decisions[s.ai_cursor++];
+    if(decision.owner!=owner)return fail("Guest AI selector owner/order differs from host decision");
+    const auto brain=ctx.r3.u32;
+    if(decision.write_selection && decision.selection>PPC_LOAD_U32(brain+208))return fail("Host AI selector ordinal does not fit guest inventory");
+    uint32_t target=0,expected_handle=0;
+    if(decision.setter && (decision.target_peer || std::any_of(decision.target.begin(),decision.target.end(),[](auto word){return word!=0;}))){
+        NativeEntitySnapshot snapshot;const char* error=nullptr;uint32_t address=0;uint64_t before=0,after=0;
+        if(!em2::SampleNativeEntityLifetimeRevision(before) || !ReadNativeEntitySnapshot(base,snapshot,error,address,false) ||
+           !em2::SampleNativeEntityLifetimeRevision(after) || before!=after)return fail("Guest AI target registry changed during resolution");
+        if(decision.target_peer){
+            std::vector<OnlineNameActor> players;uint64_t local=0;
+            if(!NameTagActors(players,local,base))return fail("Guest AI target lost player bindings");
+            const auto player=std::find_if(players.begin(),players.end(),[&](const auto& value){return value.peer==decision.target_peer;});
+            if(player==players.end())return fail("Host AI target player is absent from native roster");
+            const auto record=std::find_if(snapshot.records.begin(),snapshot.records.end(),[&](const auto& value){return value.debug_address==player->entity;});
+            if(record!=snapshot.records.end()){target=record->debug_address;expected_handle=record->handle;}
+        }else{
+            const auto record=std::lower_bound(snapshot.records.begin(),snapshot.records.end(),decision.target,[](const auto& value,const auto& id){return value.id<id;});
+            if(record!=snapshot.records.end() && record->id==decision.target){target=record->debug_address;expected_handle=record->handle;}
+        }
+        if(!target || !expected_handle)return fail("Host AI target has no matching live guest entity");
+    }
+    if(decision.write_selection)PPC_STORE_U32(brain+184,decision.selection);
+    if(decision.setter){
+        ctx.r3.u64=brain;ctx.r4.u64=target;
+        {em2::GuestReadBatch::CallbackBoundary callback;__imp__sub_827F2FA8(ctx,base);}
+        if(!Readable(brain,128,base) || PPC_LOAD_U32(brain+124)!=expected_handle)return fail("Native AI target setter readback differs from host command");
+    }
+    REXLOG_INFO("Native host AI target decision applied: tick {} owner {:08X}/{:08X}/{:08X}/{:08X}, setter {}, player {}, local handle {:08X}, selection {}/{}; independent target selection skipped",
+        tick,owner[0],owner[1],owner[2],owner[3],decision.setter,decision.target_peer,expected_handle,decision.write_selection,decision.selection);
+    return true;
+}
+bool NativeRoomGameplay::OverridePrivateAiTarget(uint32_t brain,uint32_t& target,uint8_t* base){
+    Environment preserve;em2::GuestReadBatch reads;auto& s=*impl_;uint64_t tick=0;std::array<uint32_t,4> owner;
+    if(s.peer!=1 || !REXCVAR_GET(em2_probe_room_ai_target_drift) || !s.AiScope(brain,base,owner,tick) || tick<120 || tick>=180)return false;
+    if(!Readable(s.label_entities[0],20,base))return s.Stop("Private AI target fixture lost Mickey");
+    target=s.label_entities[0];
+    if(tick==120)REXLOG_INFO("Private AI target fixture: tick {} owner {:08X}/{:08X}/{:08X}/{:08X} requests host player 1; guest receives host decision only",tick,owner[0],owner[1],owner[2],owner[3]);
+    return true;
 }
 bool NativeRoomGameplay::RecordDamageEvent(uint32_t event,uint32_t listener,uint32_t caller,uint8_t* base){
     auto& s=*impl_;uint64_t tick=0;Environment preserve;em2::GuestReadBatch reads;

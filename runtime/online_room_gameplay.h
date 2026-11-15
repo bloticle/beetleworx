@@ -60,6 +60,12 @@ public:
     // Private integration probe: record causal root broadcasts in its scope.
     // Returns true when the caller must quarantine nested capture until return.
     bool RecordDamageEvent(uint32_t event,uint32_t listener,uint32_t caller,uint8_t*);
+    // Private target-selection authority. Human brains remain outside this
+    // scope; guest native setters execute at the original selector call site.
+    bool ReplayAiTargetDecision(PPCContext&,uint8_t*);
+    std::optional<size_t> BeginAiTargetDecision(uint32_t brain,uint8_t*);
+    bool FinishAiTargetDecision(size_t ticket,uint32_t brain,uint32_t setter_calls,uint32_t setter_caller,uint32_t target,uint8_t*);
+    bool OverridePrivateAiTarget(uint32_t brain,uint32_t& target,uint8_t*);
     bool passive_input_pending()const;
     uint64_t committed_tick()const;
     // Owner-thread read only, outside the native update. Eligibility proves

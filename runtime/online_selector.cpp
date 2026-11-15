@@ -1,10 +1,14 @@
 #include "guest_read_batch.h"
 #include "online_selector.h"
+#include "online_room_gameplay.h"
 #include "online.h"
 #include "simulation.h"
 #include <rex/logging.h>
 #include <rex/cvar.h>
 REXCVAR_DECLARE(bool,em2_trace_online_observations);
+REXCVAR_DECLARE(bool,em2_private_profile);
+REXCVAR_DECLARE(std::string,em2_room_probe_role);
+REXCVAR_DEFINE_BOOL(em2_trace_room_ai_decisions,false,"Debug","Private Room: observe native brain target selection and setter calls without changing AI ownership");
 #include <windows.h>
 #include <immintrin.h>
 #include <algorithm>
@@ -15,6 +19,8 @@ REXCVAR_DECLARE(bool,em2_trace_online_observations);
 #include <unordered_set>
 #include <vector>
 PPC_EXTERN_FUNC(__imp__sub_829505C0);
+PPC_EXTERN_FUNC(__imp__sub_827F3230);
+PPC_EXTERN_FUNC(__imp__sub_827F2FA8);
 PPC_EXTERN_FUNC(__restfpr_25);
 PPC_EXTERN_FUNC(__restgprlr_23);
 PPC_EXTERN_FUNC(__savefpr_25);
@@ -482,4 +488,67 @@ bool em2::net::TestCanonicalPerception(){
     PPC_STORE_U32(0x5000+60,0x2400);Targets duplicate;if(duplicate.Build(reader,selector))return false;PPC_STORE_U32(0x5000+60,0x2000);
     PPC_STORE_U32(0x7040+20,0x7040);Targets cyclic;if(cyclic.Build(reader,selector))return false;
     REXLOG_INFO("Canonical perception worklist passed native entity/target layouts, full 128-bit non-address ID ordering, removed entries, end iterator, missing identity and cycle rejection; replica ID stability/native callbacks require acceptance");return true;
+}
+
+namespace {
+struct AiDecisionTrace {
+    uint64_t tick=0;
+    uint32_t brain=0,caller=0,before=0,after=0,setter_calls=0,setter_caller=0,target_entity=0;
+    std::array<uint32_t,4> owner{},target{};
+    bool owner_valid=false,target_valid=false;
+};
+thread_local AiDecisionTrace* ai_decision=nullptr;
+bool EntityId(Reader& reader,uint32_t entity,std::array<uint32_t,4>& id){
+    uint32_t words[5];
+    if(!reader.Words(entity,words,5) || words[0]!=0x8208D908)return false;
+    std::copy(words+1,words+5,id.begin());
+    return std::any_of(id.begin(),id.end(),[](auto word){return word!=0;});
+}
+}
+PPC_FUNC_IMPL(sub_827F3230){
+    auto* gameplay=em2::net::CurrentNativeRoomGameplay();
+    if(gameplay && gameplay->ReplayAiTargetDecision(ctx,base))return;
+    const auto ticket=gameplay?gameplay->BeginAiTargetDecision(ctx.r3.u32,base):std::optional<size_t>{};
+    uint64_t tick=0;
+    bool report=REXCVAR_GET(em2_trace_room_ai_decisions) && REXCVAR_GET(em2_private_profile) && em2::CurrentAgreedSimulationTick(tick);
+    static thread_local uint32_t reports=0;
+    if(report && reports>=32768){
+        if(reports==32768){++reports;REXLOG_WARN("Private AI target decision trace reached its 32768-call bound; authority capture remains active");}
+        report=false;
+    }
+    if(!ticket && !report){__imp__sub_827F3230(ctx,base);return;}
+    if(report)++reports;
+    AiDecisionTrace trace;trace.tick=tick;trace.brain=ctx.r3.u32;trace.caller=uint32_t(ctx.lr);
+    {
+        HostState preserve;em2::GuestReadBatch reads;Reader reader{base};uint32_t attached=0;
+        if(trace.brain<=UINT32_MAX-128){
+            reader.Word(trace.brain+124,trace.before);
+            if(reader.Word(trace.brain+60,attached) && attached && attached<=UINT32_MAX-8)
+                trace.owner_valid=EntityId(reader,attached+8,trace.owner);
+        }
+    }
+    {
+        struct Scope {AiDecisionTrace* previous=ai_decision;explicit Scope(AiDecisionTrace& value){ai_decision=&value;}~Scope(){ai_decision=previous;}} scope(trace);
+        __imp__sub_827F3230(ctx,base);
+    }
+    if(ticket && gameplay==em2::net::CurrentNativeRoomGameplay())gameplay->FinishAiTargetDecision(*ticket,trace.brain,trace.setter_calls,trace.setter_caller,trace.target_entity,base);
+    if(report){
+        HostState preserve;em2::GuestReadBatch reads;Reader reader{base};
+        if(trace.brain<=UINT32_MAX-128)reader.Word(trace.brain+124,trace.after);
+        REXLOG_INFO("Private AI target decision: role {} tick {} brain {:08X} owner-valid {} GUID {:08X}/{:08X}/{:08X}/{:08X}, target handles {:08X}/{:08X}, setter calls {} caller {:08X}, requested {:08X} target-valid {} GUID {:08X}/{:08X}/{:08X}/{:08X}, selector caller {:08X}; observation only",
+            REXCVAR_GET(em2_room_probe_role),trace.tick,trace.brain,trace.owner_valid,trace.owner[0],trace.owner[1],trace.owner[2],trace.owner[3],
+            trace.before,trace.after,trace.setter_calls,trace.setter_caller,trace.target_entity,trace.target_valid,
+            trace.target[0],trace.target[1],trace.target[2],trace.target[3],trace.caller);
+    }
+}
+PPC_FUNC_IMPL(sub_827F2FA8){
+    if(ai_decision && ai_decision->brain==ctx.r3.u32){
+        if(auto* gameplay=em2::net::CurrentNativeRoomGameplay()){
+            auto target=ctx.r4.u32;if(gameplay->OverridePrivateAiTarget(ctx.r3.u32,target,base))ctx.r4.u64=target;
+        }
+        HostState preserve;em2::GuestReadBatch reads;Reader reader{base};
+        auto& trace=*ai_decision;++trace.setter_calls;trace.setter_caller=uint32_t(ctx.lr);trace.target_entity=ctx.r4.u32;
+        trace.target_valid=trace.target_entity && EntityId(reader,trace.target_entity,trace.target);
+    }
+    __imp__sub_827F2FA8(ctx,base);
 }

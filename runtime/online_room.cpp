@@ -29,11 +29,11 @@ using Clock=std::chrono::steady_clock;
 using Bytes=std::vector<uint8_t>;
 constexpr size_t Window=64,MaxPacket=8192,MaxQueued=1024*1024;
 constexpr size_t MaxAuthorityPacket=512*1024;
-constexpr uint8_t WireVersion=18;
+constexpr uint8_t WireVersion=19;
 static_assert(100+16*31+kAuthorityCharacterBatch*46<=MaxPacket);
 constexpr size_t MaxEncodedDamage=6+16+16+2+32+1+kMaxDamageStimuli*12+2+2+kMaxDamageShapeKeys*4+3+kMaxDamageTag;
 static_assert(MaxEncodedDamage<=kMaxDamageEventBytes);
-static_assert(100+16*38+kAuthorityCharacterBatch*46+kAuthorityDamageBatch*(2+MaxEncodedDamage)<=MaxAuthorityPacket);
+static_assert(100+16*38+kAuthorityCharacterBatch*46+kAuthorityDamageBatch*(2+MaxEncodedDamage)+2+kAuthorityAiDecisionBatch*39<=MaxAuthorityPacket);
 static_assert(MaxAuthorityPacket+16*4096<=MaxQueued); // One incomplete frame plus the bounded Poll read burst.
 constexpr auto Timeout=std::chrono::seconds(15);
 constexpr auto StartupTimeout=std::chrono::seconds(180);
@@ -76,6 +76,14 @@ bool ValidAuthorityActors(const RoomAuthorityState& state){
         for(unsigned i=0;i<3;++i)if(!std::isfinite(character.position[i]) || !std::isfinite(character.velocity[i]) ||
             std::abs(character.position[i])>1e7f || std::abs(character.velocity[i])>1e5f)return false;
     }
+    if(state.ai_decisions.size()>kAuthorityAiDecisionBatch)return false;
+    for(const auto& decision:state.ai_decisions){
+        const auto nonzero=[](const auto& id){return std::any_of(id.begin(),id.end(),[](auto word){return word!=0;});};
+        if(!nonzero(decision.owner) || decision.target_peer>16 || (decision.target_peer && nonzero(decision.target)) ||
+           (decision.target_peer && !(state.players_mask&(1u<<(decision.target_peer-1)))) || decision.selection>4096 ||
+           (!decision.setter && (decision.write_selection || decision.target_peer || nonzero(decision.target))) ||
+           (!decision.write_selection && decision.selection))return false;
+    }
     return state.damages.size()<=kAuthorityDamageBatch &&
         std::all_of(state.damages.begin(),state.damages.end(),[&](const auto& damage){
             if(!ValidDamageEvent(damage))return false;
@@ -96,6 +104,11 @@ void WriteAuthorityState(Bytes& bytes,const RoomAuthorityState& state){
         U8(bytes,character.health.has_value());if(character.health)U64(bytes,std::bit_cast<uint32_t>(*character.health),4);}
     U64(bytes,state.damages.size(),2);
     for(const auto& event:state.damages){const auto encoded=EncodeDamageEvent(event);U64(bytes,encoded.size(),2);bytes.insert(bytes.end(),encoded.begin(),encoded.end());}
+    U64(bytes,state.ai_decisions.size(),2);
+    for(const auto& decision:state.ai_decisions){
+        for(auto word:decision.owner)U64(bytes,word,4);for(auto word:decision.target)U64(bytes,word,4);
+        U8(bytes,decision.target_peer);U8(bytes,decision.setter);U8(bytes,decision.write_selection);U64(bytes,decision.selection,4);
+    }
 }
 bool ReadAuthorityState(Reader& reader,RoomAuthorityState& state){
     state.tick=reader.Number(8);state.roster_revision=reader.Number(8);for(auto& byte:state.world)byte=reader.Byte();
@@ -116,6 +129,12 @@ bool ReadAuthorityState(Reader& reader,RoomAuthorityState& state){
         if(!reader.good || !length || length>kMaxDamageEventBytes || length>reader.bytes.size()-reader.at)return false;
         DamageEvent event;if(!DecodeDamageEvent(reader.bytes.subspan(reader.at,size_t(length)),event))return false;
         reader.at+=size_t(length);state.damages.push_back(std::move(event));}
+    const auto decisions=reader.Number(2);if(decisions>kAuthorityAiDecisionBatch)return false;
+    for(unsigned i=0;i<decisions;++i){RoomAiTargetDecision decision;
+        for(auto& word:decision.owner)word=uint32_t(reader.Number(4));for(auto& word:decision.target)word=uint32_t(reader.Number(4));
+        decision.target_peer=reader.Byte();const auto setter=reader.Byte(),selection=reader.Byte();if(setter>1 || selection>1)return false;
+        decision.setter=setter!=0;decision.write_selection=selection!=0;decision.selection=uint32_t(reader.Number(4));state.ai_decisions.push_back(decision);
+    }
     return reader.Done() && ValidAuthorityActors(state);
 }
 std::string HashText(const Hash& hash){
@@ -2101,11 +2120,23 @@ bool TestOnlineRoom(){
     event_state.damages.assign(kAuthorityDamageBatch,large_event);
     event_state.damages[0].target={};event_state.damages[0].target_peer=1;
     event_state.damages[1].instigator.reset();event_state.damages[1].instigator_peer=1;
+    for(unsigned i=0;i<kAuthorityAiDecisionBatch;++i)event_state.ai_decisions.push_back({{i+1,8,7,6},{9,8,7,6},0,true,true,4096});
+    event_state.ai_decisions[0].target={};event_state.ai_decisions[0].target_peer=1;
+    for(unsigned field:{33u,34u}){
+        Bytes bad;WriteAuthorityState(bad,event_state);bad[bad.size()-39+field]=2;
+        Reader reader{bad};RoomAuthorityState decoded;
+        check(!ReadAuthorityState(reader,decoded),"non-boolean native AI command flags rejected on wire");
+    }
     if(!check(rooms[0]->CompleteGameplay(id.first_tick,proof),"host completes actual fixture update before its event batch is published"))return false;
-    for(unsigned mutation=0;mutation<3;++mutation){auto bad=event_state;
+    for(unsigned mutation=0;mutation<8;++mutation){auto bad=event_state;
         if(mutation==0)bad.damages.push_back(large_event);
         if(mutation==1)bad.damages.front().stimuli.front().effective_bits=0x7fc00000;
         if(mutation==2){bad.damages.front().target={};bad.damages.front().target_peer=0;}
+        if(mutation==3)bad.ai_decisions.push_back(event_state.ai_decisions.front());
+        if(mutation==4)bad.ai_decisions.front().owner={};
+        if(mutation==5)bad.ai_decisions.front().target={1,0,0,0};
+        if(mutation==6)bad.ai_decisions.front().setter=false;
+        if(mutation==7)bad.ai_decisions.front().selection=4097;
         check(rooms[0]->TryPublishAuthorityState(bad)==AuthorityPublishResult::Rejected && !rooms[0]->impl_->authority_sent,
             "invalid or oversized damage batches do not consume publication order");
     }

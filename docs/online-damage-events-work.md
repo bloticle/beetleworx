@@ -1,5 +1,11 @@
 # Native damage event replication work
 
+Private native AI target selection now has a separate host-command adapter;
+see [AI target authority development](online-ai-target-authority-work.md).
+Its first non-null-target fixture passes, but the combined world run exposes a
+host-only transient spawn/changed GUID before a later Damage event. That full
+integration run remains failed; target authority does not supply entity births.
+
 Demo 14 corrects recognized NPC motion/health and gives the host authority over
 player Damage events. It does not own enemy AI, spawning or complete combat.
 Reading health after an update also misses a target removed by that update.

@@ -28,6 +28,14 @@ struct RoomActorState {
 };
 inline constexpr size_t kAuthorityCharacterBatch=128;
 inline constexpr size_t kAuthorityDamageBatch=128;
+inline constexpr size_t kAuthorityAiDecisionBatch=128;
+struct RoomAiTargetDecision {
+    std::array<uint32_t,4> owner{},target{};
+    uint8_t target_peer=0;
+    bool setter=false,write_selection=false;
+    uint32_t selection=0;
+    bool operator==(const RoomAiTargetDecision&)const=default;
+};
 enum class AuthorityPublishResult {Published,Backpressure,Rejected};
 // Bounded incremental world-character samples. Stable authored GUIDs identify
 // local entities; this is not a list of entities to spawn or delete.
@@ -46,6 +54,7 @@ struct RoomAuthorityState {
     std::vector<RoomActorState> actors;
     std::vector<RoomCharacterState> characters;
     std::vector<DamageEvent> damages;
+    std::vector<RoomAiTargetDecision> ai_decisions;
     bool operator==(const RoomAuthorityState&)const=default;
 };
 struct RoomRollbackCommands {
