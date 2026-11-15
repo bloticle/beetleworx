@@ -20,10 +20,13 @@ struct DamageEvent {
     std::array<uint8_t,2> flags{};
     std::array<uint32_t,8> vectors{};
     std::vector<DamageStimulus> stimuli;
+    // Child shape keys within the target's collision asset, not body pointers.
+    std::vector<uint32_t> shape_keys;
+    bool tag_present=true;
     std::string tag;
     bool operator==(const DamageEvent&)const=default;
 };
-inline constexpr size_t kMaxDamageStimuli=16,kMaxDamageTag=255,kMaxDamageEventBytes=1024;
+inline constexpr size_t kMaxDamageStimuli=16,kMaxDamageTag=255,kMaxDamageShapeKeys=96,kMaxDamageEventBytes=1024;
 bool ValidDamageEvent(const DamageEvent&);
 std::vector<uint8_t> EncodeDamageEvent(const DamageEvent&);
 // Transactional: malformed/truncated/extra bytes never change the output.

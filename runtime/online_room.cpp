@@ -28,8 +28,12 @@ namespace {
 using Clock=std::chrono::steady_clock;
 using Bytes=std::vector<uint8_t>;
 constexpr size_t Window=64,MaxPacket=8192,MaxQueued=256*1024;
-constexpr uint8_t WireVersion=13;
+constexpr size_t MaxAuthorityPacket=128*1024;
+constexpr uint8_t WireVersion=16;
 static_assert(100+16*31+kAuthorityCharacterBatch*46<=MaxPacket);
+constexpr size_t MaxEncodedDamage=6+16+16+2+32+1+kMaxDamageStimuli*12+1+kMaxDamageShapeKeys*4+3+kMaxDamageTag;
+static_assert(100+16*38+kAuthorityCharacterBatch*46+kAuthorityDamageBatch*(2+MaxEncodedDamage)<=MaxAuthorityPacket);
+static_assert(MaxAuthorityPacket+16*4096<=MaxQueued); // One incomplete frame plus the bounded Poll read burst.
 constexpr auto Timeout=std::chrono::seconds(15);
 constexpr auto StartupTimeout=std::chrono::seconds(180);
 constexpr auto TransferTimeout=std::chrono::seconds(120);
@@ -71,7 +75,8 @@ bool ValidAuthorityActors(const RoomAuthorityState& state){
         for(unsigned i=0;i<3;++i)if(!std::isfinite(character.position[i]) || !std::isfinite(character.velocity[i]) ||
             std::abs(character.position[i])>1e7f || std::abs(character.velocity[i])>1e5f)return false;
     }
-    return true;
+    return state.damages.size()<=kAuthorityDamageBatch &&
+        std::all_of(state.damages.begin(),state.damages.end(),ValidDamageEvent);
 }
 void WriteAuthorityState(Bytes& bytes,const RoomAuthorityState& state){
     U64(bytes,state.tick);U64(bytes,state.roster_revision);bytes.insert(bytes.end(),state.world.begin(),state.world.end());
@@ -84,6 +89,8 @@ void WriteAuthorityState(Bytes& bytes,const RoomAuthorityState& state){
     for(const auto& character:state.characters){for(auto word:character.id)U64(bytes,word,4);U8(bytes,uint8_t(character.active));
         for(const auto* vector:{&character.position,&character.velocity})for(float value:*vector)U64(bytes,std::bit_cast<uint32_t>(value),4);
         U8(bytes,character.health.has_value());if(character.health)U64(bytes,std::bit_cast<uint32_t>(*character.health),4);}
+    U64(bytes,state.damages.size(),2);
+    for(const auto& event:state.damages){const auto encoded=EncodeDamageEvent(event);U64(bytes,encoded.size(),2);bytes.insert(bytes.end(),encoded.begin(),encoded.end());}
 }
 bool ReadAuthorityState(Reader& reader,RoomAuthorityState& state){
     state.tick=reader.Number(8);state.roster_revision=reader.Number(8);for(auto& byte:state.world)byte=reader.Byte();
@@ -99,6 +106,11 @@ bool ReadAuthorityState(Reader& reader,RoomAuthorityState& state){
         for(auto* vector:{&character.position,&character.velocity})for(float& value:*vector)value=std::bit_cast<float>(uint32_t(reader.Number(4)));
         const auto health=reader.Byte();if(health>1)return false;if(health)character.health=std::bit_cast<int32_t>(uint32_t(reader.Number(4)));
         state.characters.push_back(character);}
+    const auto damage_count=reader.Number(2);if(damage_count>kAuthorityDamageBatch)return false;
+    for(unsigned i=0;i<damage_count;++i){const auto length=reader.Number(2);
+        if(!reader.good || !length || length>kMaxDamageEventBytes || length>reader.bytes.size()-reader.at)return false;
+        DamageEvent event;if(!DecodeDamageEvent(reader.bytes.subspan(reader.at,size_t(length)),event))return false;
+        reader.at+=size_t(length);state.damages.push_back(std::move(event));}
     return reader.Done() && ValidAuthorityActors(state);
 }
 std::string HashText(const Hash& hash){
@@ -241,7 +253,7 @@ struct Connection {
     Clock::time_point rollback_started{};
     ~Connection(){Close(socket);}
     bool Queue(const Bytes& body)try{
-        if(body.size()>MaxPacket || outgoing.size()-sent+body.size()+4>MaxQueued)return false;
+        if((body.size()>MaxPacket && (body.size()>MaxAuthorityPacket || body[5]!=uint8_t(Wire::AuthorityState))) || outgoing.size()-sent+body.size()+4>MaxQueued)return false;
         if(sent){outgoing.erase(outgoing.begin(),outgoing.begin()+sent);sent=0;}
         // Allocate before appending the length: allocation failure must never
         // leave a partial packet in an otherwise valid stream.
@@ -963,21 +975,23 @@ bool Room::SendRollbackInputs(const RollbackScope& scope,std::span<const RoomRol
 }catch(...){return false;}
 std::vector<RoomRollbackCommands> Room::TakeRollbackInputs(){auto& p=*impl_;p.rollback_command_count=0;return std::exchange(p.rollback_commands,{});}
 uint8_t Room::gameplay_verification_window()const{return impl_->gameplay_window;}
-bool Room::PublishAuthorityState(const RoomAuthorityState& state){
+bool Room::PublishAuthorityState(const RoomAuthorityState& state){return TryPublishAuthorityState(state)==AuthorityPublishResult::Published;}
+AuthorityPublishResult Room::TryPublishAuthorityState(const RoomAuthorityState& state){
     auto& p=*impl_;
     if(!p.host || p.state!=RoomState::Running || !p.local_world || state.world!=*p.local_world ||
         state.roster_revision!=p.lobby.revision || state.players_mask!=p.PlayerMask() || !ValidAuthorityActors(state) ||
         !p.gameplay_history.scope() || state.tick<p.gameplay_history.scope()->first_tick ||
         (!p.gameplay_proof_exhausted[0] && state.tick>=p.gameplay_proof_next[0]) ||
-        (p.authority_sent && state.tick<=*p.authority_sent))return false;
+        (p.authority_sent && state.tick<=*p.authority_sent))return AuthorityPublishResult::Rejected;
     if(p.host_correction){const auto round=p.gameplay_rounds.find(state.tick);
         if(round==p.gameplay_rounds.end() || !round->second.local || state.completion!=*round->second.local ||
             (p.authority_sent && *p.authority_sent==UINT64_MAX) ||
-            state.tick!=(p.authority_sent?*p.authority_sent+1:p.gameplay_history.scope()->first_tick))return false;}
+            state.tick!=(p.authority_sent?*p.authority_sent+1:p.gameplay_history.scope()->first_tick))return AuthorityPublishResult::Rejected;}
     auto packet=Packet(Wire::AuthorityState);WriteAuthorityState(packet,state);
-    for(const auto& c:p.connections)if(c->welcomed && c->outgoing.size()-c->sent+packet.size()+4>MaxQueued/2)return false;
-    for(auto& c:p.connections)if(c->welcomed && !p.Queue(*c,packet))return false;
-    p.authority_sent=state.tick;return true;
+    if(packet.size()>MaxAuthorityPacket)return AuthorityPublishResult::Rejected;
+    for(const auto& c:p.connections)if(c->welcomed && c->outgoing.size()-c->sent+packet.size()+4>MaxQueued/2)return AuthorityPublishResult::Backpressure;
+    for(auto& c:p.connections)if(c->welcomed && !p.Queue(*c,packet))return AuthorityPublishResult::Rejected;
+    p.authority_sent=state.tick;return AuthorityPublishResult::Published;
 }
 std::optional<RoomAuthorityState> Room::TakeAuthorityState(){
     auto& p=*impl_;if(p.host || p.state!=RoomState::Running || p.authority_states.empty() || (p.host_correction && p.authority_taken))return {};
@@ -1090,7 +1104,17 @@ void Room::Poll(Clock::time_point now){
             unsigned packets=0;
             while(alive && c.incoming.size()>=4 && packets++<128){
                 Reader length{std::span(c.incoming).first(4)};const auto count=length.Number(4);
-                if(count<6 || count>MaxPacket){stop("invalid packet length");break;}if(c.incoming.size()<count+4)break;
+                if(count<6 || count>MaxAuthorityPacket){stop("invalid packet length");break;}
+                if(count>MaxPacket){
+                    // Only an admitted host's complete authority result may be
+                    // larger than the normal message bound. TCP fragmentation
+                    // must not expose a partial state or an event prefix.
+                    if(p.host || !c.welcomed || p.state!=RoomState::Running){stop("invalid packet length");break;}
+                    if(c.incoming.size()<10)break;
+                    if(c.incoming[4]!='B' || c.incoming[5]!='W' || c.incoming[6]!='R' || c.incoming[7]!='M' ||
+                       c.incoming[8]!=WireVersion || c.incoming[9]!=uint8_t(Wire::AuthorityState)){stop("invalid packet length");break;}
+                }
+                if(c.incoming.size()<count+4)break;
                 Bytes message(c.incoming.begin()+4,c.incoming.begin()+4+size_t(count));c.incoming.erase(c.incoming.begin(),c.incoming.begin()+4+size_t(count));
                 const bool valid=p.Message(c,message,now);if(!p.Active())return;if(!valid){stop("invalid or unauthorized protocol message");break;}c.received=now;
             }
@@ -2062,6 +2086,53 @@ bool TestOnlineRoom(){
     check(pump([&]{return rooms[0]->verified_gameplay_tick()==id.first_tick+8 && rooms[1]->verified_gameplay_tick()==id.first_tick+8;}),
         "delayed application acknowledgements drain the authority pipeline contiguously");
     fixture_verification_window=1;
+    if(!check(running() && take_fixture_tick(id.first_tick),"damage authority fixture consumes the exact native tick"))return false;
+    auto event_state=host_state;event_state.tick=id.first_tick;event_state.roster_revision=rooms[0]->lobby().revision;
+    event_state.characters.clear();
+    for(unsigned i=0;i<kAuthorityCharacterBatch;++i)event_state.characters.push_back({{i+1,2,3,4},true,{1,2,3},{4,5,6},5});
+    DamageEvent large_event;large_event.target={9,8,7,6};large_event.instigator=DamageEntityId{5,4,3,2};
+    large_event.tag.assign(kMaxDamageTag,'x');large_event.stimuli.assign(kMaxDamageStimuli,{31,0x80000000,0});
+    large_event.shape_keys.assign(kMaxDamageShapeKeys,UINT32_MAX);
+    event_state.damages.assign(kAuthorityDamageBatch,large_event);
+    if(!check(rooms[0]->CompleteGameplay(id.first_tick,proof),"host completes actual fixture update before its event batch is published"))return false;
+    for(unsigned mutation=0;mutation<3;++mutation){auto bad=event_state;
+        if(mutation==0)bad.damages.push_back(large_event);
+        if(mutation==1)bad.damages.front().stimuli.front().effective_bits=0x7fc00000;
+        if(mutation==2)bad.damages.front().target={};
+        check(rooms[0]->TryPublishAuthorityState(bad)==AuthorityPublishResult::Rejected && !rooms[0]->impl_->authority_sent,
+            "invalid or oversized damage batches do not consume publication order");
+    }
+    auto& event_connection=*rooms[0]->impl_->connections.front();
+    // Owner-only synthetic queue pressure, removed before any socket flush.
+    event_connection.outgoing.assign(MaxQueued/2,0);event_connection.sent=0;
+    check(rooms[0]->TryPublishAuthorityState(event_state)==AuthorityPublishResult::Backpressure &&
+          event_connection.outgoing.size()==MaxQueued/2 && !rooms[0]->impl_->authority_sent && rooms[0]->state()==RoomState::Running,
+          "send pressure neither stops the room nor appends a partial batch or consumes its sequence");
+    event_connection.outgoing.clear();
+    if(!check(rooms[0]->TryPublishAuthorityState(event_state)==AuthorityPublishResult::Published &&
+        event_connection.outgoing.size()>MaxPacket+64,"bounded maximum native actors and ordered events queue as one authority message larger than normal packets"))return false;
+    const auto send_prefix=[&](size_t goal){
+        const auto until=Clock::now()+std::chrono::seconds(3);
+        while(event_connection.sent<goal && Clock::now()<until){
+            const auto n=send(event_connection.socket,reinterpret_cast<const char*>(event_connection.outgoing.data()+event_connection.sent),
+                int(std::min<size_t>(4096,goal-event_connection.sent)),0);
+            if(n>0)event_connection.sent+=size_t(n);
+            else if(n==SOCKET_ERROR && WSAGetLastError()==WSAEWOULDBLOCK)std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            else return false;
+            rooms[1]->Poll();
+        }return event_connection.sent==goal;
+    };
+    if(!check(send_prefix(8) && !rooms[1]->TakeAuthorityState() && rooms[1]->state()==RoomState::Running,
+        "fragmented large-frame header cannot release an event prefix"))return false;
+    if(!check(send_prefix(MaxPacket+64) && !rooms[1]->TakeAuthorityState() && !rooms[1]->verified_gameplay_tick() && rooms[1]->state()==RoomState::Running,
+        "partial body beyond the normal packet limit cannot release any state, event or completion acknowledgement"))return false;
+    std::optional<RoomAuthorityState> delivered_events;
+    if(!check(pump([&]{delivered_events=rooms[1]->TakeAuthorityState();return delivered_events.has_value();}) && delivered_events==event_state,
+        "real TCP reconstructs the entire ordered maximum event batch with exact metadata and float bits"))return false;
+    check(!rooms[1]->AcknowledgeAuthorityState(id.first_tick,proof),"receipt before the guest native update cannot acknowledge event application");
+    if(!check(rooms[1]->CompleteGameplay(id.first_tick,client_drift) && rooms[1]->AcknowledgeAuthorityState(id.first_tick,proof) &&
+        pump([&]{return rooms[0]->verified_gameplay_tick()==id.first_tick && rooms[1]->verified_gameplay_tick()==id.first_tick;}),
+        "only completion plus explicit application acknowledgement drains the atomic event batch"))return false;
     if(!check(running() && take_fixture_tick(id.first_tick),"correction loader announcement fixture consumes a native tick"))return false;
     LoadPoint announced;announced.tick=id.first_tick;announced.phase=LoadPhase::Begin;
     std::copy_n("tcy_autotopia_visit1",19,announced.destination.begin());

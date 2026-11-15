@@ -3,6 +3,7 @@
 #include "online_voice_transport.h"
 #include "online_room_history.h"
 #include "online_rollback.h"
+#include "online_damage_event.h"
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -26,6 +27,8 @@ struct RoomActorState {
     bool operator==(const RoomActorState&)const=default;
 };
 inline constexpr size_t kAuthorityCharacterBatch=128;
+inline constexpr size_t kAuthorityDamageBatch=128;
+enum class AuthorityPublishResult {Published,Backpressure,Rejected};
 // Bounded incremental world-character samples. Stable authored GUIDs identify
 // local entities; this is not a list of entities to spawn or delete.
 struct RoomCharacterState {
@@ -42,6 +45,7 @@ struct RoomAuthorityState {
     uint16_t players_mask=0;
     std::vector<RoomActorState> actors;
     std::vector<RoomCharacterState> characters;
+    std::vector<DamageEvent> damages;
     bool operator==(const RoomAuthorityState&)const=default;
 };
 struct RoomRollbackCommands {
@@ -112,6 +116,7 @@ public:
     // Separate state channel over the authenticated gameplay connection. This
     // does not disable lockstep proofs or claim that native correction is wired.
     bool PublishAuthorityState(const RoomAuthorityState&);
+    AuthorityPublishResult TryPublishAuthorityState(const RoomAuthorityState&);
     std::optional<RoomAuthorityState> TakeAuthorityState();
     bool AcknowledgeAuthorityState(uint64_t tick,const std::array<uint8_t,32>& completion);
     bool Host(const Identity&,std::string_view numeric_address,uint16_t port,

@@ -57,6 +57,9 @@ public:
     // Props/NPCs retain dispatch until their event/lifecycle replication exists.
     // replaying a host correction is authorized separately by its native scope.
     bool SuppressLocalDamage(uint32_t target_handle)const;
+    // Private integration probe: record causal root broadcasts in its scope.
+    // Returns true when the caller must quarantine nested capture until return.
+    bool RecordDamageEvent(uint32_t event,uint32_t listener,uint32_t caller,uint8_t*);
     bool passive_input_pending()const;
     uint64_t committed_tick()const;
     // Owner-thread read only, outside the native update. Eligibility proves

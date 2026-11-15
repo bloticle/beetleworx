@@ -67,6 +67,10 @@ bool NativeLethalCorrection(Borrow& borrow,uint32_t entity){
 }
 }
 bool em2::NativeDamageReplayActive()noexcept{return damage_replay_depth!=0;}
+void em2::DispatchNativeAuthorityDamage(PPCContext& ctx,uint8_t* base){
+    struct Replay {unsigned saved=damage_replay_depth;Replay(){++damage_replay_depth;}~Replay(){damage_replay_depth=saved;}} replay;
+    sub_827340E0(ctx,base);
+}
 std::optional<int32_t> em2::ReadNativeActorHealth(PPCContext& ctx,uint8_t* base,uint32_t entity){
     GuestReadBatch reads;Borrow borrow(ctx,base);uint32_t property=0;
     if(!borrow.memory || !Route(base,entity,property))return {};

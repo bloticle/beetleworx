@@ -29,6 +29,7 @@
 #include "native_character_physics.h"
 #include "native_entity_probe.h"
 #include "native_actor_health.h"
+#include "native_damage_event.h"
 #include <rex/logging.h>
 #include <rex/input/input_system.h>
 #include <windows.h>
@@ -45,6 +46,8 @@
 REXCVAR_DECLARE(bool,em2_private_profile);
 REXCVAR_DEFINE_BOOL(em2_probe_room_authority_state,false,"Debug","Private native Room: publish real completed player positions/velocities over the host-state channel; does not apply corrections or disable proofs");
 REXCVAR_DEFINE_BOOL(em2_probe_room_authority_drift,false,"Debug","Private correction-mode guest only: inject one player/world position error and one player health error, then require native host-state repair");
+REXCVAR_DEFINE_BOOL(em2_probe_room_player_damage_events,false,"Debug","Private native Room: transmit causal root player Damage events and replay exact native payloads before guest updates");
+REXCVAR_DEFINE_BOOL(em2_probe_room_world_damage_events,false,"Debug","Private native Room: extend native Damage event replication and local suppression to world entities; lifecycle support remains experimental");
 REXCVAR_DECLARE(bool,em2_profile_world_memory);
 REXCVAR_DECLARE(bool,em2_probe_room_recovery_controller);
 REXCVAR_DEFINE_BOOL(em2_probe_unfenced_cutscene_return,false,"Debug","Private native lobby QA only: reproduce old carried-button behavior for the held-return regression");
@@ -222,6 +225,7 @@ struct NativeRoomGameplay::Impl {
     std::optional<uint64_t> submitted;
     std::optional<RoomFrame> prepared,consumed;
     std::optional<RoomAuthorityState> pending_authority;
+    std::vector<DamageEvent> damage_events;
     bool stopped=false,pending=false,delivered=false,started=false,ready_logged=false;
     bool authority_drift_injected=false;
     bool authority_world_drift_injected=false;
@@ -843,7 +847,7 @@ bool NativeRoomGameplay::Commit(const RoomFrame& frame,PPCContext& ctx,uint8_t* 
     if(!s.started)REXLOG_INFO("Native Room gameplay first frame consumed: tick {}, delay {}, physical source {}, native slot {}; native update and world verification still required",
         frame.tick,s.identity.input_delay,s.physical,s.slot);
     s.consumed_passive=s.prepared_passive;s.prepared_passive=false;
-    s.committed=frame.tick;s.consumed=frame;s.pending=true;s.delivered=false;s.started=true;s.prepared.reset();s.submitted.reset();return true;
+    s.committed=frame.tick;s.consumed=frame;s.pending=true;s.delivered=false;s.started=true;s.prepared.reset();s.submitted.reset();s.damage_events.clear();return true;
 }
 bool NativeRoomGameplay::Deliver(PPCContext& ctx,uint8_t* base){
     Environment environment;Context context(ctx);auto& s=*impl_;Impl::FaultOnThrow fault{s};uint64_t tick=0;
@@ -863,6 +867,12 @@ bool NativeRoomGameplay::Deliver(PPCContext& ctx,uint8_t* base){
             if(!s.pending_authority)std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         if(!s.pending_authority || s.pending_authority->tick!=tick)return s.Stop("Host update result did not arrive before matching native guest update");
+        if(!s.pending_authority->damages.empty()){
+            const char* error=nullptr;
+            if(!em2::ReplayNativeDamageEvents(ctx,base,s.pending_authority->damages,error))return s.Stop(std::string("Native host Damage replay failed: ")+(error?error:"unknown"));
+            size_t shape_keys=0;for(const auto& damage:s.pending_authority->damages)shape_keys+=damage.shape_keys.size();
+            REXLOG_INFO("Native host Damage batch replayed: tick {}, events {}, child shape keys {}; exact native reconstruction and original listeners before guest update",tick,s.pending_authority->damages.size(),shape_keys);
+        }
         std::vector<OnlineNameActor> actors;uint64_t local=0;
         if(!NameTagActors(actors,local,base) || actors.size()!=s.pending_authority->actors.size())return s.Stop("Host pre-update death correction lost native roster ownership");
         for(const auto& sample:s.pending_authority->actors){
@@ -1004,7 +1014,21 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
                 }
             }
         }
-        if(authority && (!ready || !s.room->PublishAuthorityState(state)))return s.Stop("Could not publish completed host actor state");
+        if(authority){
+            state.damages=std::move(s.damage_events);
+            if(!ready)return s.Stop("Could not capture completed host actor state");
+            const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+            AuthorityPublishResult result;
+            do{
+                result=s.room->TryPublishAuthorityState(state);
+                if(result!=AuthorityPublishResult::Backpressure)break;
+                if(NativeRoomLoadsCancelled())return false;
+                UpdateNativeRoomSession(base,false);
+                if(s.room->state()!=RoomState::Running)break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }while(std::chrono::steady_clock::now()<until);
+            if(result!=AuthorityPublishResult::Published)return s.Stop("Could not publish completed host actor state");
+        }
         if(!authority && ready && !s.room->PublishAuthorityState(state))
             REXLOG_WARN("Private host-state publication deferred: tick {}; no correction or verification bypass",tick);
     }
@@ -1114,8 +1138,35 @@ bool NativeRoomGameplay::SuppressLocalDamage(uint32_t target)const{
         !s.transition_pending && s.room->state()==RoomState::Running && s.room->host_correction_mode() &&
         em2::CurrentAgreedSimulationTick(tick) && tick==s.committed;
     if(!owned || !target)return false;
+    if(REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_world_damage_events))return true;
     return target==s.label_handles[0] || target==s.label_handles[1] ||
         std::any_of(s.actors->actors().begin(),s.actors->actors().end(),[&](const auto& entry){return entry.actor.handle==target;});
+}
+bool NativeRoomGameplay::RecordDamageEvent(uint32_t event,uint32_t listener,uint32_t caller,uint8_t* base){
+    auto& s=*impl_;uint64_t tick=0;Environment preserve;em2::GuestReadBatch reads;
+    const bool world_events=REXCVAR_GET(em2_probe_room_world_damage_events);
+    if(!REXCVAR_GET(em2_private_profile) || (!REXCVAR_GET(em2_probe_room_player_damage_events) && !world_events) ||
+       !s.Owner() || !s.Configured() || s.stopped || s.peer!=1 || !s.pending || s.load_depth || s.transition_pending ||
+       !s.room->host_correction_mode() || !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed || !Readable(event,116,base) ||
+       PPC_LOAD_U16(event+4)!=14 || PPC_LOAD_U32(event)!=0x82076C70)return false;
+    const auto target=PPC_LOAD_U32(event+8);
+    if(!target || (!world_events && target!=s.label_handles[0] && target!=s.label_handles[1] &&
+       std::none_of(s.actors->actors().begin(),s.actors->actors().end(),[&](const auto& entry){return entry.actor.handle==target;})))return false;
+    DamageEvent value;const char* error=nullptr;
+    if(listener || s.damage_events.size()>=kAuthorityDamageBatch || !em2::CaptureNativeDamageEvent(base,event,value,error)){
+        // Preserve the first unsupported native shape for mapping. Never treat
+        // these words as portable: they may be handles or process-local data.
+        const auto data=PPC_LOAD_U32(event+64),count=PPC_LOAD_U32(event+68);
+        REXLOG_WARN("Private native Damage failure detail: tick {} caller {:08X} target {:08X} instigator {:08X} listener {:08X} auxiliary count {} capacity {} tag {:08X}",
+            tick,caller,target,PPC_LOAD_U32(event+12),listener,count,PPC_LOAD_U32(event+72),PPC_LOAD_U32(event+76));
+        for(uint32_t i=0;i<std::min(count,16u);++i){
+            const auto address=uint64_t(data)+uint64_t(i)*4;
+            if(address>UINT32_MAX || !Readable(uint32_t(address),4,base))break;
+            REXLOG_WARN("Private native Damage auxiliary[{}] = {:08X}",i,PPC_LOAD_U32(uint32_t(address)));
+        }
+        s.Stop(std::string("Private native Damage capture unsupported: ")+(listener?"targeted listener":error?error:"event batch bound"));return false;
+    }
+    s.damage_events.push_back(std::move(value));return true;
 }
 bool NativeRoomGameplay::passive_input_pending()const{const auto& s=*impl_;return s.Owner() && !s.stopped && s.pending && s.delivered && (s.consumed_passive || s.game_over_entry.has_value());}
 uint64_t NativeRoomGameplay::committed_tick()const{return impl_->committed;}

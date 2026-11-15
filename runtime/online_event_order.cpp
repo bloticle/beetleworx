@@ -38,7 +38,7 @@ void TracePrivateDamage(PPCContext& ctx,uint8_t* base,uint64_t tick,const char* 
         if(em2::CaptureNativeDamageEvent(base,event,sample,error)){
             const auto bytes=em2::net::EncodeDamageEvent(sample);
             const bool exact=em2::net::DecodeDamageEvent(bytes,decoded) && decoded==sample;
-            REXLOG_INFO("Private portable Damage capture: role {} tick {} target {:08X}/{:08X}/{:08X}/{:08X}, instigator {}, stimuli {}, tag bytes {}, encoded bytes {}, exact {}; read-only, not sent or replayed",
+            REXLOG_INFO("Private portable Damage capture: role {} tick {} target {:08X}/{:08X}/{:08X}/{:08X}, instigator {}, stimuli {}, tag bytes {}, encoded bytes {}, exact {}; read-only codec inspection",
                 REXCVAR_GET(em2_room_probe_role),tick,sample.target[0],sample.target[1],sample.target[2],sample.target[3],sample.instigator.has_value(),sample.stimuli.size(),sample.tag.size(),bytes.size(),exact);
         }else REXLOG_WARN("Private portable Damage capture unsupported: role {} tick {} reason {}; original dispatch retained",REXCVAR_GET(em2_room_probe_role),tick,error?error:"unknown");
     }
@@ -53,6 +53,7 @@ void TracePrivateDamage(PPCContext& ctx,uint8_t* base,uint64_t tick,const char* 
 struct Entry {uint32_t node,listener,record,epoch;};
 struct Iteration {uint8_t* base=nullptr;uint32_t stack=0,manager=0,event=0,table=0,listener=0,record=0;std::vector<Entry> entries;size_t next=0;bool active=false;};
 thread_local Iteration* iteration=nullptr;
+thread_local unsigned captured_damage_depth=0;
 bool Build(Iteration& out,const PPCContext& ctx,uint8_t* base){
     const auto manager=ctx.r3.u32,event=ctx.r4.u32;
     if(ctx.r5.u32 || ctx.r1.u32<160 || !Readable(manager,1016,base) || !Readable(event,12,base) || PPC_LOAD_U32(manager+1008)>=10)return false;
@@ -152,6 +153,10 @@ PPC_FUNC_IMPL(sub_827340E0){
             return;
         }
     }
+    bool captured=false;
+    {Environment preserve;if(!captured_damage_depth && !em2::NativeDamageReplayActive())
+        if(auto* game=em2::net::CurrentNativeRoomGameplay())captured=game->RecordDamageEvent(event,ctx.r5.u32,caller,base);}
+    struct CaptureScope {bool active;explicit CaptureScope(bool value):active(value){if(active)++captured_damage_depth;}~CaptureScope(){if(active)--captured_damage_depth;}} capture_scope(captured);
     Run(ctx,base,REXCVAR_GET(em2_online_event_order) && em2::net::CurrentNativeRoomGameplay() &&
         !em2::net::NativeRoomGameplayHalted() && em2::CurrentAgreedSimulationTick(tick));
     if(observed)TracePrivateDamage(ctx,base,tick,"after",event,caller);
