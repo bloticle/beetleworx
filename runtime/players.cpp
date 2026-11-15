@@ -363,8 +363,15 @@ bool OwnedPlayerCamera(uint32_t camera,const Record& p0,uint8_t* base) {
     auto readable=[&](uint32_t at,size_t size){return base && at>=4096 && uint64_t(at)+size<=0x100000000ull && em2::GuestReadBatch::Readable(PPC_RAW_ADDR(at),size);};
     if(!camera || !p0.entity || p0.mode!=0 || !readable(camera,568) || PPC_LOAD_U32(camera)!=0x82112778 ||
        !PPC_LOAD_U32(camera+564) || !PPC_LOAD_U32(camera+392))return false;
-    constexpr std::array<uint32_t,12> tables{0x82126C98,0x8220EAA0,0x82127460,0x82123C90,0x821125F8,0x8220EF98,
-        0x82126EF0,0x82127080,0x820EB340,0x8220F0B0,0x82123F50,0x8220EEC8};
+    constexpr std::array<uint32_t,16> tables{0x82126C98,0x8220EAA0,0x82127460,0x82123C90,0x821125F8,0x8220EF98,
+        0x82126EF0,0x82127080,0x820EB340,0x8220F0B0,0x82123F50,0x8220EEC8,
+        0x8220D818,0x8220EDA8,0x82112640,0x82124138};
+    // Exact native pool specializations initialized by 82A109C8. Repeated
+    // types have separate caches; a mode must belong to a used entry of one.
+    constexpr std::array<std::pair<uint32_t,uint32_t>,11> pools{{
+        {580,0x8220D818},{596,0x8220EDA8},{612,0x821125F8},{628,0x8220EEC8},
+        {644,0x82112640},{660,0x82124138},{676,0x82123F50},{692,0x8220EF98},
+        {708,0x821125F8},{724,0x8220EEC8},{740,0x8220D818}}};
     std::array<uint32_t,16> path{};unsigned visited=0;
     auto validate=[&](auto&& self,uint32_t mode,unsigned depth)->bool {
         if(depth>=path.size() || ++visited>64 || !readable(mode,24) || PPC_LOAD_U32(mode+20)!=camera)return false;
@@ -383,6 +390,14 @@ bool OwnedPlayerCamera(uint32_t camera,const Record& p0,uint8_t* base) {
         }
         if(table==0x82123F50)return true;
         for(unsigned offset=392;offset<=432;offset+=4)if(PPC_LOAD_U32(camera+offset)==mode)return true;
+        // Real temporary modes need not occupy a fixed slot. Their pool
+        // retains a separate native owner link as well as the mode's +20.
+        for(const auto& [offset,expected]:pools)if(table==expected && readable(camera,size_t(offset)+16)){
+            const auto data=PPC_LOAD_U32(camera+offset),count=PPC_LOAD_U32(camera+offset+4),capacity=PPC_LOAD_U32(camera+offset+8);
+            if(PPC_LOAD_U32(camera+offset+12)!=camera || !count || count>capacity || capacity>4096 ||
+               !readable(data,size_t(count)*4))continue;
+            for(unsigned i=0;i<count;++i)if(PPC_LOAD_U32(data+i*4)==mode)return true;
+        }
         return false;
     };
     return validate(validate,PPC_LOAD_U32(camera+24),0);
@@ -1656,6 +1671,30 @@ bool em2::TestNativePlayerActions() {
             const auto error=GetLastError();const auto fp=_mm_getcsr();
             if(!check(!NativeCoopReady(base) && NativeCoopRuntimeReady(base)==(condition==0 || condition==6 || condition==7) && GetLastError()==error && _mm_getcsr()==fp,
                 "native blend/hint graphs validate both child owners, bounded depth/cycles, optional/shared links and known native interfaces"))return false;
+        }
+        // Reproduce an active snapshot from the dynamic +692 pool rather
+        // than a fixed controller slot. Validate used extent and ownership.
+        constexpr std::array<std::pair<uint32_t,uint32_t>,6> native_pools{{
+            {580,0x8220D818},{596,0x8220EDA8},{612,0x821125F8},{644,0x82112640},{660,0x82124138},{692,0x8220EF98}}};
+        for(const auto& [offset,table]:native_pools)for(unsigned condition=0;condition<10;++condition){
+            setup();joined_player_controls={};PPC_STORE_U32(manager+348,camera+0x800);
+            for(unsigned other=580;other<=740;other+=16)std::memset(base+camera+other,0,16);
+            constexpr uint32_t snapshot=0x18000,pool=0x1C000;
+            PPC_STORE_U32(snapshot,table);PPC_STORE_U32(snapshot+20,camera);PPC_STORE_U32(table+40,0x8290E420);
+            PPC_STORE_U32(camera+24,snapshot);PPC_STORE_U32(camera+offset,pool);PPC_STORE_U32(camera+offset+4,1);
+            PPC_STORE_U32(camera+offset+8,4);PPC_STORE_U32(camera+offset+12,camera);PPC_STORE_U32(pool,snapshot);
+            if(condition==1)PPC_STORE_U32(snapshot+20,camera+4);
+            if(condition==2)PPC_STORE_U32(camera+offset+12,camera+4);
+            if(condition==3){PPC_STORE_U32(pool,0);PPC_STORE_U32(pool+4,snapshot);}
+            if(condition==4)PPC_STORE_U32(camera+offset+4,5);
+            if(condition==5)PPC_STORE_U32(camera+offset+8,4097);
+            if(condition==6)PPC_STORE_U32(camera+offset,0xDEAD0000);
+            if(condition==7){PPC_STORE_U32(snapshot,0x82127460);PPC_STORE_U32(0x82127460+40,0x82A5DEC0);}
+            if(condition==8)PPC_STORE_U32(camera+offset+4,0);
+            if(condition==9)PPC_STORE_U32(table+40,0x18000);
+            const auto error=GetLastError();const auto fp=_mm_getcsr();
+            if(!check(!NativeCoopReady(base) && NativeCoopRuntimeReady(base)==(condition==0) && GetLastError()==error && _mm_getcsr()==fp,
+                "dynamic snapshot requires exact native pool membership, used extent, type/interface and both owner links; initial admission remains Normal-only"))return false;
         }
         joined_player_controls={};
         for(uint32_t ai_mode : {1u,2u})for(unsigned condition=0;condition<9;++condition) {

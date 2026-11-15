@@ -350,7 +350,11 @@ void em2::TickPrivateNativeRestart(PPCContext& ctx,uint8_t* base){
  const auto scheduled=uint64_t(requested)+uint64_t(sent)*interval;
  uint64_t tick=0;
  if(sent>=count || executing || faulted || protected_depth || ctx.lr!=0x829ED694 || !CurrentAgreedSimulationTick(tick) || tick!=scheduled ||
-    (!net::NativeOnlineMenuQaActive() && !net::PrivateNativeRoomGameplayProbeActive()) || !NativeCoopReady(base))return;
+    (!net::NativeOnlineMenuQaActive() && !net::PrivateNativeRoomGameplayProbeActive()))return;
+ // A scheduled native level transition can leave a valid authored/recovery
+ // camera. Keep Normal-only admission for the other private action fixtures.
+ const bool level_fixture=!REXCVAR_GET(em2_native_lobby_qa_level_target).empty() || !REXCVAR_GET(em2_native_lobby_qa_level_route).empty();
+ if(!NativeCoopReady(base) && (!level_fixture || !NativeCoopRuntimeReady(base)))return;
  const auto damage_player=REXCVAR_GET(em2_native_lobby_qa_damage_player);
  const auto damage_amount=REXCVAR_GET(em2_native_lobby_qa_damage_amount);
  if(damage_player && (!damage_amount || damage_amount>1000)){REXLOG_ERROR("Native damage fixture amount must be 1..1000");return;}
