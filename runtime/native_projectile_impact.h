@@ -1,6 +1,7 @@
 #pragma once
 #include "online_projectile_impact.h"
 #include "online_shooter_launch.h"
+#include "online_death_reward.h"
 #include <optional>
 struct PPCContext;
 namespace em2 {
@@ -10,4 +11,5 @@ void EndNativeImpactClone(const NativeImpactCloneTicket&,PPCContext&,uint8_t*);
 bool ReplayNativeProjectileImpact(PPCContext&,uint8_t*,uint32_t entity,const net::ProjectileImpact&,const char*& error);
 bool ReadNativeShooterPending(uint8_t*,uint32_t shooter,net::ShooterLaunch&,uint32_t& owner);
 bool ReplayNativeShooterLaunch(PPCContext&,uint8_t*,uint32_t shooter,const net::ShooterLaunch&,const char*& error);
+bool ReplayNativeDeathReward(PPCContext&,uint8_t*,uint32_t component,const net::DeathReward&,const char*& error);
 }

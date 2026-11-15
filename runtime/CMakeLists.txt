@@ -553,6 +553,7 @@ target_sources(EM2Recomp PRIVATE native_damage_event.cpp online_damage_event.cpp
 target_sources(EM2Recomp PRIVATE online_spawn_batch.cpp)
 target_sources(EM2Recomp PRIVATE online_projectile_impact.cpp native_projectile_impact.cpp)
 target_sources(EM2Recomp PRIVATE online_shooter_launch.cpp)
+target_sources(EM2Recomp PRIVATE online_death_reward.cpp)
 target_sources(EM2Recomp PRIVATE online_button_actions.cpp)
 target_sources(EM2Recomp PRIVATE online_retail_buttons.cpp)
 target_sources(EM2Recomp PRIVATE content_resource_patch.cpp)

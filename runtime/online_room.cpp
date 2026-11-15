@@ -1,6 +1,7 @@
 #include "online_address.h"
 #include "online_internet_relay.h"
 #include "online_room.h"
+#include "online_death_reward.h"
 #include "online_gameover_input.h"
 #include "online_cutscene_input.h"
 #include "online_checkpoint.h"
@@ -29,7 +30,7 @@ using Clock=std::chrono::steady_clock;
 using Bytes=std::vector<uint8_t>;
 constexpr size_t Window=64,MaxPacket=8192,MaxQueued=2*1024*1024;
 constexpr size_t MaxAuthorityPacket=1024*1024;
-constexpr uint8_t WireVersion=26;
+constexpr uint8_t WireVersion=27;
 static_assert(109+16*31+kAuthorityCharacterBatch*46<=MaxPacket);
 constexpr size_t MaxEncodedDamage=6+16+16+2+32+1+kMaxDamageStimuli*12+2+2+kMaxDamageShapeKeys*4+3+kMaxDamageTag;
 static_assert(MaxEncodedDamage<=kMaxDamageEventBytes);
@@ -106,6 +107,12 @@ bool ValidAuthorityActors(const RoomAuthorityState& state){
         if(!ValidShooterLaunch(launch) || (launch.owner.peer && !(state.players_mask&(1u<<(launch.owner.peer-1)))))return false;
         for(const auto& clone:launch.clones)if(!births.insert(clone.entity).second)return false;
     }
+    if(state.death_rewards.size()>kAuthorityDeathRewardBatch)return false;
+    std::set<SpawnId> reward_owners;
+    for(const auto& reward:state.death_rewards){
+        if(!ValidDeathReward(reward) || !reward_owners.insert(reward.owner).second)return false;
+        for(const auto& clone:reward.clones)if(!births.insert(clone.entity).second)return false;
+    }
     return state.damages.size()<=kAuthorityDamageBatch &&
         std::all_of(state.damages.begin(),state.damages.end(),[&](const auto& damage){
             if(!ValidDamageEvent(damage))return false;
@@ -141,6 +148,8 @@ void WriteAuthorityState(Bytes& bytes,const RoomAuthorityState& state){
     for(const auto& launch:state.shooter_launches){const auto encoded=EncodeShooterLaunch(launch);U64(bytes,encoded.size(),2);bytes.insert(bytes.end(),encoded.begin(),encoded.end());}
     U64(bytes,state.retired_entities.size(),2);for(const auto& id:state.retired_entities)for(auto word:id)U64(bytes,word,4);
     U64(bytes,state.live_spawners.size(),2);for(const auto& id:state.live_spawners)for(auto word:id)U64(bytes,word,4);
+    U64(bytes,state.death_rewards.size(),2);
+    for(const auto& reward:state.death_rewards){const auto encoded=EncodeDeathReward(reward);U64(bytes,encoded.size(),2);bytes.insert(bytes.end(),encoded.begin(),encoded.end());}
 }
 bool ReadAuthorityState(Reader& reader,RoomAuthorityState& state){
     state.tick=reader.Number(8);state.roster_revision=reader.Number(8);for(auto& byte:state.world)byte=reader.Byte();
@@ -191,6 +200,11 @@ bool ReadAuthorityState(Reader& reader,RoomAuthorityState& state){
     for(unsigned i=0;i<retired;++i){SpawnId id;for(auto& word:id)word=uint32_t(reader.Number(4));state.retired_entities.push_back(id);}
     const auto live=reader.Number(2);if(!reader.good || live>kAuthorityLiveSpawnerBatch || live*16>reader.bytes.size()-reader.at)return false;
     for(unsigned i=0;i<live;++i){SpawnId id;for(auto& word:id)word=uint32_t(reader.Number(4));state.live_spawners.push_back(id);}
+    const auto rewards=reader.Number(2);if(!reader.good || rewards>kAuthorityDeathRewardBatch)return false;
+    for(unsigned i=0;i<rewards;++i){const auto length=reader.Number(2);
+        if(!reader.good || !length || length>kMaxDeathRewardBytes || length>reader.bytes.size()-reader.at)return false;
+        DeathReward reward;if(!DecodeDeathReward(reader.bytes.subspan(reader.at,size_t(length)),reward))return false;
+        reader.at+=size_t(length);state.death_rewards.push_back(std::move(reward));}
     return reader.Done() && ValidAuthorityActors(state);
 }
 std::string HashText(const Hash& hash){
@@ -1689,6 +1703,7 @@ bool TestOnlineRoomLoads(){
 }
 
 bool TestOnlineRoom(){
+    if(!TestDeathRewardCodec())return false;
     if(!TestShooterLaunchCodec())return false;
     if(!TestProjectileImpactCodec())return false;
     if(!TestSpawnBatchCodec())return false;
@@ -2196,7 +2211,8 @@ bool TestOnlineRoom(){
     for(unsigned i=0;i<kAuthorityAiDecisionBatch;++i)event_state.ai_decisions.push_back({{i+1,8,7,6},{9,8,7,6},0,true,true,4096});
     event_state.ai_decisions[0].target={};event_state.ai_decisions[0].target_peer=1;
     for(unsigned field:{33u,34u}){
-        Bytes bad;WriteAuthorityState(bad,event_state);bad[bad.size()-47+field]=2;
+        // Last 37-byte AI record precedes six empty u16-counted collections.
+        Bytes bad;WriteAuthorityState(bad,event_state);bad[bad.size()-(37+6*2)+field]=2;
         Reader reader{bad};RoomAuthorityState decoded;
         check(!ReadAuthorityState(reader,decoded),"non-boolean native AI command flags rejected on wire");
     }
@@ -2218,7 +2234,11 @@ bool TestOnlineRoom(){
     }
     for(unsigned i=0;i<kAuthorityRetirementBatch;++i)event_state.retired_entities.push_back({0x4456,i+1,0,0});
     for(unsigned i=0;i<kAuthorityLiveSpawnerBatch;++i)event_state.live_spawners.push_back({0x5567,i+1,0,0});
-    for(unsigned mutation=0;mutation<30;++mutation){auto bad=event_state;
+    for(unsigned i=0;i<kAuthorityDeathRewardBatch;++i){DeathReward reward;reward.owner={0x6678,i+1,0,0};reward.reason=i;
+        for(unsigned j=0;j<kMaxImpactClones;++j)reward.clones.push_back({{0x636d0,0,0,0},{0x7789,i+1,j+1,0},{1,1},i,j});
+        event_state.death_rewards.push_back(std::move(reward));
+    }
+    for(unsigned mutation=0;mutation<34;++mutation){auto bad=event_state;
         if(mutation==0)bad.damages.push_back(large_event);
         if(mutation==1)bad.damages.front().stimuli.front().effective_bits=0x7fc00000;
         if(mutation==2){bad.damages.front().target={};bad.damages.front().target_peer=0;}
@@ -2249,6 +2269,10 @@ bool TestOnlineRoom(){
         if(mutation==27)bad.live_spawners.back()=bad.live_spawners.front();
         if(mutation==28)std::swap(bad.live_spawners[0],bad.live_spawners[1]);
         if(mutation==29)bad.retired_entities.front()=bad.live_spawners.front();
+        if(mutation==30)bad.death_rewards.push_back(event_state.death_rewards.front());
+        if(mutation==31)bad.death_rewards.front().owner={};
+        if(mutation==32)bad.death_rewards.back().owner=bad.death_rewards.front().owner;
+        if(mutation==33)bad.death_rewards.front().clones.front().entity=bad.spawn_batches.front().children.front().entity;
         check(rooms[0]->TryPublishAuthorityState(bad)==AuthorityPublishResult::Rejected && !rooms[0]->impl_->authority_sent,
             "invalid or oversized damage batches do not consume publication order");
     }

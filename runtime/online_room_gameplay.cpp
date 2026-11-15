@@ -265,6 +265,8 @@ struct NativeRoomGameplay::Impl {
     uint64_t projectile_load=0;
     bool impacts_applied=false;
     std::vector<ShooterLaunch> shooter_launches;
+    std::vector<DeathReward> death_rewards;
+    size_t reward_cursor=0;
     size_t launch_cursor=0;
     size_t ai_cursor=0;
     bool stopped=false,pending=false,delivered=false,started=false,ready_logged=false;
@@ -925,7 +927,7 @@ bool NativeRoomGameplay::Commit(const RoomFrame& frame,PPCContext& ctx,uint8_t* 
     if(!s.started)REXLOG_INFO("Native Room gameplay first frame consumed: tick {}, delay {}, physical source {}, native slot {}; native update and world verification still required",
         frame.tick,s.identity.input_delay,s.physical,s.slot);
     s.consumed_passive=s.prepared_passive;s.prepared_passive=false;
-    s.committed=frame.tick;s.consumed=frame;s.pending=true;s.delivered=false;s.started=true;s.prepared.reset();s.submitted.reset();s.damage_events.clear();s.ai_decisions.clear();s.spawn_batches.clear();s.projectile_impacts.clear();s.shooter_launches.clear();s.launch_cursor=0;s.impacts_applied=false;s.ai_cursor=0;s.retirements_applied.clear();return true;
+    s.committed=frame.tick;s.consumed=frame;s.pending=true;s.delivered=false;s.started=true;s.prepared.reset();s.submitted.reset();s.damage_events.clear();s.ai_decisions.clear();s.spawn_batches.clear();s.projectile_impacts.clear();s.shooter_launches.clear();s.death_rewards.clear();s.reward_cursor=0;s.launch_cursor=0;s.impacts_applied=false;s.ai_cursor=0;s.retirements_applied.clear();return true;
 }
 bool NativeRoomGameplay::Deliver(PPCContext& ctx,uint8_t* base){
     Environment environment;Context context(ctx);auto& s=*impl_;Impl::FaultOnThrow fault{s};uint64_t tick=0;
@@ -954,6 +956,8 @@ bool NativeRoomGameplay::Deliver(PPCContext& ctx,uint8_t* base){
             return s.Stop("Host spawn batches require the matching private native capture adapter");
         if(!s.pending_authority->projectile_impacts.empty() && (!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_projectile_impacts)))
             return s.Stop("Host projectile impacts require the matching private native impact adapter");
+        if(!s.pending_authority->death_rewards.empty() && (!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_world_damage_events) || !REXCVAR_GET(em2_probe_room_spawn_replay) || !REXCVAR_GET(em2_probe_room_entity_retirements)))
+            return s.Stop("Host death rewards require the matching native authority adapters");
         if(!s.pending_authority->shooter_launches.empty() && (!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_shooter_launches)))
             return s.Stop("Host Shooter launches require the matching private native launch adapter");
         if(!s.pending_authority->retired_entities.empty() && (!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_entity_retirements)))
@@ -965,6 +969,7 @@ bool NativeRoomGameplay::Deliver(PPCContext& ctx,uint8_t* base){
             for(const auto& batch:s.pending_authority->spawn_batches)if(!batch.owner.peer)s.authority_entities.insert(batch.owner.id);
             for(const auto& actor:s.pending_authority->characters)s.authority_entities.insert(actor.id);
             for(const auto& command:s.pending_authority->ai_decisions)s.authority_entities.insert(command.owner);
+            for(const auto& reward:s.pending_authority->death_rewards){s.authority_entities.insert(reward.owner);for(const auto& clone:reward.clones)s.authority_entities.insert(clone.entity);}
             for(const auto& batch:s.pending_authority->spawn_batches)if(!batch.shooter && batch.collection)
                 for(const auto& child:batch.children)s.authority_entities.insert(child.entity);
             if(s.authority_entities.size()>65536)return s.Stop("Native entity authority inventory exceeds bound");
@@ -1067,6 +1072,7 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
     if(REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_ai_targets) && s.peer!=1 &&
        (!s.pending_authority || s.ai_cursor!=s.pending_authority->ai_decisions.size()))return s.Stop("Native AI target completion did not consume the host decision batch");
     if(REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_spawn_batches) && s.peer!=1){
+        if(REXCVAR_GET(em2_probe_room_world_damage_events) && !ReplayDeathRewards(ctx,base))return false;
         if(REXCVAR_GET(em2_probe_room_shooter_launches) && !ReplayShooterLaunches(ctx,base,false))return false;
         if(REXCVAR_GET(em2_probe_room_projectile_impacts) && !ReplayProjectileImpacts(ctx,base))return false;
         if(REXCVAR_GET(em2_probe_room_entity_retirements) && !ReplayEntityRetirements(ctx,base,false))return false;
@@ -1139,11 +1145,11 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
                 world.erase(std::remove_if(world.begin(),world.end(),[&](const auto& character){return std::find(player_ids.begin(),player_ids.end(),character.id)!=player_ids.end();}),world.end());
                 if(ready && REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_entity_retirements)){
                     for(const auto& actor:world)s.authority_entities.insert(actor.id);
-                    // Canonical native registration index 40 is TemplateSpawner.
+                    // Canonical indices: TemplateSpawner 40, DeathReward 117.
                     // Validate its actual component type before publishing IDs.
-                    for(const auto& row:entities.records)if((row.component_mask[5]&1) &&
+                    for(const auto& row:entities.records)if(((row.component_mask[5]&1) || (row.component_mask[14]&32)) &&
                         std::find(player_ids.begin(),player_ids.end(),row.id)==player_ids.end()){
-                        if(!NamedComponent(base,row.debug_address,"TemplateSpawnerComponent") || state.live_spawners.size()>=kAuthorityLiveSpawnerBatch){ready=false;break;}
+                        if((!NamedComponent(base,row.debug_address,"TemplateSpawnerComponent") && !NamedComponent(base,row.debug_address,"DeathRewardComponent")) || state.live_spawners.size()>=kAuthorityLiveSpawnerBatch){ready=false;break;}
                         state.live_spawners.push_back(row.id);s.authority_entities.insert(row.id);
                     }
                     for(auto it=s.authority_entities.begin();it!=s.authority_entities.end();){
@@ -1178,6 +1184,7 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
             state.spawn_batches=std::move(s.spawn_batches);
             state.projectile_impacts=std::move(s.projectile_impacts);
             state.shooter_launches=std::move(s.shooter_launches);
+            state.death_rewards=std::move(s.death_rewards);
             if(!ready)return s.Stop("Could not capture completed host actor state");
             const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(10);
             AuthorityPublishResult result;
@@ -1410,6 +1417,42 @@ bool NativeRoomGameplay::ReplayShooterLaunches(PPCContext& ctx,uint8_t* base,boo
         REXLOG_INFO("Native host Shooter launch replayed: tick {}, shots {}, success {}, FX clones {}; original launch processor emptied its pending list",tick,expected.projectiles.size(),expected.success,expected.clones.size());
     }return true;
 }
+NativeImpactMode NativeRoomGameplay::DeathRewardMode(uint32_t owner)const{
+    Environment preserve;auto& s=*impl_;uint64_t tick=0;
+    if(!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_world_damage_events) || !REXCVAR_GET(em2_probe_room_spawn_replay) ||
+       !REXCVAR_GET(em2_probe_room_entity_retirements) || !s.Owner() || !s.Configured() || s.stopped || !s.pending || s.load_depth || s.transition_pending ||
+       s.HumanPeer(owner) || !s.room->host_correction_mode() || !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed || s.AnnouncedLoadCancellation(tick))return NativeImpactMode::Original;
+    return s.peer==1?NativeImpactMode::Host:NativeImpactMode::Suppress;
+}
+bool NativeRoomGameplay::RecordDeathReward(DeathReward reward){
+    Environment preserve;auto& s=*impl_;uint64_t tick=0;
+    if(!s.Owner() || !s.Configured() || s.stopped || s.peer!=1 || !s.pending || s.load_depth || s.transition_pending ||
+       !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed)return false;
+    if(!ValidDeathReward(reward) || s.death_rewards.size()>=kAuthorityDeathRewardBatch ||
+       std::any_of(s.death_rewards.begin(),s.death_rewards.end(),[&](const auto& r){return r.owner==reward.owner;}))return s.Stop("Native death reward capture violates its operation contract");
+    REXLOG_INFO("Native host death reward captured: tick {} owner {:08X}/{:08X}/{:08X}/{:08X}, reason {}, clones {}",tick,reward.owner[0],reward.owner[1],reward.owner[2],reward.owner[3],reward.reason,reward.clones.size());
+    s.authority_entities.insert(reward.owner);for(const auto& clone:reward.clones)s.authority_entities.insert(clone.entity);
+    s.death_rewards.push_back(std::move(reward));return true;
+}
+bool NativeRoomGameplay::ReplayDeathRewards(PPCContext& ctx,uint8_t* base){
+    auto& s=*impl_;uint64_t tick=0;
+    if(!s.Owner() || !s.pending_authority || s.stopped || s.peer==1 || !s.pending || !s.delivered || s.load_depth || s.transition_pending ||
+       !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed || s.pending_authority->tick!=tick)return s.Stop("Native death reward lost its authority tick");
+    while(s.reward_cursor<s.pending_authority->death_rewards.size()){
+        const auto expected=s.pending_authority->death_rewards[s.reward_cursor];
+        NativeEntitySnapshot snapshot;const char* error=nullptr;uint32_t address=0;uint64_t before=0,after=0;
+        if(!em2::SampleNativeEntityLifetimeRevision(before) || !ReadNativeEntitySnapshot(base,snapshot,error,address,false) ||
+           !em2::SampleNativeEntityLifetimeRevision(after) || before!=after)return s.Stop("Native death reward registry changed during owner resolution");
+        uint32_t entity=0;for(const auto& row:snapshot.records)if(row.id==expected.owner){entity=row.debug_address;break;}
+        const auto component=NamedComponent(base,entity,"DeathRewardComponent");
+        if(!component)return s.Stop("Native death reward owner or component is absent");
+        if(!em2::ReplayNativeDeathReward(ctx,base,component,expected,error))return s.Stop(std::string("Native host death reward failed: ")+(error?error:"unknown"));
+        if(CurrentNativeRoomGameplay()!=this || !s.Configured() || !s.pending_authority || s.pending_authority->tick!=tick || s.load_depth || s.transition_pending)
+            return s.Stop("Native death reward left its original world");
+        ++s.reward_cursor;
+        REXLOG_INFO("Native host death reward replayed: tick {} owner {:08X}/{:08X}/{:08X}/{:08X}, clones {}; original callback, one-shot state and ordered clone identities verified",tick,expected.owner[0],expected.owner[1],expected.owner[2],expected.owner[3],expected.clones.size());
+    }return true;
+}
 bool NativeRoomGameplay::RecordProjectileImpact(ProjectileImpact impact){
     Environment preserve;auto& s=*impl_;uint64_t tick=0;
     if(!s.Owner() || !s.Configured() || s.stopped || s.peer!=1 || !s.pending || s.load_depth || s.transition_pending ||
@@ -1586,13 +1629,14 @@ bool NativeRoomGameplay::DeferSpawnerRetirement(const PPCContext& ctx,uint8_t* b
        s.pending_authority->tick!=tick || s.AnnouncedLoadCancellation(tick))return false;
     const auto entity=ctx.r4.u32;
     if(!Readable(entity,96,base) || PPC_LOAD_U32(entity)!=0x8208D908 || s.HumanPeer(entity) ||
-       !NamedComponent(base,entity,"TemplateSpawnerComponent"))return false;
+       (!NamedComponent(base,entity,"TemplateSpawnerComponent") && !NamedComponent(base,entity,"DeathRewardComponent")))return false;
     SpawnId id;for(unsigned i=0;i<4;++i)id[i]=PPC_LOAD_U32(entity+4+i*4);
     const bool alive=std::binary_search(s.pending_authority->live_spawners.begin(),s.pending_authority->live_spawners.end(),id);
     if(s.spawn_batches.size()>s.pending_authority->spawn_batches.size())return false;
     const auto pending=std::span<const SpawnBatch>(s.pending_authority->spawn_batches).subspan(s.spawn_batches.size());
     const bool retiring=std::find(s.pending_authority->retired_entities.begin(),s.pending_authority->retired_entities.end(),id)!=s.pending_authority->retired_entities.end();
-    if(!alive && !(retiring && PendingSpawnUsesEntity(pending,id)))return false;
+    const bool reward_pending=std::any_of(s.pending_authority->death_rewards.begin()+s.reward_cursor,s.pending_authority->death_rewards.end(),[&](const auto& reward){return reward.owner==id;});
+    if(!alive && !(retiring && (PendingSpawnUsesEntity(pending,id) || reward_pending)))return false;
     REXLOG_INFO("Native guest spawner retirement deferred: tick {} GUID {:08X}/{:08X}/{:08X}/{:08X}, host alive {}, pending host dependency {}; original registry/components retained",tick,id[0],id[1],id[2],id[3],alive,!alive);
     return true;
 }

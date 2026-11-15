@@ -80,6 +80,8 @@ public:
     bool RecordProjectileImpact(ProjectileImpact);
     NativeImpactMode ShooterLaunchMode(std::span<const SpawnId>,uint32_t caller);
     bool RecordShooterLaunch(ShooterLaunch,uint32_t owner);
+    NativeImpactMode DeathRewardMode(uint32_t owner)const;
+    bool RecordDeathReward(DeathReward);
     bool passive_input_pending()const;
     uint64_t committed_tick()const;
     // Owner-thread read only, outside the native update. Eligibility proves
@@ -95,6 +97,7 @@ private:
     bool ReplayProjectileImpacts(PPCContext&,uint8_t*);
     bool ReplayEntityRetirements(PPCContext&,uint8_t*,bool required);
     bool ReplayShooterLaunches(PPCContext&,uint8_t*,bool required);
+    bool ReplayDeathRewards(PPCContext&,uint8_t*);
     bool RearmInputContext(uint64_t source_tick,PPCContext&,uint8_t*);
     struct Impl;
     std::unique_ptr<Impl> impl_;

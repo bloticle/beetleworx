@@ -7,6 +7,7 @@
 #include "online_spawn_batch.h"
 #include "online_projectile_impact.h"
 #include "online_shooter_launch.h"
+#include "online_death_reward.h"
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -68,6 +69,7 @@ struct RoomAuthorityState {
     std::vector<ShooterLaunch> shooter_launches;
     std::vector<SpawnId> retired_entities;
     std::vector<SpawnId> live_spawners; // Sorted host registry inventory, no native addresses.
+    std::vector<DeathReward> death_rewards;
     bool operator==(const RoomAuthorityState&)const=default;
 };
 struct RoomRollbackCommands {
