@@ -15,7 +15,7 @@ supplied hosted-relay configuration. Optional relay voice and text chat are
 available. The EM1 preview remains offline. Current correction evidence and
 limits are recorded in [the correction notes](online-authority-correction-work.md).
 
-Private death-reward replication work and its current failed native acceptance
+Private death-reward replication work and its remaining native lifecycle failure
 are recorded in [the reward notes](online-death-reward-work.md). It remains
 disabled in public lobbies.
 

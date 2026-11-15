@@ -48,6 +48,18 @@ bool Queued(uint8_t* base,uint32_t entity,bool& out){
 struct Scope {std::vector<em2::net::ImpactClone> clones;bool replay=false,good=true;size_t cursor=0;Scope* previous=nullptr;};
 thread_local Scope* current=nullptr;
 struct Active {Scope& scope;explicit Active(Scope& s):scope(s){s.previous=current;current=&s;}~Active(){current=scope.previous;}};
+bool RewardState(uint8_t* base,uint32_t component,const em2::NativeEntitySnapshot& snapshot,std::array<uint32_t,3>& state,em2::net::SpawnId& parent){
+    if(!Readable(base,component,92))return false;
+    state={PPC_LOAD_U32(component+76),PPC_LOAD_U32(component+84),PPC_LOAD_U32(component+88)};
+    const auto pointer=PPC_LOAD_U32(component+80);parent={};if(!pointer)return true;
+    const auto row=std::find_if(snapshot.records.begin(),snapshot.records.end(),[&](const auto& r){return r.debug_address==pointer;});
+    if(row==snapshot.records.end() || row->vtable!=0x8208D908)return false;parent=row->id;return true;
+}
+bool CurrentRewardState(uint8_t* base,uint32_t component,std::array<uint32_t,3>& state,em2::net::SpawnId& parent){
+    em2::NativeEntitySnapshot snapshot;const char* error=nullptr;uint32_t address=0;uint64_t before=0,after=0;
+    return em2::SampleNativeEntityLifetimeRevision(before) && em2::ReadNativeEntitySnapshot(base,snapshot,error,address,false) &&
+        em2::SampleNativeEntityLifetimeRevision(after) && before==after && RewardState(base,component,snapshot,state,parent);
+}
 bool RewardOwner(uint8_t* base,uint32_t component,em2::net::DeathReward& reward,uint32_t& handle){
     std::string type;
     if(!Readable(base,component,92) || !em2::ReadNativeComponentTypeName(base,component,type) || type!="DeathRewardComponent" || PPC_LOAD_U8(component+73))return false;
@@ -58,8 +70,7 @@ bool RewardOwner(uint8_t* base,uint32_t component,em2::net::DeathReward& reward,
     const auto row=std::find_if(snapshot.records.begin(),snapshot.records.end(),[&](const auto& r){return r.debug_address==root+8;});
     if(row==snapshot.records.end())return false;
     reward.owner=row->id;handle=row->handle;
-    for(unsigned i=0;i<4;++i)reward.before[i]=PPC_LOAD_U32(component+76+i*4);
-    return true;
+    return RewardState(base,component,snapshot,reward.before,reward.parent_before);
 }
 }
 std::optional<em2::NativeImpactCloneTicket> em2::BeginNativeImpactClone(PPCContext& ctx,uint8_t* base){
@@ -159,7 +170,7 @@ PPC_FUNC_IMPL(sub_82AA86E8){
     {Active active(scope);__imp__sub_82AA86E8(ctx,base);}
     {Preserve preserve(ctx);em2::GuestReadBatch reads;
         scope.good&=Readable(base,component,92) && PPC_LOAD_U8(component+73)==1 && em2::ReadNativeSpawnRandom(ctx,base,reward.random_after);
-        if(Readable(base,component,92))for(unsigned i=0;i<4;++i)reward.after[i]=PPC_LOAD_U32(component+76+i*4);
+        scope.good&=CurrentRewardState(base,component,reward.after,reward.parent_after);
         reward.clones=std::move(scope.clones);if(!scope.good)reward.owner={};
         if(gameplay==em2::net::CurrentNativeRoomGameplay())gameplay->RecordDeathReward(std::move(reward));
     }
@@ -167,24 +178,30 @@ PPC_FUNC_IMPL(sub_82AA86E8){
 bool em2::ReplayNativeDeathReward(PPCContext& ctx,uint8_t* base,uint32_t component,const net::DeathReward& expected,const char*& error){
     Preserve preserve(ctx);GuestReadBatch reads;error=nullptr;const auto fail=[&](const char* why){error=why;return false;};
     net::DeathReward local;uint32_t handle=0;
-    if(!net::ValidDeathReward(expected) || !RewardOwner(base,component,local,handle) || local.owner!=expected.owner || local.before!=expected.before)
+    if(!net::ValidDeathReward(expected) || !RewardOwner(base,component,local,handle) || local.owner!=expected.owner || local.before!=expected.before || local.parent_before!=expected.parent_before)
         return fail("death reward identity, one-shot flag or pre-state differs");
     const auto top=ctx.r1.u32&~15u;constexpr size_t bytes=65536;
     if(top<bytes+4096 || !Readable(base,top-uint32_t(bytes),bytes))return fail("death reward borrowed stack unavailable");
     std::vector<uint8_t> backup(bytes);auto* memory=base+top-bytes;std::memcpy(backup.data(),memory,bytes);
     struct Restore {uint8_t* memory;const std::vector<uint8_t>& bytes;~Restore(){std::memcpy(memory,bytes.data(),bytes.size());}} restore{memory,backup};
-    const auto frame=top-512,event=top-128;std::memset(base+event,0,20);
+    const auto frame=top-512,event=top-128;
+    // Native srand calls its PTD helper using real PPC stack frames. Establish
+    // the borrowed frame before that call; otherwise those frames overwrite
+    // the event staged above it even though SeedNativeSpawnReplay restores GPRs.
+    ctx.r1.u64=frame;PPC_STORE_U32(frame,top);
+    if(!SeedNativeSpawnReplay(ctx,base,expected.random_before))return fail("death reward CRT owner unavailable");
+    std::memset(base+event,0,20);
     // The original callback reads only type +4 and owner handle +8; its original
     // distribution reads the scalar +16. No fabricated vtable is dispatched.
     PPC_STORE_U16(event+4,16);PPC_STORE_U32(event+8,handle);PPC_STORE_U32(event+16,expected.reason);
-    if(!SeedNativeSpawnReplay(ctx,base,expected.random_before))return fail("death reward CRT owner unavailable");
-    Scope scope;scope.clones=expected.clones;scope.replay=true;ctx.r1.u64=frame;PPC_STORE_U32(frame,top);ctx.r3.u64=component+64;ctx.r4.u64=event;
+    Scope scope;scope.clones=expected.clones;scope.replay=true;ctx.r3.u64=component+64;ctx.r4.u64=event;
     {Active active(scope);GuestReadBatch::CallbackBoundary boundary;__imp__sub_82AA86E8(ctx,base);}
     uint32_t random=0;
     if(!Readable(base,component,92) || PPC_LOAD_U8(component+73)!=1)return fail("native death reward callback did not commit its handled flag");
     if(!scope.good || scope.cursor!=expected.clones.size())return fail("native death reward ordered clone sequence differs");
     if(!ReadNativeSpawnRandom(ctx,base,random) || random!=expected.random_after)return fail("native death reward end RNG differs");
-    for(unsigned i=0;i<4;++i)if(PPC_LOAD_U32(component+76+i*4)!=expected.after[i])return fail("native death reward post-state differs");
+    if(!CurrentRewardState(base,component,local.after,local.parent_after) || local.after!=expected.after || local.parent_after!=expected.parent_after)
+        return fail("native death reward scalar or portable parent post-state differs");
     return true;
 }
 bool em2::ReadNativeShooterPending(uint8_t* base,uint32_t shooter,net::ShooterLaunch& out,uint32_t& owner){

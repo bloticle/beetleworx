@@ -6,7 +6,8 @@ namespace em2::net {
 struct DeathReward {
     SpawnId owner{};
     uint32_t reason=0;
-    std::array<uint32_t,4> before{},after{}; // Component words +76..+88.
+    std::array<uint32_t,3> before{},after{}; // Scalar words +76/+84/+88.
+    SpawnId parent_before{},parent_after{}; // +80 is a local BEntity pointer.
     uint32_t random_before=0,random_after=0;
     std::vector<ImpactClone> clones;
     bool operator==(const DeathReward&)const=default;

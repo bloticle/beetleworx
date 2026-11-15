@@ -30,7 +30,7 @@ using Clock=std::chrono::steady_clock;
 using Bytes=std::vector<uint8_t>;
 constexpr size_t Window=64,MaxPacket=8192,MaxQueued=2*1024*1024;
 constexpr size_t MaxAuthorityPacket=1024*1024;
-constexpr uint8_t WireVersion=27;
+constexpr uint8_t WireVersion=28;
 static_assert(109+16*31+kAuthorityCharacterBatch*46<=MaxPacket);
 constexpr size_t MaxEncodedDamage=6+16+16+2+32+1+kMaxDamageStimuli*12+2+2+kMaxDamageShapeKeys*4+3+kMaxDamageTag;
 static_assert(MaxEncodedDamage<=kMaxDamageEventBytes);
@@ -2236,6 +2236,7 @@ bool TestOnlineRoom(){
     for(unsigned i=0;i<kAuthorityLiveSpawnerBatch;++i)event_state.live_spawners.push_back({0x5567,i+1,0,0});
     for(unsigned i=0;i<kAuthorityDeathRewardBatch;++i){DeathReward reward;reward.owner={0x6678,i+1,0,0};reward.reason=i;
         for(unsigned j=0;j<kMaxImpactClones;++j)reward.clones.push_back({{0x636d0,0,0,0},{0x7789,i+1,j+1,0},{1,1},i,j});
+        reward.parent_before={0x88aa,i+1,0,0};reward.parent_after=reward.clones.front().entity;
         event_state.death_rewards.push_back(std::move(reward));
     }
     for(unsigned mutation=0;mutation<34;++mutation){auto bad=event_state;
