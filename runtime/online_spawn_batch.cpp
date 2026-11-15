@@ -67,6 +67,13 @@ bool SpawnBeforeCleanupReady(std::span<const SpawnBatch> host,std::span<const Sp
     return next.owner==owner && next.anchor==owner && next.shooter && !next.collection &&
         !next.depth && next.flag && next.random_present && next.before==state;
 }
+bool PendingSpawnUsesEntity(std::span<const SpawnBatch> pending,const SpawnId& id){
+    if(!Nonzero(id))return false;
+    for(const auto& batch:pending){
+        if((!batch.owner.peer && batch.owner.id==id) || (!batch.anchor.peer && batch.anchor.id==id))return true;
+        for(const auto& child:batch.children)if(child.entity==id)return true;
+    }return false;
+}
 bool TestSpawnBatchCodec(){
     unsigned checks=0;auto check=[&](bool ok,const char* why){++checks;if(!ok)REXLOG_ERROR("Spawn batch codec: {}",why);return ok;};
     SpawnBatch batch;batch.owner.id={1,2,3,4};batch.anchor.peer=16;batch.selection=INT32_MIN;batch.depth=15;batch.flag=true;batch.collection=true;
@@ -128,6 +135,14 @@ bool TestSpawnBatchCodec(){
     if(!check(!SpawnBeforeCleanupReady(host,completed,pending.owner,pending.before),"completed host birth cannot run twice before cleanup"))return false;
     host.push_back(pending);completed[0].selection^=1;
     if(!check(!SpawnBeforeCleanupReady(host,completed,pending.owner,pending.before),"earlier divergent parent cannot be concealed by a later cleanup replay"))return false;
+    pending.owner.id={1,2,3,4};pending.anchor.id={5,6,7,8};pending.children={{{9,0,0,0},{10,0,0,0},{0,0,1}}};host={pending};
+    if(!check(PendingSpawnUsesEntity(host,pending.owner.id) && PendingSpawnUsesEntity(host,pending.anchor.id) &&
+        PendingSpawnUsesEntity(host,pending.children[0].entity),"retirement waits for pending birth owner, anchor and child identities"))return false;
+    if(!check(!PendingSpawnUsesEntity({},pending.owner.id) && !PendingSpawnUsesEntity(host,{11,0,0,0}) && !PendingSpawnUsesEntity(host,{}),
+        "completed, unrelated and null identities cannot block retirement"))return false;
+    host[0].owner.peer=1;host[0].anchor.peer=2;
+    if(!check(!PendingSpawnUsesEntity(host,pending.owner.id) && !PendingSpawnUsesEntity(host,pending.anchor.id),
+        "stable human references cannot alias a non-human retirement identity"))return false;
     REXLOG_INFO("Spawn batch codec passed {} portable parent/child identity, zero-birth, scalar and malformed-payload checks; no native spawn replay assertion",checks);return true;
 }
 }

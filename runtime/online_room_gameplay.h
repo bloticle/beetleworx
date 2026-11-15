@@ -75,6 +75,7 @@ public:
     bool SuppressSpawnBatch(const PPCContext&,uint8_t*,unsigned depth);
     bool PrepareSpawnReplay(PPCContext&,uint8_t*,unsigned depth);
     bool PrepareSpawnerCleanup(PPCContext&,uint8_t*);
+    bool DeferSpawnerRetirement(const PPCContext&,uint8_t*);
     NativeImpactMode ProjectileImpactMode(const SpawnId&,uint32_t caller);
     bool RecordProjectileImpact(ProjectileImpact);
     NativeImpactMode ShooterLaunchMode(std::span<const SpawnId>,uint32_t caller);

@@ -29,11 +29,11 @@ using Clock=std::chrono::steady_clock;
 using Bytes=std::vector<uint8_t>;
 constexpr size_t Window=64,MaxPacket=8192,MaxQueued=2*1024*1024;
 constexpr size_t MaxAuthorityPacket=1024*1024;
-constexpr uint8_t WireVersion=25;
+constexpr uint8_t WireVersion=26;
 static_assert(109+16*31+kAuthorityCharacterBatch*46<=MaxPacket);
 constexpr size_t MaxEncodedDamage=6+16+16+2+32+1+kMaxDamageStimuli*12+2+2+kMaxDamageShapeKeys*4+3+kMaxDamageTag;
 static_assert(MaxEncodedDamage<=kMaxDamageEventBytes);
-static_assert(109+16*38+kAuthorityCharacterBatch*46+kAuthorityDamageBatch*(2+MaxEncodedDamage)+2+kAuthorityAiDecisionBatch*39+2+kAuthoritySpawnBatch*(2+kMaxSpawnBatchBytes)+2+kAuthorityImpactBatch*(2+kMaxImpactBytes)+2+kAuthorityLaunchBatch*(2+kMaxLaunchBytes)+2+kAuthorityRetirementBatch*16<=MaxAuthorityPacket);
+static_assert(109+16*38+kAuthorityCharacterBatch*46+kAuthorityDamageBatch*(2+MaxEncodedDamage)+2+kAuthorityAiDecisionBatch*39+2+kAuthoritySpawnBatch*(2+kMaxSpawnBatchBytes)+2+kAuthorityImpactBatch*(2+kMaxImpactBytes)+2+kAuthorityLaunchBatch*(2+kMaxLaunchBytes)+2+kAuthorityRetirementBatch*16+2+kAuthorityLiveSpawnerBatch*16<=MaxAuthorityPacket);
 static_assert(MaxAuthorityPacket+16*4096<=MaxQueued); // One incomplete frame plus the bounded Poll read burst.
 constexpr auto Timeout=std::chrono::seconds(15);
 constexpr auto StartupTimeout=std::chrono::seconds(180);
@@ -81,6 +81,9 @@ bool ValidAuthorityActors(const RoomAuthorityState& state){
     std::set<SpawnId> retired;
     for(const auto& id:state.retired_entities)if(!std::any_of(id.begin(),id.end(),[](auto n){return n!=0;}) ||
         !retired.insert(id).second || ids.contains(id))return false;
+    if(state.live_spawners.size()>kAuthorityLiveSpawnerBatch || !std::is_sorted(state.live_spawners.begin(),state.live_spawners.end()) ||
+       std::adjacent_find(state.live_spawners.begin(),state.live_spawners.end())!=state.live_spawners.end())return false;
+    for(const auto& id:state.live_spawners)if(!std::any_of(id.begin(),id.end(),[](auto n){return n!=0;}) || retired.contains(id))return false;
     if(state.ai_decisions.size()>kAuthorityAiDecisionBatch)return false;
     for(const auto& decision:state.ai_decisions){
         const auto nonzero=[](const auto& id){return std::any_of(id.begin(),id.end(),[](auto word){return word!=0;});};
@@ -137,6 +140,7 @@ void WriteAuthorityState(Bytes& bytes,const RoomAuthorityState& state){
     U64(bytes,state.shooter_launches.size(),2);
     for(const auto& launch:state.shooter_launches){const auto encoded=EncodeShooterLaunch(launch);U64(bytes,encoded.size(),2);bytes.insert(bytes.end(),encoded.begin(),encoded.end());}
     U64(bytes,state.retired_entities.size(),2);for(const auto& id:state.retired_entities)for(auto word:id)U64(bytes,word,4);
+    U64(bytes,state.live_spawners.size(),2);for(const auto& id:state.live_spawners)for(auto word:id)U64(bytes,word,4);
 }
 bool ReadAuthorityState(Reader& reader,RoomAuthorityState& state){
     state.tick=reader.Number(8);state.roster_revision=reader.Number(8);for(auto& byte:state.world)byte=reader.Byte();
@@ -185,6 +189,8 @@ bool ReadAuthorityState(Reader& reader,RoomAuthorityState& state){
     }
     const auto retired=reader.Number(2);if(!reader.good || retired>kAuthorityRetirementBatch || retired*16>reader.bytes.size()-reader.at)return false;
     for(unsigned i=0;i<retired;++i){SpawnId id;for(auto& word:id)word=uint32_t(reader.Number(4));state.retired_entities.push_back(id);}
+    const auto live=reader.Number(2);if(!reader.good || live>kAuthorityLiveSpawnerBatch || live*16>reader.bytes.size()-reader.at)return false;
+    for(unsigned i=0;i<live;++i){SpawnId id;for(auto& word:id)word=uint32_t(reader.Number(4));state.live_spawners.push_back(id);}
     return reader.Done() && ValidAuthorityActors(state);
 }
 std::string HashText(const Hash& hash){
@@ -2211,7 +2217,8 @@ bool TestOnlineRoom(){
         event_state.shooter_launches.push_back(std::move(launch));
     }
     for(unsigned i=0;i<kAuthorityRetirementBatch;++i)event_state.retired_entities.push_back({0x4456,i+1,0,0});
-    for(unsigned mutation=0;mutation<25;++mutation){auto bad=event_state;
+    for(unsigned i=0;i<kAuthorityLiveSpawnerBatch;++i)event_state.live_spawners.push_back({0x5567,i+1,0,0});
+    for(unsigned mutation=0;mutation<30;++mutation){auto bad=event_state;
         if(mutation==0)bad.damages.push_back(large_event);
         if(mutation==1)bad.damages.front().stimuli.front().effective_bits=0x7fc00000;
         if(mutation==2){bad.damages.front().target={};bad.damages.front().target_peer=0;}
@@ -2237,6 +2244,11 @@ bool TestOnlineRoom(){
         if(mutation==22)bad.retired_entities.front()={};
         if(mutation==23)bad.retired_entities.back()=bad.retired_entities.front();
         if(mutation==24)bad.retired_entities.front()=bad.characters.front().id;
+        if(mutation==25)bad.live_spawners.push_back({0x5567,2048,0,0});
+        if(mutation==26)bad.live_spawners.front()={};
+        if(mutation==27)bad.live_spawners.back()=bad.live_spawners.front();
+        if(mutation==28)std::swap(bad.live_spawners[0],bad.live_spawners[1]);
+        if(mutation==29)bad.retired_entities.front()=bad.live_spawners.front();
         check(rooms[0]->TryPublishAuthorityState(bad)==AuthorityPublishResult::Rejected && !rooms[0]->impl_->authority_sent,
             "invalid or oversized damage batches do not consume publication order");
     }

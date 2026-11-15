@@ -51,6 +51,7 @@ struct RoomCharacterState {
     bool operator==(const RoomCharacterState&)const=default;
 };
 inline constexpr size_t kAuthorityRetirementBatch=256;
+inline constexpr size_t kAuthorityLiveSpawnerBatch=1024;
 struct RoomAuthorityState {
     uint64_t tick=0,roster_revision=0;
     std::array<uint8_t,32> world{};
@@ -66,6 +67,7 @@ struct RoomAuthorityState {
     std::vector<ProjectileImpact> projectile_impacts;
     std::vector<ShooterLaunch> shooter_launches;
     std::vector<SpawnId> retired_entities;
+    std::vector<SpawnId> live_spawners; // Sorted host registry inventory, no native addresses.
     bool operator==(const RoomAuthorityState&)const=default;
 };
 struct RoomRollbackCommands {

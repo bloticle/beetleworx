@@ -47,5 +47,6 @@ SpawnEligibility EvaluateSpawnEligibility(std::span<const SpawnBatch> host,std::
 // Admit only the next exact host operation while its pre-state still exists.
 bool SpawnBeforeCleanupReady(std::span<const SpawnBatch> host,std::span<const SpawnBatch> completed,
     const SpawnReference& owner,const std::array<uint32_t,3>& state);
+bool PendingSpawnUsesEntity(std::span<const SpawnBatch>,const SpawnId&);
 bool TestSpawnBatchCodec();
 }

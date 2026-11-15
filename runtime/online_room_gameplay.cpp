@@ -958,7 +958,11 @@ bool NativeRoomGameplay::Deliver(PPCContext& ctx,uint8_t* base){
             return s.Stop("Host Shooter launches require the matching private native launch adapter");
         if(!s.pending_authority->retired_entities.empty() && (!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_entity_retirements)))
             return s.Stop("Host entity retirements require the matching private native adapter");
+        if(!s.pending_authority->live_spawners.empty() && (!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_entity_retirements)))
+            return s.Stop("Host spawner lifetime inventory requires the matching native adapter");
         if(REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_entity_retirements)){
+            s.authority_entities.insert(s.pending_authority->live_spawners.begin(),s.pending_authority->live_spawners.end());
+            for(const auto& batch:s.pending_authority->spawn_batches)if(!batch.owner.peer)s.authority_entities.insert(batch.owner.id);
             for(const auto& actor:s.pending_authority->characters)s.authority_entities.insert(actor.id);
             for(const auto& command:s.pending_authority->ai_decisions)s.authority_entities.insert(command.owner);
             for(const auto& batch:s.pending_authority->spawn_batches)if(!batch.shooter && batch.collection)
@@ -1135,6 +1139,13 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
                 world.erase(std::remove_if(world.begin(),world.end(),[&](const auto& character){return std::find(player_ids.begin(),player_ids.end(),character.id)!=player_ids.end();}),world.end());
                 if(ready && REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_entity_retirements)){
                     for(const auto& actor:world)s.authority_entities.insert(actor.id);
+                    // Canonical native registration index 40 is TemplateSpawner.
+                    // Validate its actual component type before publishing IDs.
+                    for(const auto& row:entities.records)if((row.component_mask[5]&1) &&
+                        std::find(player_ids.begin(),player_ids.end(),row.id)==player_ids.end()){
+                        if(!NamedComponent(base,row.debug_address,"TemplateSpawnerComponent") || state.live_spawners.size()>=kAuthorityLiveSpawnerBatch){ready=false;break;}
+                        state.live_spawners.push_back(row.id);s.authority_entities.insert(row.id);
+                    }
                     for(auto it=s.authority_entities.begin();it!=s.authority_entities.end();){
                         const auto found=std::lower_bound(entities.records.begin(),entities.records.end(),*it,[](const auto& row,const auto& id){return row.id<id;});
                         if(found!=entities.records.end() && found->id==*it){++it;continue;}
@@ -1337,6 +1348,7 @@ bool NativeRoomGameplay::RecordSpawnBatch(SpawnBatch batch,uint32_t owner,uint32
             s.owned_projectiles.insert(child.entity);
         }
     }
+    if(REXCVAR_GET(em2_probe_room_entity_retirements) && !batch.owner.peer)s.authority_entities.insert(batch.owner.id);
     if(REXCVAR_GET(em2_probe_room_entity_retirements) && !batch.shooter && batch.collection){
         for(const auto& child:batch.children)s.authority_entities.insert(child.entity);
         if(s.authority_entities.size()>65536)return s.Stop("Native collection authority inventory exceeds bound");
@@ -1548,10 +1560,9 @@ bool NativeRoomGameplay::ReplayEntityRetirements(PPCContext& ctx,uint8_t* base,b
     for(const auto& id:commands){
         if(s.retirements_applied.contains(id))continue;
         if(!s.authority_entities.contains(id))return s.Stop("Host retirement refers to an entity outside the authority inventory");
-        bool pending_birth=false;
-        for(size_t i=s.spawn_batches.size();i<s.pending_authority->spawn_batches.size();++i)
-            for(const auto& child:s.pending_authority->spawn_batches[i].children)pending_birth|=child.entity==id;
-        if(pending_birth){if(!required)continue;return s.Stop("Host retirement still precedes its missing native birth");}
+        if(s.spawn_batches.size()>s.pending_authority->spawn_batches.size())return s.Stop("Retirement encountered an invalid completed birth prefix");
+        const auto pending=std::span<const SpawnBatch>(s.pending_authority->spawn_batches).subspan(s.spawn_batches.size());
+        if(PendingSpawnUsesEntity(pending,id)){if(!required)continue;return s.Stop("Host retirement still precedes a birth dependency");}
         std::vector<OnlineNameActor> players;uint64_t local=0;
         if(!NameTagActors(players,local,base))return s.Stop("Native retirement lost current human actor bindings");
         std::vector<uint32_t> humans;for(const auto& player:players)humans.push_back(player.entity);
@@ -1563,6 +1574,26 @@ bool NativeRoomGameplay::ReplayEntityRetirements(PPCContext& ctx,uint8_t* base,b
         s.retirements_applied.insert(id);s.authority_entities.erase(id);
         REXLOG_INFO("Native host entity retirement replayed: tick {} GUID {:08X}/{:08X}/{:08X}/{:08X}, original request {}; registry absence verified",tick,id[0],id[1],id[2],id[3],requested);
     }
+    return true;
+}
+bool NativeRoomGameplay::DeferSpawnerRetirement(const PPCContext& ctx,uint8_t* base){
+    Environment environment;em2::GuestReadBatch reads;auto& s=*impl_;uint64_t tick=0;
+    // Health update and GUID DestroyEntity requests have void contracts.
+    // Other destruction paths remain native until their callbacks are mapped.
+    if((uint32_t(ctx.lr)!=0x827CFC44 && uint32_t(ctx.lr)!=0x827452A8) || !REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_entity_retirements) ||
+       !s.Owner() || !s.Configured() || s.stopped || s.peer==1 || !s.pending || !s.delivered || s.load_depth || s.transition_pending ||
+       !s.pending_authority || ctx.r3.u32!=s.registry || !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed ||
+       s.pending_authority->tick!=tick || s.AnnouncedLoadCancellation(tick))return false;
+    const auto entity=ctx.r4.u32;
+    if(!Readable(entity,96,base) || PPC_LOAD_U32(entity)!=0x8208D908 || s.HumanPeer(entity) ||
+       !NamedComponent(base,entity,"TemplateSpawnerComponent"))return false;
+    SpawnId id;for(unsigned i=0;i<4;++i)id[i]=PPC_LOAD_U32(entity+4+i*4);
+    const bool alive=std::binary_search(s.pending_authority->live_spawners.begin(),s.pending_authority->live_spawners.end(),id);
+    if(s.spawn_batches.size()>s.pending_authority->spawn_batches.size())return false;
+    const auto pending=std::span<const SpawnBatch>(s.pending_authority->spawn_batches).subspan(s.spawn_batches.size());
+    const bool retiring=std::find(s.pending_authority->retired_entities.begin(),s.pending_authority->retired_entities.end(),id)!=s.pending_authority->retired_entities.end();
+    if(!alive && !(retiring && PendingSpawnUsesEntity(pending,id)))return false;
+    REXLOG_INFO("Native guest spawner retirement deferred: tick {} GUID {:08X}/{:08X}/{:08X}/{:08X}, host alive {}, pending host dependency {}; original registry/components retained",tick,id[0],id[1],id[2],id[3],alive,!alive);
     return true;
 }
 bool NativeRoomGameplay::PrepareSpawnerCleanup(PPCContext& ctx,uint8_t* base){

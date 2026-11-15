@@ -1,4 +1,5 @@
 #include "native_entity_lifetime.h"
+#include "online_room_gameplay.h"
 #include "guest_read_batch.h"
 #include "simulation.h"
 #include "native_projectile_impact.h"
@@ -15,6 +16,7 @@
 #include <string>
 REXCVAR_DECLARE(bool,em2_private_profile);
 REXCVAR_DECLARE(bool,em2_probe_room_world_damage_events);
+REXCVAR_DECLARE(bool,em2_probe_room_entity_retirements);
 
 PPC_EXTERN_FUNC(__imp__sub_82747E08); // Registry inserts handle/entity maps.
 PPC_EXTERN_FUNC(__imp__sub_827448B0); // Registry removes both maps.
@@ -83,7 +85,10 @@ void TraceLifecycle(const char* action,const PPCContext& ctx,uint8_t* base){
 PPC_FUNC_IMPL(sub_82747E08){TraceLifecycle("insert",ctx,base);Mutation mutation;(test_calls?test_calls->insert:__imp__sub_82747E08)(ctx,base);}
 PPC_FUNC_IMPL(sub_827448B0){TraceLifecycle("remove",ctx,base);Mutation mutation;(test_calls?test_calls->remove:__imp__sub_827448B0)(ctx,base);}
 PPC_FUNC_IMPL(sub_82517E50){Mutation mutation;(test_calls?test_calls->identity:__imp__sub_82517E50)(ctx,base);}
-PPC_FUNC_IMPL(sub_82744E90){Mutation mutation;(test_calls?test_calls->teardown:__imp__sub_82744E90)(ctx,base);}
+PPC_FUNC_IMPL(sub_82744E90){
+    if(!test_calls && REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_entity_retirements))
+        if(auto* gameplay=em2::net::CurrentNativeRoomGameplay();gameplay && gameplay->DeferSpawnerRetirement(ctx,base))return;
+    TraceLifecycle("teardown",ctx,base);Mutation mutation;(test_calls?test_calls->teardown:__imp__sub_82744E90)(ctx,base);}
 PPC_FUNC_IMPL(sub_827437B0){
     // Empty updates must not invalidate every older world snapshot. The native
     // method itself reads this count before visiting pending entity callbacks.
