@@ -91,6 +91,7 @@ public:
 private:
     bool ReplayMissingSpawns(PPCContext&,uint8_t*,const SpawnReference* stop_before=nullptr);
     bool ReplayProjectileImpacts(PPCContext&,uint8_t*);
+    bool ReplayEntityRetirements(PPCContext&,uint8_t*,bool required);
     bool ReplayShooterLaunches(PPCContext&,uint8_t*,bool required);
     bool RearmInputContext(uint64_t source_tick,PPCContext&,uint8_t*);
     struct Impl;

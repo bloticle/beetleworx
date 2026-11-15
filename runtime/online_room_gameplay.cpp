@@ -30,6 +30,7 @@
 #include "native_entity_probe.h"
 #include "native_entity_lifetime.h"
 #include "native_actor_health.h"
+#include "native_entity_retirement.h"
 #include "native_damage_event.h"
 #include "native_component_schema.h"
 #include "native_random.h"
@@ -60,6 +61,7 @@ REXCVAR_DEFINE_BOOL(em2_probe_room_spawn_eligibility,false,"Debug","Private spaw
 REXCVAR_DEFINE_BOOL(em2_probe_room_spawn_replay,false,"Debug","Private spawn authority: replay missing Shooter preparation and pending-shot setup; requires batch capture and eligibility");
 REXCVAR_DECLARE(std::string,em2_room_probe_role);
 REXCVAR_DEFINE_BOOL(em2_probe_room_collection_drift,false,"Debug","Isolated native Room QA only: omit one matching Lua collection birth at tick 800 or later to require native host replay");
+REXCVAR_DEFINE_BOOL(em2_probe_room_entity_retirements,false,"Debug","Private authority: transmit confirmed native NPC removals and replay original retirement/flush on the guest");
 REXCVAR_DEFINE_BOOL(em2_probe_room_projectile_impacts,false,"Debug","Private authority: host-owned impact/retirement and native FX replay for captured Shooter projectiles");
 REXCVAR_DEFINE_BOOL(em2_probe_room_shooter_launches,false,"Debug","Private authority: host-owned pending-shot launch timing, native velocity setup and launch FX");
 PPC_EXTERN_FUNC(__imp__sub_828B92A8);
@@ -259,6 +261,7 @@ struct NativeRoomGameplay::Impl {
     bool spawn_replaying=false,collection_drift_injected=false;
     std::vector<ProjectileImpact> projectile_impacts;
     std::set<SpawnId> owned_projectiles;
+    std::set<SpawnId> authority_entities,retirements_applied;
     uint64_t projectile_load=0;
     bool impacts_applied=false;
     std::vector<ShooterLaunch> shooter_launches;
@@ -913,7 +916,7 @@ bool NativeRoomGameplay::Commit(const RoomFrame& frame,PPCContext& ctx,uint8_t* 
     if(!s.started)REXLOG_INFO("Native Room gameplay first frame consumed: tick {}, delay {}, physical source {}, native slot {}; native update and world verification still required",
         frame.tick,s.identity.input_delay,s.physical,s.slot);
     s.consumed_passive=s.prepared_passive;s.prepared_passive=false;
-    s.committed=frame.tick;s.consumed=frame;s.pending=true;s.delivered=false;s.started=true;s.prepared.reset();s.submitted.reset();s.damage_events.clear();s.ai_decisions.clear();s.spawn_batches.clear();s.projectile_impacts.clear();s.shooter_launches.clear();s.launch_cursor=0;s.impacts_applied=false;s.ai_cursor=0;return true;
+    s.committed=frame.tick;s.consumed=frame;s.pending=true;s.delivered=false;s.started=true;s.prepared.reset();s.submitted.reset();s.damage_events.clear();s.ai_decisions.clear();s.spawn_batches.clear();s.projectile_impacts.clear();s.shooter_launches.clear();s.launch_cursor=0;s.impacts_applied=false;s.ai_cursor=0;s.retirements_applied.clear();return true;
 }
 bool NativeRoomGameplay::Deliver(PPCContext& ctx,uint8_t* base){
     Environment environment;Context context(ctx);auto& s=*impl_;Impl::FaultOnThrow fault{s};uint64_t tick=0;
@@ -944,6 +947,15 @@ bool NativeRoomGameplay::Deliver(PPCContext& ctx,uint8_t* base){
             return s.Stop("Host projectile impacts require the matching private native impact adapter");
         if(!s.pending_authority->shooter_launches.empty() && (!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_shooter_launches)))
             return s.Stop("Host Shooter launches require the matching private native launch adapter");
+        if(!s.pending_authority->retired_entities.empty() && (!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_entity_retirements)))
+            return s.Stop("Host entity retirements require the matching private native adapter");
+        if(REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_entity_retirements)){
+            for(const auto& actor:s.pending_authority->characters)s.authority_entities.insert(actor.id);
+            for(const auto& command:s.pending_authority->ai_decisions)s.authority_entities.insert(command.owner);
+            for(const auto& batch:s.pending_authority->spawn_batches)if(!batch.shooter && batch.collection)
+                for(const auto& child:batch.children)s.authority_entities.insert(child.entity);
+            if(s.authority_entities.size()>65536)return s.Stop("Native entity authority inventory exceeds bound");
+        }
         if(!s.pending_authority->damages.empty()){
             const char* error=nullptr;
             std::vector<OnlineNameActor> players;uint64_t local_player=0;
@@ -1039,8 +1051,10 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
     if(REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_spawn_batches) && s.peer!=1){
         if(REXCVAR_GET(em2_probe_room_shooter_launches) && !ReplayShooterLaunches(ctx,base,false))return false;
         if(REXCVAR_GET(em2_probe_room_projectile_impacts) && !ReplayProjectileImpacts(ctx,base))return false;
+        if(REXCVAR_GET(em2_probe_room_entity_retirements) && !ReplayEntityRetirements(ctx,base,false))return false;
         if(REXCVAR_GET(em2_probe_room_spawn_replay) && !ReplayMissingSpawns(ctx,base))return false;
         if(REXCVAR_GET(em2_probe_room_shooter_launches) && !ReplayShooterLaunches(ctx,base,true))return false;
+        if(REXCVAR_GET(em2_probe_room_entity_retirements) && !ReplayEntityRetirements(ctx,base,true))return false;
         if(!s.pending_authority || s.spawn_batches!=s.pending_authority->spawn_batches)
             return s.Stop("Native spawn batch capture differs from host; spawn replay remains unimplemented");
         if(!s.spawn_batches.empty())REXLOG_INFO("Native host spawn batch capture matched: tick {}, batches {}; original births and bookkeeping compared, no replay",tick,s.spawn_batches.size());
@@ -1105,6 +1119,16 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
                 em2::NativeEntitySnapshot entities;const char* error=nullptr;uint32_t address=0;
                 ready=em2::ReadNativeEntitySnapshot(base,entities,error,address,false);
                 world.erase(std::remove_if(world.begin(),world.end(),[&](const auto& character){return std::find(player_ids.begin(),player_ids.end(),character.id)!=player_ids.end();}),world.end());
+                if(ready && REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_entity_retirements)){
+                    for(const auto& actor:world)s.authority_entities.insert(actor.id);
+                    for(auto it=s.authority_entities.begin();it!=s.authority_entities.end();){
+                        const auto found=std::lower_bound(entities.records.begin(),entities.records.end(),*it,[](const auto& row,const auto& id){return row.id<id;});
+                        if(found!=entities.records.end() && found->id==*it){++it;continue;}
+                        if(state.retired_entities.size()>=kAuthorityRetirementBatch){ready=false;break;}
+                        state.retired_entities.push_back(*it);it=s.authority_entities.erase(it);
+                    }
+                    if(!state.retired_entities.empty())REXLOG_INFO("Native host entity retirements captured: tick {}, count {}; confirmed absent from full native registry",tick,state.retired_entities.size());
+                }
                 // Incremental batches keep even large inventories inside one
                 // bounded packet without stalling input behind a bulk transfer.
                 const auto count=std::min(world.size(),kAuthorityCharacterBatch);
@@ -1255,6 +1279,7 @@ std::optional<size_t> NativeRoomGameplay::BeginAiTargetDecision(uint32_t brain,u
     Environment preserve;em2::GuestReadBatch reads;auto& s=*impl_;uint64_t tick=0;std::array<uint32_t,4> owner;
     if(s.peer!=1 || !s.AiScope(brain,base,owner,tick))return {};
     if(s.ai_decisions.size()>=kAuthorityAiDecisionBatch){s.Stop("Native AI target decision batch exceeds bound");return {};}
+    if(REXCVAR_GET(em2_probe_room_entity_retirements))s.authority_entities.insert(owner);
     const auto ticket=s.ai_decisions.size();RoomAiTargetDecision decision;decision.owner=owner;s.ai_decisions.push_back(decision);return ticket;
 }
 bool NativeRoomGameplay::RecordSpawnBatch(SpawnBatch batch,uint32_t owner,uint32_t anchor,uint8_t* base){
@@ -1279,6 +1304,10 @@ bool NativeRoomGameplay::RecordSpawnBatch(SpawnBatch batch,uint32_t owner,uint32
             if(s.owned_projectiles.size()>=65536)return s.Stop("Native projectile authority inventory exceeds bound");
             s.owned_projectiles.insert(child.entity);
         }
+    }
+    if(REXCVAR_GET(em2_probe_room_entity_retirements) && !batch.shooter && batch.collection){
+        for(const auto& child:batch.children)s.authority_entities.insert(child.entity);
+        if(s.authority_entities.size()>65536)return s.Stop("Native collection authority inventory exceeds bound");
     }
     s.spawn_batches.push_back(std::move(batch));return true;
 }
@@ -1467,6 +1496,33 @@ bool NativeRoomGameplay::PrepareSpawnReplay(PPCContext& ctx,uint8_t* base,unsign
     ctx.r4.s64=expected.selection;ctx.r6.u64=expected.flag;
     return true;
 }
+bool NativeRoomGameplay::ReplayEntityRetirements(PPCContext& ctx,uint8_t* base,bool required){
+    auto& s=*impl_;Environment environment;uint64_t tick=0;
+    if(s.peer==1)return true;
+    if(!s.Owner() || !s.pending || !s.delivered || s.stopped || s.load_depth || s.transition_pending || !s.pending_authority ||
+       !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed || s.pending_authority->tick!=tick)
+        return s.Stop("Native retirement replay lost its owned authority tick");
+    const auto commands=s.pending_authority->retired_entities;
+    for(const auto& id:commands){
+        if(s.retirements_applied.contains(id))continue;
+        if(!s.authority_entities.contains(id))return s.Stop("Host retirement refers to an entity outside the authority inventory");
+        bool pending_birth=false;
+        for(size_t i=s.spawn_batches.size();i<s.pending_authority->spawn_batches.size();++i)
+            for(const auto& child:s.pending_authority->spawn_batches[i].children)pending_birth|=child.entity==id;
+        if(pending_birth){if(!required)continue;return s.Stop("Host retirement still precedes its missing native birth");}
+        std::vector<OnlineNameActor> players;uint64_t local=0;
+        if(!NameTagActors(players,local,base))return s.Stop("Native retirement lost current human actor bindings");
+        std::vector<uint32_t> humans;for(const auto& player:players)humans.push_back(player.entity);
+        bool requested=false;const char* error=nullptr;
+        if(!em2::ReplayNativeEntityRetirement(ctx,base,s.registry,id,humans,requested,error))
+            return s.Stop(std::string("Native host retirement replay failed: ")+(error?error:"unknown"));
+        if(CurrentNativeRoomGameplay()!=this || !s.Configured() || !s.pending_authority || s.pending_authority->tick!=tick || s.load_depth || s.transition_pending)
+            return s.Stop("Native retirement replay left its original world");
+        s.retirements_applied.insert(id);s.authority_entities.erase(id);
+        REXLOG_INFO("Native host entity retirement replayed: tick {} GUID {:08X}/{:08X}/{:08X}/{:08X}, original request {}; registry absence verified",tick,id[0],id[1],id[2],id[3],requested);
+    }
+    return true;
+}
 bool NativeRoomGameplay::ReplayMissingSpawns(PPCContext& ctx,uint8_t* base,const SpawnReference* stop_before){
     auto& s=*impl_;uint64_t tick=0;Environment environment;
     if(!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_spawn_batches) || !REXCVAR_GET(em2_probe_room_spawn_eligibility) ||
@@ -1585,7 +1641,20 @@ bool NativeRoomGameplay::ReplayAiTargetDecision(PPCContext& ctx,uint8_t* base){
     if(s.peer==1 || !REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_ai_targets))return false;
     if(!s.AiScope(ctx.r3.u32,base,owner,tick))return s.stopped;
     const auto fail=[&](const char* message){s.Stop(message);return true;};
-    if(!s.pending_authority || s.ai_cursor>=s.pending_authority->ai_decisions.size())return fail("Guest AI selector has no matching host decision");
+    if(!s.pending_authority || s.ai_cursor>s.pending_authority->ai_decisions.size())return fail("Guest AI selector has no valid host decision batch");
+    const auto& decisions=s.pending_authority->ai_decisions;
+    if(s.ai_cursor==decisions.size() || decisions[s.ai_cursor].owner!=owner){
+        const bool remaining=std::any_of(decisions.begin()+s.ai_cursor,decisions.end(),[&](const auto& command){return command.owner==owner;});
+        const bool retiring=REXCVAR_GET(em2_probe_room_entity_retirements) && s.authority_entities.contains(owner) &&
+            std::find(s.pending_authority->retired_entities.begin(),s.pending_authority->retired_entities.end(),owner)!=s.pending_authority->retired_entities.end();
+        if(!remaining && retiring){
+            REXLOG_INFO("Native retiring NPC selector skipped: tick {} owner {:08X}/{:08X}/{:08X}/{:08X}; explicit host retirement pending, no target choice or command consumed",tick,owner[0],owner[1],owner[2],owner[3]);
+            return true;
+        }
+        REXLOG_ERROR("Native AI decision mismatch: tick {} local owner {:08X}/{:08X}/{:08X}/{:08X}, consumed {}/{}, host owner remaining {}, explicit retirement {}",
+            tick,owner[0],owner[1],owner[2],owner[3],s.ai_cursor,decisions.size(),remaining,retiring);
+        return fail(s.ai_cursor==decisions.size()?"Guest AI selector has no matching host decision":"Guest AI selector owner/order differs from host decision");
+    }
     // Native target-change callbacks can enter a load. Keep this small command
     // independent of the pending packet's storage across those callbacks.
     const auto decision=s.pending_authority->ai_decisions[s.ai_cursor++];

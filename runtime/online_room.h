@@ -50,6 +50,7 @@ struct RoomCharacterState {
     std::optional<int32_t> health;
     bool operator==(const RoomCharacterState&)const=default;
 };
+inline constexpr size_t kAuthorityRetirementBatch=256;
 struct RoomAuthorityState {
     uint64_t tick=0,roster_revision=0;
     std::array<uint8_t,32> world{};
@@ -62,6 +63,7 @@ struct RoomAuthorityState {
     std::vector<SpawnBatch> spawn_batches;
     std::vector<ProjectileImpact> projectile_impacts;
     std::vector<ShooterLaunch> shooter_launches;
+    std::vector<SpawnId> retired_entities;
     bool operator==(const RoomAuthorityState&)const=default;
 };
 struct RoomRollbackCommands {

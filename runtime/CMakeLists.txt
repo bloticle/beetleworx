@@ -511,6 +511,7 @@ target_sources(EM2Recomp PRIVATE native_frame_checkpoint_probe.cpp)
 target_sources(EM2Recomp PRIVATE native_input_history_checkpoint.cpp)
 target_sources(EM2Recomp PRIVATE native_physics_bridge_checkpoint.cpp)
 target_sources(EM2Recomp PRIVATE native_entity_lifetime.cpp)
+target_sources(EM2Recomp PRIVATE native_entity_retirement.cpp)
 target_sources(EM2Recomp PRIVATE native_deferred_entity_checkpoint.cpp)
 
 target_sources(EM2Recomp PRIVATE em1_audio_output.cpp)
