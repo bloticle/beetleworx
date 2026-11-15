@@ -82,6 +82,12 @@ struct Owner {
         // first error/report, while still allowing the native owner above to
         // drain its TLS history if the failure began on the prelaunch worker.
         if(Status().state==NativeSessionState::Failed)return;
+        // Native gameplay deliberately disconnects transport after a failed
+        // transaction. Preserve that causal error instead of presenting the
+        // resulting socket loss as a startup failure. Only its owner may read
+        // the gameplay adapter; the prelaunch poller never touches it.
+        if(thread.load(std::memory_order_acquire)==GetCurrentThreadId() && gameplay.halted() && !gameplay.error().empty())
+            error=gameplay.error();
         if(room){
             Environment preserve_report;
             try{
@@ -140,7 +146,7 @@ bool PollOwned(Owner& owner,Clock::time_point now){
     PumpOnlineChat(owner.room.get());
     const auto state=owner.room->state();
     if(state!=RoomState::Loading && state!=RoomState::Bootstrapping && state!=RoomState::Running){
-        owner.Fail(owner.room->error().empty()?"The Room disconnected during native startup.":owner.room->error());return false;
+        owner.Fail(owner.room->error().empty()?"The online session disconnected.":owner.room->error());return false;
     }
     if(owner.gate.active() && !owner.gate.error().empty()){owner.Fail(owner.gate.error());return false;}
     return true;

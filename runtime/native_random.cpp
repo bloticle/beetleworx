@@ -529,8 +529,9 @@ bool em2::TestNativeRandom() {
     return true;
 }
 
-// Bounded private diagnosis of template spawns around a captured random mismatch.
-// Observes original calls; does not isolate RNG or change spawn eligibility.
+// Capture complete original template-spawn operations. The private authority
+// adapter admits supported host inputs before entry; ordinary calls forward
+// unchanged. Collection storage and native child construction remain original.
 namespace {
 thread_local std::vector<em2::net::SpawnChild>* spawn_children=nullptr;
 thread_local unsigned spawn_depth=0;

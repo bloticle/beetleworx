@@ -387,6 +387,49 @@ Continuing projectile motion, immediate firing paths outside the pending list,
 general world births, same-tick causal ordering and broader multiplayer
 transitions remain required. These private flags are not enabled in demo 14.
 
+## Script collection-spawn inputs (private)
+
+The tick-5524 engine-block mismatch is a separate, audited caller of the same
+native parent. Original `827B40B0` calls `827B3C60` at return `827B4178`, passes
+its live output collection, and ignores the returned entity while continuing
+its native loop. Both sides entered it, with equal pre-state/selection but
+different CRT states; the resulting entity GUIDs diverged.
+
+Private replay now binds both owner and anchor independently, validates the
+existing collection and unchanged spawner pre-state, and supplies the host
+selection/flag and CRT input before the original parent runs. The existing full
+capture comparison still requires all child identities/arguments, native return,
+counters and final random state to match. It does not replace the output array,
+rename entities, overwrite counters, or synthesize a missing script call. Only
+that audited collection caller and the existing Shooter caller are admitted;
+other world factories and nested paths remain unsupported.
+
+The isolated Autotopia rerun verifies the exact engineBlock 06 operation at
+5524 on both sides, including template `0013D073` and generated GUID
+`00002F10/00006DC0/0000562A/000014ED`. All 23 completed spawn batches match exactly. Both reach tick 6000;
+17 launches and 15 impacts replay in that run. The windows close normally with normal user
+files unchanged. This is a passed bounded integration, not a full campaign or
+complete enemy/world-state test. Evidence:
+`analysis/private-native-room-pair-20261115-113345-2469a00e/native-collection-spawn-integration-result.json`.
+Live executable SHA256:
+`80A2E1F79B54BA5D4562A22F15E1FFA5CD07AEC3FDA4D3562F9416B19CD999E8`.
+
+The retained runtime now preserves an owner-thread native gameplay error when
+that failure deliberately closes transport. A resulting disconnected socket
+must not replace the original cause with a misleading startup message. First
+failure/report preservation and the prelaunch thread boundary remain intact.
+
+The final source builds, and the same-executable rollback/Room regression passes
+9,091 Room checks plus the existing launch, impact, spawn, lifetime and native
+character-physics fixtures. Evidence:
+`analysis/native-collection-spawn-test-9dbbf3e804374cf89d31ed0e2f5ce8a2/rollback.log`.
+The canonical online-input/session regression also exits successfully, including
+retained-session first-failure/report preservation and owner-thread checks:
+`analysis/native-room-error-test-4aeb79927ec5466f8bba7de1fadebdf1/input.log`.
+This does not inject the specific new native gameplay failure branch.
+The bounded live run above precedes the diagnostic-message/comment-only edits;
+its recorded executable hash is retained rather than replaced with a later one.
+
 ## GUID mutation fence fixed
 
 Cloning assigns a new GUID after the entity is registered. Original

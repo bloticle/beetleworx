@@ -1373,24 +1373,36 @@ bool NativeRoomGameplay::PrepareSpawnReplay(PPCContext& ctx,uint8_t* base,unsign
         if(!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_spawn_batches) || !REXCVAR_GET(em2_probe_room_spawn_eligibility) ||
            !REXCVAR_GET(em2_probe_room_spawn_replay) || !s.Owner() || !s.Configured() || s.stopped || s.peer==1 || !s.pending ||
            s.load_depth || s.transition_pending || s.room->state()!=RoomState::Running)return true;
-        // Matching local firing calls also consume the host's inputs/RNG;
-        // authority must not depend on their independent random stream matching.
-        if(depth || uint32_t(ctx.lr)!=0x828B71C4)return true;
+        // Both audited native callers retain their original outer operation.
+        // 827B4178 is the collection-spawn loop in 827B40B0: it passes the
+        // live output array and ignores r3. Do not synthesize that array or
+        // replay the parent without its owning script operation.
+        if(depth || (uint32_t(ctx.lr)!=0x828B71C4 && uint32_t(ctx.lr)!=0x827B4178))return true;
     }
     const auto fail=[&](const char* reason){s.Stop(reason);return false;};
     if(s.stopped || !s.Owner() || s.peer==1 || !s.pending || s.load_depth || s.transition_pending ||
        !s.pending_authority || !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed || s.pending_authority->tick!=tick ||
        s.spawn_batches.size()>=s.pending_authority->spawn_batches.size())return fail("Native spawn replay lost its owned tick or host command");
     const auto expected=s.pending_authority->spawn_batches[s.spawn_batches.size()];
-    if(depth || expected.depth || !expected.shooter || expected.collection || !expected.random_present ||
-       uint32_t(ctx.lr)!=0x828B71C4 || ctx.r7.u32 || ctx.r6.u32>1 || expected.owner!=expected.anchor)
-        return fail("Native spawn replay reached an unsupported firing path");
+    const bool firing=uint32_t(ctx.lr)==0x828B71C4 && expected.shooter && !expected.collection &&
+        !ctx.r7.u32 && ctx.r6.u32<=1 && expected.owner==expected.anchor;
+    const bool collection=uint32_t(ctx.lr)==0x827B4178 && !expected.shooter && expected.collection &&
+        ctx.r7.u32 && Readable(ctx.r7.u32,12,base) && ctx.r6.u32==1 && expected.flag;
+    if(depth || expected.depth || !expected.random_present || (!firing && !collection))
+        return fail("Native spawn replay reached an unsupported parent path");
     const auto component=ctx.r3.u32,anchor=ctx.r5.u32;
-    if(!Readable(component,148,base) || !Readable(anchor,20,base) || PPC_LOAD_U32(anchor)!=0x8208D908 ||
-       PPC_LOAD_U32(component+48)!=anchor-8)return fail("Native spawn replay owner/component binding differs from host");
-    SpawnReference owner;owner.peer=s.HumanPeer(anchor);
-    if(!owner.peer)for(unsigned i=0;i<4;++i)owner.id[i]=PPC_LOAD_U32(anchor+4+i*4);
-    if(owner!=expected.owner)return fail("Native spawn replay owner differs from the next host command");
+    if(!Readable(component,148,base))return fail("Native spawn replay component unavailable");
+    const auto attached=PPC_LOAD_U32(component+48);
+    if(!attached || attached>UINT32_MAX-8 || !Readable(attached+8,20,base) || PPC_LOAD_U32(attached+8)!=0x8208D908 ||
+       !Readable(anchor,20,base) || PPC_LOAD_U32(anchor)!=0x8208D908 || (firing && attached!=anchor-8))
+        return fail("Native spawn replay owner/component binding differs from host");
+    const auto reference=[&](uint32_t face){
+        SpawnReference ref;ref.peer=s.HumanPeer(face);
+        if(!ref.peer)for(unsigned i=0;i<4;++i)ref.id[i]=PPC_LOAD_U32(face+4+i*4);
+        return ref;
+    };
+    if(reference(attached+8)!=expected.owner || reference(anchor)!=expected.anchor)
+        return fail("Native spawn replay owner/anchor differs from the next host command");
     for(unsigned i=0;i<3;++i)if(PPC_LOAD_U32(component+(i==0?104:i==1?140:144))!=expected.before[i])
         return fail("Native spawn replay pre-state differs; counters are not blindly overwritten");
     if(!em2::SeedNativeSpawnReplay(ctx,base,expected.random_before))return fail("Native spawn replay cannot bind and seed its original CRT owner");
