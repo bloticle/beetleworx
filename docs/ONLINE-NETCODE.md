@@ -17,7 +17,8 @@ limits are recorded in [the correction notes](online-authority-correction-work.m
 
 Private death-reward replication work and its remaining native lifecycle failure
 are recorded in [the reward notes](online-death-reward-work.md). It remains
-disabled in public lobbies.
+disabled in public lobbies. The mapped cosmetic cleanup repair and subsequent
+level-entry identity mismatch are in [the particle retirement notes](online-particle-retirement-work.md).
 
 The following checkpoint results describe earlier deterministic-path checks.
 

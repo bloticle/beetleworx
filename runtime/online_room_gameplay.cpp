@@ -48,6 +48,7 @@
 #include <exception>
 #include <vector>
 #include <set>
+#include <map>
 #include <rex/cvar.h>
 REXCVAR_DECLARE(bool,em2_private_profile);
 REXCVAR_DEFINE_BOOL(em2_probe_room_authority_state,false,"Debug","Private native Room: publish real completed player positions/velocities over the host-state channel; does not apply corrections or disable proofs");
@@ -262,6 +263,9 @@ struct NativeRoomGameplay::Impl {
     std::vector<ProjectileImpact> projectile_impacts;
     std::set<SpawnId> owned_projectiles;
     std::set<SpawnId> authority_entities,retirements_applied;
+    struct PendingVisualRetirement {NativeVisualRetirement binding;unsigned active_updates=0;};
+    std::map<SpawnId,PendingVisualRetirement> visual_retirements;
+    std::optional<uint64_t> visual_retirement_tick;
     uint64_t projectile_load=0;
     bool impacts_applied=false;
     std::vector<ShooterLaunch> shooter_launches;
@@ -1600,6 +1604,29 @@ bool NativeRoomGameplay::ReplayEntityRetirements(PPCContext& ctx,uint8_t* base,b
        !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed || s.pending_authority->tick!=tick)
         return s.Stop("Native retirement replay lost its owned authority tick");
     const auto commands=s.pending_authority->retired_entities;
+    if(!s.visual_retirements.empty() && s.visual_retirement_tick!=tick && !s.game_over_entry && !s.consumed_passive && !s.cutscene_entry){
+        NativeEntitySnapshot snapshot;const char* error=nullptr;uint32_t address=0;uint64_t before=0,after=0;
+        if(!em2::SampleNativeEntityLifetimeRevision(before) || !ReadNativeEntitySnapshot(base,snapshot,error,address,false) || snapshot.registry!=s.registry ||
+           !em2::SampleNativeEntityLifetimeRevision(after) || before!=after)return s.Stop("Pending visual retirement registry changed during observation");
+        std::vector<OnlineNameActor> players;uint64_t local=0;
+        if(!NameTagActors(players,local,base))return s.Stop("Pending visual retirement lost human ownership");
+        std::vector<uint32_t> humans;for(const auto& player:players)humans.push_back(player.entity);
+        for(auto it=s.visual_retirements.begin();it!=s.visual_retirements.end();){
+            const auto row=std::lower_bound(snapshot.records.begin(),snapshot.records.end(),it->first,[](const auto& row,const auto& id){return row.id<id;});
+            if(row==snapshot.records.end() || row->id!=it->first){
+                const auto id=it->first;
+                REXLOG_INFO("Native visual retirement drained: tick {} GUID {:08X}/{:08X}/{:08X}/{:08X}, active updates {}; original registry absence verified",tick,id[0],id[1],id[2],id[3],it->second.active_updates);
+                s.authority_entities.erase(id);it=s.visual_retirements.erase(it);continue;
+            }
+            bool ready=false;
+            if(row->debug_address!=it->second.binding.entity || row->handle!=it->second.binding.handle ||
+               !em2::ReadNativeParticleRetirement(base,s.registry,row->debug_address,humans,ready))return s.Stop("Pending visual retirement changed identity, queue or native component ownership");
+            if(++it->second.active_updates>120)return s.Stop("Native particle retirement exceeded its bounded active-update drain window");
+            ++it;
+        }
+        if(!em2::SampleNativeEntityLifetimeRevision(after) || before!=after)return s.Stop("Native visual retirement lifetime changed during read-only observation");
+        s.visual_retirement_tick=tick;
+    }
     for(const auto& id:commands){
         if(s.retirements_applied.contains(id))continue;
         if(!s.authority_entities.contains(id))return s.Stop("Host retirement refers to an entity outside the authority inventory");
@@ -1609,12 +1636,20 @@ bool NativeRoomGameplay::ReplayEntityRetirements(PPCContext& ctx,uint8_t* base,b
         std::vector<OnlineNameActor> players;uint64_t local=0;
         if(!NameTagActors(players,local,base))return s.Stop("Native retirement lost current human actor bindings");
         std::vector<uint32_t> humans;for(const auto& player:players)humans.push_back(player.entity);
-        bool requested=false;const char* error=nullptr;
-        if(!em2::ReplayNativeEntityRetirement(ctx,base,s.registry,id,humans,requested,error))
+        bool requested=false;const char* error=nullptr;NativeVisualRetirement visual;
+        if(!em2::ReplayNativeEntityRetirement(ctx,base,s.registry,id,humans,requested,visual,error))
             return s.Stop(std::string("Native host retirement replay failed: ")+(error?error:"unknown"));
         if(CurrentNativeRoomGameplay()!=this || !s.Configured() || !s.pending_authority || s.pending_authority->tick!=tick || s.load_depth || s.transition_pending)
             return s.Stop("Native retirement replay left its original world");
-        s.retirements_applied.insert(id);s.authority_entities.erase(id);
+        s.retirements_applied.insert(id);
+        if(visual.entity){
+            if(s.visual_retirements.size()>=1024 || !s.visual_retirements.emplace(id,Impl::PendingVisualRetirement{visual,0}).second)
+                return s.Stop("Native pending visual retirement inventory exceeds its bound or repeats a command");
+            s.visual_retirement_tick=tick;
+            REXLOG_INFO("Native visual retirement awaiting drain: tick {} GUID {:08X}/{:08X}/{:08X}/{:08X}; original queued particle cleanup retained, no readiness override",tick,id[0],id[1],id[2],id[3]);
+            continue;
+        }
+        s.authority_entities.erase(id);
         REXLOG_INFO("Native host entity retirement replayed: tick {} GUID {:08X}/{:08X}/{:08X}/{:08X}, original request {}; registry absence verified",tick,id[0],id[1],id[2],id[3],requested);
     }
     return true;

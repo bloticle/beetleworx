@@ -1,4 +1,5 @@
 #include "native_entity_lifetime.h"
+#include "native_entity_retirement.h"
 #include "online_room_gameplay.h"
 #include "guest_read_batch.h"
 #include "simulation.h"
@@ -151,6 +152,7 @@ void Nested(PPCContext& ctx,uint8_t* base){
 void Throws(PPCContext&,uint8_t*){throw 7;}
 }
 bool em2::TestNativeEntityLifetime(){
+    if(!TestNativeParticleRetirement())return false;
     auto check=[](bool ok,const char* what){if(!ok)REXLOG_ERROR("Native entity lifetime: {}",what);return ok;};
     Calls calls{Forwarded,Forwarded,Forwarded,Forwarded,Forwarded};
     struct Reset {const Calls* previous=test_calls;~Reset(){test_calls=previous;}}reset;
