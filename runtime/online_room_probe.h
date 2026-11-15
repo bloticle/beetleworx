@@ -16,6 +16,9 @@ bool PreparePrivateRoomProbe(const std::filesystem::path& executable,
 // Call after BindNativeRoomThread. Default observation mode always votes false.
 // Explicit private gameplay mode instead installs the native Room adapter.
 bool InstallPrivateRoomProbe();
+// Only the process whose boot path validated a new isolated loopback probe.
+// Allows the existing native reload fixture at its exact scheduler boundary.
+bool PrivateNativeRoomGameplayProbeActive();
 // Explicit isolated loopback only. Supplies a counted synthetic SDK driver;
 // ordinary launches keep the real runtime input system. No wire pointers or
 // post-interpreter values are injected into authoritative frames.

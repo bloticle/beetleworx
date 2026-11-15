@@ -9,6 +9,10 @@
 #include <bit>
 #include <limits>
 #include <utility>
+#include <cmath>
+PPC_EXTERN_FUNC(__imp__sub_82473F58); // hkpRigidBody position setter + moved-body broadphase
+PPC_EXTERN_FUNC(__imp__sub_824741C0); // hkpRigidBody linear velocity setter / world operation
+PPC_EXTERN_FUNC(__imp__sub_8275C0C8); // entity world position -> native transform notifications
 
 namespace {
 using Character=em2::net::GameplayObservation::CharacterPhysics;
@@ -25,19 +29,24 @@ uint32_t Typed(uint8_t* base,uint32_t entity,unsigned kind,size_t size){
 }
 struct Binding {uint32_t entity=0,motion=0,physics=0,controller=0,body=0,position=0;Character value;};
 bool Sample(uint8_t* base,const Binding& b,Character& out){
-    if(!Readable(base,b.entity,96) || !Readable(base,b.motion,388) || !Readable(base,b.physics,180) ||
-       !Readable(base,b.controller,20) || !Readable(base,b.body,448) ||
-       Word(base,b.motion+48)!=b.entity-8 || Word(base,b.motion+80)!=b.physics ||
-       Word(base,b.physics+176)!=b.controller ||
-       Word(base,b.controller+16)!=b.body || Word(base,b.body)!=0x82030384 || Word(base,b.body+224)!=0x8202E5CC)return false;
+    if(!Readable(base,b.entity,96) || !Readable(base,b.motion,388) ||
+       Word(base,b.motion+48)!=b.entity-8 || Word(base,b.motion+80)!=b.physics)return false;
     Character value;for(unsigned i=0;i<4;++i)value.id[i]=Word(base,b.entity+4+i*4);
+    // Authored sequences retire a character's physics bridge/body while its
+    // entity and Motion component remain live. Absence is an explicit inactive
+    // sample, not a physical position, and must never dereference the old body.
+    if(!b.physics){out=value;return true;}
+    if(!Readable(base,b.physics,180) || Word(base,b.physics+176)!=b.controller)return false;
     value.active=PPC_LOAD_U8(b.physics+145)!=0;
     if(value.active){
-        if(!b.position || !Readable(base,b.position,184))return false;
+        if(!Readable(base,b.controller,20) || !Readable(base,b.body,448) || Word(base,b.controller+16)!=b.body ||
+           Word(base,b.body)!=0x82030384 || Word(base,b.body+224)!=0x8202E5CC || !b.position || !Readable(base,b.position,184))return false;
         value.state=Word(base,b.motion+384);
         for(unsigned i=0;i<3;++i){
             value.position[i]=Word(base,b.position+172+i*4);value.velocity[i]=Word(base,b.body+432+i*4);
-            if((value.position[i]&0x7f800000)==0x7f800000 || (value.velocity[i]&0x7f800000)==0x7f800000)return false;
+            if((value.position[i]&0x7f800000)==0x7f800000 || (value.velocity[i]&0x7f800000)==0x7f800000){
+                REXLOG_ERROR("Native character observation nonfinite: entity {:08X} body {:08X} axis {} position {:08X} velocity {:08X}",b.entity,b.body,i,value.position[i],value.velocity[i]);return false;
+            }
         }
     }
     out=value;return true;
@@ -48,7 +57,9 @@ bool em2::ReadNativeCharacterPhysics(uint8_t* base,std::vector<Character>& out){
     if(!Readable(base,0x833DAF54,1) || !Readable(base,0x833DBC3C,1))return false;
     NativeEntitySnapshot entities;const char* error=nullptr;uint32_t address=0;
     // Do not interpret positions of cameras, effects or unrelated entity types.
-    if(!ReadNativeEntitySnapshot(base,entities,error,address,false))return false;
+    if(!ReadNativeEntitySnapshot(base,entities,error,address,false)){
+        REXLOG_ERROR("Native character registry observation rejected: {} at {:08X}",error?error:"unknown",address);return false;
+    }
     const auto motion_kind=PPC_LOAD_U8(0x833DAF54),position_kind=PPC_LOAD_U8(0x833DBC3C);
     if(motion_kind>=entities.component_count || position_kind>=entities.component_count)return false;
     std::vector<Binding> bindings;std::vector<Character> values;
@@ -57,16 +68,20 @@ bool em2::ReadNativeCharacterPhysics(uint8_t* base,std::vector<Character>& out){
         Binding b;b.entity=entity.debug_address;b.motion=Typed(base,b.entity,motion_kind,388);
         if(!b.motion || Word(base,b.motion+48)!=b.entity-8)return false;
         b.physics=Word(base,b.motion+80);
-        if(!b.physics)continue;
-        if(!Readable(base,b.physics,180))return false;
-        b.controller=Word(base,b.physics+176);if(!b.controller)continue;
-        if(!Readable(base,b.controller,20))return false;
-        b.body=Word(base,b.controller+16);if(!b.body)continue;
-        if(!Readable(base,b.body,448))return false;
-        if(Word(base,b.body)!=0x82030384 || Word(base,b.body+224)!=0x8202E5CC)continue;
+        if(b.physics){
+            if(!Readable(base,b.physics,180))return false;
+            b.controller=Word(base,b.physics+176);
+            if(PPC_LOAD_U8(b.physics+145)){
+                if(!Readable(base,b.controller,20))return false;
+                b.body=Word(base,b.controller+16);if(!Readable(base,b.body,448))return false;
+                if(Word(base,b.body)!=0x82030384 || Word(base,b.body+224)!=0x8202E5CC)continue;
+            }
+        }
         if(bindings.size()==4096)return false;
         b.position=Typed(base,b.entity,position_kind,184);
-        if(!Sample(base,b,b.value) || b.value.id!=entity.id)return false;
+        if(!Sample(base,b,b.value) || b.value.id!=entity.id){
+            REXLOG_ERROR("Native character observation route rejected: entity {:08X} motion {:08X} physics {:08X} controller {:08X} body {:08X} position {:08X}",b.entity,b.motion,b.physics,b.controller,b.body,b.position);return false;
+        }
         bindings.push_back(b);values.push_back(b.value);
     }
     // Check the sampled routes and values again before publishing a whole set.
@@ -87,14 +102,52 @@ bool em2::ReadNativeActorPhysics(uint8_t* base,uint32_t entity,Character& out){
     const auto motion_kind=PPC_LOAD_U8(0x833DAF54),position_kind=PPC_LOAD_U8(0x833DBC3C);
     Binding b;b.entity=entity;b.motion=Typed(base,entity,motion_kind,388);
     if(!b.motion)return false;
-    b.physics=Word(base,b.motion+80);if(!Readable(base,b.physics,180))return false;
-    b.controller=Word(base,b.physics+176);if(!Readable(base,b.controller,20))return false;
-    b.body=Word(base,b.controller+16);b.position=Typed(base,entity,position_kind,184);
+    b.physics=Word(base,b.motion+80);
+    if(b.physics){if(!Readable(base,b.physics,180))return false;b.controller=Word(base,b.physics+176);
+        if(PPC_LOAD_U8(b.physics+145)){if(!Readable(base,b.controller,20))return false;b.body=Word(base,b.controller+16);}}
+    b.position=Typed(base,entity,position_kind,184);
     Character first,second;
     if(!Sample(base,b,first) || !Sample(base,b,second) || first!=second ||
        Typed(base,entity,motion_kind,388)!=b.motion || Typed(base,entity,position_kind,184)!=b.position ||
        PPC_LOAD_U8(0x833DAF54)!=motion_kind || PPC_LOAD_U8(0x833DBC3C)!=position_kind)return false;
     out=first;return true;
+}
+bool em2::CorrectNativeActorPhysics(PPCContext& ctx,uint8_t* base,uint32_t entity,
+    const std::array<float,3>& position,const std::array<float,3>& velocity){
+    HostState host;GuestReadBatch reads;
+    for(unsigned i=0;i<3;++i)if(!std::isfinite(position[i]) || !std::isfinite(velocity[i]) ||
+        std::abs(position[i])>1e7f || std::abs(velocity[i])>1e5f)return false;
+    Character observed;if(!ReadNativeActorPhysics(base,entity,observed) || !observed.active)return false;
+    const auto motion_kind=PPC_LOAD_U8(0x833DAF54);
+    const auto motion=Typed(base,entity,motion_kind,388),physics=Word(base,motion+80);
+    const auto controller=Word(base,physics+176),body=Word(base,controller+16);
+    // A body centre need not coincide with the entity's feet. Preserve its
+    // measured offset rather than assigning the feet coordinates to the body.
+    std::array<float,3> centre{};
+    for(unsigned i=0;i<3;++i){
+        centre[i]=std::bit_cast<float>(Word(base,body+288+i*4))+position[i]-std::bit_cast<float>(observed.position[i]);
+        if(!std::isfinite(centre[i]) || std::abs(centre[i])>1e7f)return false;
+    }
+    const auto top=ctx.r1.u32&~15u;
+    if(top<12288 || !Readable(base,top-8192,8192))return false;
+    struct Restore {
+        PPCContext& ctx;PPCContext saved;uint8_t* memory;std::array<uint8_t,8192> stack;
+        Restore(PPCContext& c,uint8_t* p):ctx(c),saved(c),memory(p){std::memcpy(stack.data(),p,stack.size());}
+        ~Restore(){std::memcpy(memory,stack.data(),stack.size());ctx=saved;}
+    } restore(ctx,base+top-8192);
+    const auto frame=top-4096,vector=frame+512;
+    auto invoke=[&](uint32_t target,const std::array<float,3>& value,auto function){
+        ctx=restore.saved;ctx.r1.u64=frame;PPC_STORE_U32(frame,restore.saved.r1.u32);
+        for(unsigned i=0;i<3;++i)PPC_STORE_U32(vector+i*4,std::bit_cast<uint32_t>(value[i]));
+        PPC_STORE_U32(vector+12,0);ctx.r3.u64=target;ctx.r4.u64=vector;function(ctx,base);
+    };
+    invoke(body,centre,__imp__sub_82473F58);
+    invoke(body,velocity,__imp__sub_824741C0);
+    invoke(entity,position,__imp__sub_8275C0C8);
+    Character corrected;if(!ReadNativeActorPhysics(base,entity,corrected) || corrected.id!=observed.id || !corrected.active)return false;
+    for(unsigned i=0;i<3;++i)if(std::abs(std::bit_cast<float>(corrected.position[i])-position[i])>0.002f ||
+        std::abs(std::bit_cast<float>(corrected.velocity[i])-velocity[i])>0.002f)return false;
+    return true;
 }
 bool em2::TestNativeCharacterPhysics(){
     HostState host;
@@ -137,6 +190,18 @@ bool em2::TestNativeCharacterPhysics(){
         for(unsigned axis=0;axis<3;++axis)observed.players[slot].position[axis]=std::bit_cast<float>(first[slot].position[axis]);}
     const auto digest=net::HashGameplayObservation(99,observed);
     if(!check(bool(digest),"complete character proof includes both identified native players"))return false;
+    {
+        auto passive=observed;passive.passive_character_physics=true;passive.characters.clear();
+        const auto empty=net::HashGameplayObservation(99,passive);
+        if(!check(empty && empty!=digest,"passive cutscene domain retains player identities/resources with authored detached bodies"))return false;
+        passive.characters.push_back(observed.characters.back());
+        if(!check(net::HashGameplayObservation(99,passive) && net::HashGameplayObservation(99,passive)!=empty,
+            "remaining cutscene NPC physics still participates in the proof"))return false;
+        passive.passive_character_physics=false;
+        if(!check(!net::HashGameplayObservation(99,passive),"active gameplay cannot use passive missing-body admission"))return false;
+        passive.passive_character_physics=true;passive.player_ids[1]=passive.player_ids[0];
+        if(!check(!net::HashGameplayObservation(99,passive),"passive cutscenes still reject duplicate player identities"))return false;
+    }
     {net::GameplayObservation legacy;const auto result=net::HashGameplayObservation(99,legacy);
         std::string hex;if(result){constexpr char digits[]="0123456789abcdef";for(auto byte:*result){hex+=digits[byte>>4];hex+=digits[byte&15];}}
         if(!check(hex=="7bdde2747fe071d4322b3649cf26d4321bb7fa81862321a90e4e916741664add",
@@ -173,6 +238,19 @@ bool em2::TestNativeCharacterPhysics(){
     if(!check(!ReadNativeCharacterPhysics(base,sample) && sample==stable && _mm_getcsr()==fp,"nonfinite NPC velocity rejects without partial output or FP exceptions"))return false;
     PPC_STORE_U8(0x16000+145,0);
     if(!check(ReadNativeCharacterPhysics(base,sample) && !sample[2].active && sample[2].velocity==std::array<uint32_t,3>{} && sample[2].state==0,"inactive proxies retain identity without reading their unused motion vectors"))return false;
+    PPC_STORE_U32(0x16000+176,0);
+    if(!check(ReadNativeCharacterPhysics(base,sample) && sample.size()==3 && !sample[2].active &&
+        ReadNativeActorPhysics(base,0x6000,single) && single==sample[2],"inactive characters remain identifiable with their controller detached"))return false;
+    PPC_STORE_U32(0x16000+176,0x1a000);PPC_STORE_U32(0x1a000+16,0);
+    if(!check(ReadNativeCharacterPhysics(base,sample) && sample.size()==3 && !sample[2].active &&
+        ReadNativeActorPhysics(base,0x6000,single) && single==sample[2],"inactive characters remain identifiable with their body detached"))return false;
+    PPC_STORE_U32(0x12000+80,0);
+    if(!check(ReadNativeCharacterPhysics(base,sample) && sample.size()==3 && !sample[2].active &&
+        ReadNativeActorPhysics(base,0x6000,single) && single==sample[2],"retired physics bridges retain the owned Motion identity without invented physical state"))return false;
+    PPC_STORE_U32(0x12000+80,0x16000);PPC_STORE_U8(0x16000+145,1);const auto dormant=sample;
+    if(!check(!ReadNativeCharacterPhysics(base,sample) && sample==dormant && !ReadNativeActorPhysics(base,0x6000,single),
+        "active characters with missing bodies still reject transactionally"))return false;
+    PPC_STORE_U8(0x16000+145,0);PPC_STORE_U32(0x1a000+16,0x1e000);
     PPC_STORE_U32(0xc300+172,0x7f800001);
     if(!check(ReadNativeCharacterPhysics(base,sample),"unrelated visual entity positions cannot invalidate character coverage"))return false;
     const auto retained=sample;DWORD old=0;if(!VirtualProtect(base+0x8000,4096,PAGE_NOACCESS,&old))return false;

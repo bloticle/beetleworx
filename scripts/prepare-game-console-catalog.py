@@ -23,14 +23,17 @@ def pair(p):
     except (AssertionError,ValueError,UnicodeError):return False
 starts=[p for p in range(40,strings-12,4) if pair(p)]
 start=starts[0];count=u32(start-4);assert count==205
-position=start;levels=[]
+position=start;levels=[];zone_only=[]
 for _ in range(count):
     assert pair(position)
     levels.append(text(u32(position)));zones=u32(position+8);assert zones<=u32(12)
+    has_load=False
     for i in range(zones):
         zone=position+12+i*12
         assert u32(zone)<=16 and u32(zone+8)<=1
         assert re.fullmatch(r'[a-z0-9_]+\.[a-z0-9_]+',text(u32(zone+4)))
+        has_load |= u32(zone)==1
+    if zones and not has_load:zone_only.append(levels[-1])
     position+=12+12*zones
 assert len(set(levels))==count and position<=strings and 'meanstreet_north.visit_1' in levels
 exports=json.loads((ROOT/'analysis/native-script-exports.json').read_text())
@@ -72,12 +75,15 @@ def signature(entry):
 signatures={entry['name']:signature(entry) for entry in exports}
 lines=['#pragma once','#include <string_view>','namespace em2 {','inline constexpr std::string_view kNativeLevelStates[]={']
 lines += [json.dumps(x)+',' for x in sorted(levels)]
+lines += ['};','// Retail states without a zone-load action require an existing level.',
+          'inline constexpr std::string_view kNativeZoneOnlyLevelStates[]={']
+lines += [json.dumps(x)+',' for x in sorted(zone_only)]
 lines += ['};','inline constexpr std::string_view kNativeScriptExports[]={']
 lines += [json.dumps(x)+',' for x in names]
 lines += ['};','inline constexpr std::string_view kNativeScriptSignatures[]={']
 lines += [json.dumps(signatures[name])+',' for name in names]
 lines += ['};','}']
 (ROOT/'runtime/game_console_catalog.h').write_text('\n'.join(lines)+'\n')
-report={'master_sha256':hashlib.sha256(data).hexdigest(),'state_table':hex(start),'state_table_end':hex(position),'state_count':count,'exports':len(names),'signature_count':sum(bool(s) for s in signatures.values()),'signatures':signatures,'registration_target':'82731C90','level_states':sorted(levels)}
+report={'master_sha256':hashlib.sha256(data).hexdigest(),'state_table':hex(start),'state_table_end':hex(position),'state_count':count,'exports':len(names),'signature_count':sum(bool(s) for s in signatures.values()),'signatures':signatures,'registration_target':'82731C90','level_states':sorted(levels),'zone_only_states':sorted(zone_only)}
 (ROOT/'analysis/game-console-catalog.json').write_text(json.dumps(report,indent=2)+'\n')
-print(json.dumps({k:v for k,v in report.items() if k not in ['level_states','signatures']}))
+print(json.dumps({k:v for k,v in report.items() if k not in ['level_states','signatures','zone_only_states']}))

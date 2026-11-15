@@ -134,7 +134,7 @@ class em2.options.TVSettings extends MovieClip
       var zones = ["Original","0%","5%","10%","15%","20%","25%","30%"];
       i = 0;
       while(i < 8) { result.push({title:names[i],id:2300+this._profile*8+i,choices:i<2?strengths:(i<4?["Off","On"]:(i<6?zones:["Original","Precise","Fast"]))}); i++; }
-      if(!demo) {
+      {
          result.push({id:2800,title:"Online voice",choices:["Off","Listen only","Push to talk","Open microphone"]});
          result.push({id:2801,title:"Voice playback volume",choices:["0%","25%","50%","75%","100%","125%","150%","175%","200%"]});
          result.push({id:2802,title:"Push-to-talk key (controller: D-pad Down)",choices:["F8","Caps Lock","Alt"]});

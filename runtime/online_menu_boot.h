@@ -17,7 +17,11 @@ class OnlineMenuBoot {
     OnlineBoot legacy_;
     OnlineRoomBoot room_;
 public:
-    explicit OnlineMenuBoot(bool rooms):rooms_(rooms){}
+    explicit OnlineMenuBoot(bool rooms):rooms_(rooms){
+        // Regular lobbies use bounded host-state correction; low-level Room
+        // probes can still select verified lockstep independently.
+        if(rooms_)room_.SetHostCorrectionMode(true);
+    }
     bool uses_room()const{return rooms_;}
     Room* LobbyChatRoom()const{return rooms_?room_.LobbyChatRoom():nullptr;}
     bool KickLobbyPeer(uint64_t peer){return rooms_ && room_.KickLobbyPeer(peer);}

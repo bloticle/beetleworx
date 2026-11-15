@@ -22,7 +22,7 @@ PPC_EXTERN_FUNC(__imp__sub_827A8908);
 PPC_EXTERN_FUNC(__imp__sub_82510C20); // stock group insertion used by CreateEntity
 PPC_EXTERN_FUNC(__imp__sub_82742F70); // stock complete entity admission
 PPC_EXTERN_FUNC(__imp__sub_827403B0); // create/query script entity handle
-PPC_EXTERN_FUNC(__imp__sub_82744E90); // stock deferred destruction request
+PPC_EXTERN_FUNC(sub_82744E90); // stock deferred destruction request
 PPC_EXTERN_FUNC(__imp__sub_826547C8); // parser output vector allocator's free
 PPC_EXTERN_FUNC(__imp__sub_82533EB0); // original fresh runtime GUID generator
 PPC_EXTERN_FUNC(__imp__sub_82517E50); // native entity GUID assignment
@@ -450,7 +450,7 @@ bool DestroyNativeArchitectureEntity(PPCContext& ctx,uint8_t* base,NativeArchite
     if(state.admitted && PPC_LOAD_U32(state.entity+88)) {
       if(!state.destroy_requested) {
         if(!Mapped(base,state.core,228)){error="Native world owner is unavailable for destruction";return false;}
-        ctx.r3.u64=state.core;ctx.r4.u64=state.entity+8;__imp__sub_82744E90(ctx,base);state.destroy_requested=true;
+        ctx.r3.u64=state.core;ctx.r4.u64=state.entity+8;sub_82744E90(ctx,base);state.destroy_requested=true;
       }
       // Keep parser/model alive while stock world deletion is pending.
       if(PPC_LOAD_U32(state.entity+88))return true;

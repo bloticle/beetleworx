@@ -1,4 +1,5 @@
 #include "native_entity_probe.h"
+#include "native_entity_lifetime.h"
 #include "guest_read_batch.h"
 #include "ppc_context.h"
 #include <rex/cvar.h>
@@ -94,6 +95,52 @@ bool em2::ReadNativeEntitySnapshot(uint8_t* base,NativeEntitySnapshot& out,const
     std::sort(sample.records.begin(),sample.records.end(),[](const auto& a,const auto& b){return a.id<b.id;});
     out=std::move(sample);error=nullptr;address=0;return true;
 }
+bool em2::ReadNativeEntityOwnership(uint8_t* base,NativeEntityOwnership& out,const char*& error,uint32_t& address){
+    GuestReadBatch inspection;
+    auto fail=[&](const char* why,uint32_t where){error=why;address=where;return false;};
+    uint64_t lifetime_revision=0;
+    if(!SampleNativeEntityLifetimeRevision(lifetime_revision))return fail("entity lifecycle mutation in progress",0);
+    NativeEntitySnapshot registry;
+    if(!ReadNativeEntitySnapshot(base,registry,error,address,false))return false;
+    if(!Readable(base,registry.registry,232))return fail("ownership registry",registry.registry);
+    // 82744E90 invokes entity virtual +388 BEFORE appending its NiPointer to
+    // this queue. A still-resolvable entity can already have run component
+    // teardown; a retained pointer or matching GUID does not make it restorable.
+    if(PPC_LOAD_U32(registry.registry+196))return fail("pending entity teardown",registry.registry+196);
+    NativeEntityOwnership sample;sample.registry=registry.registry;sample.lifetime_revision=lifetime_revision;
+    sample.owner=PPC_LOAD_U32(sample.registry+152);sample.world=PPC_LOAD_U32(sample.registry+228);
+    if(!sample.owner || !sample.world)return fail("missing entity owner/world",sample.registry);
+    sample.entities.reserve(registry.records.size());
+    for(const auto& record:registry.records){
+        NativeEntityOwnershipRecord entity;
+        entity.id=record.id;entity.handle=record.handle;entity.entity=record.debug_address;entity.vtable=record.vtable;
+        const auto count=PPC_LOAD_U32(entity.entity+44),components=PPC_LOAD_U32(entity.entity+36),types=PPC_LOAD_U32(entity.entity+88);
+        if(count>255 || (count && !Readable(base,components,size_t(count)*4)))return fail("ownership component slots",entity.entity+36);
+        if(!Readable(base,types,registry.component_count))return fail("ownership component types",entity.entity+88);
+        entity.type_slots.reserve(registry.component_count);
+        for(unsigned type=0;type<registry.component_count;++type){
+            const auto slot=PPC_LOAD_U8(types+type);
+            if(slot!=255 && slot>=count)return fail("ownership component index",types+type);
+            entity.type_slots.push_back(slot);
+        }
+        entity.components.reserve(count);
+        for(unsigned slot=0;slot<count;++slot){
+            const auto component=PPC_LOAD_U32(components+slot*4);
+            if((component&3) || !Readable(base,component,4))return fail("ownership component interface",component);
+            const auto table=PPC_LOAD_U32(component);
+            if(table<0x82000000 || table>=0x83400000 || (table&3))return fail("ownership component vtable",component);
+            entity.components.push_back({component,table});
+        }
+        sample.entities.push_back(std::move(entity));
+    }
+    // Callers must exclude native mutation for the whole inspection. These
+    // checks detect owner replacement; they are not a substitute for that lock.
+    uint64_t completed_revision=0;
+    if(!SampleNativeEntityLifetimeRevision(completed_revision) || completed_revision!=lifetime_revision ||
+       PPC_LOAD_U32(0x833DA7E4)!=sample.registry || PPC_LOAD_U32(sample.registry+152)!=sample.owner ||
+       PPC_LOAD_U32(sample.registry+228)!=sample.world || PPC_LOAD_U32(sample.registry+196))return fail("entity ownership changed",sample.registry);
+    out=std::move(sample);error=nullptr;address=0;return true;
+}
 void em2::TraceNativeEntitySnapshot(uint8_t* base,uint64_t tick){
     if(!REXCVAR_GET(em2_trace_native_entities))return;
     const auto start=std::chrono::steady_clock::now();NativeEntitySnapshot snapshot;const char* error=nullptr;uint32_t address=0;
@@ -175,5 +222,20 @@ bool em2::TestNativeEntityProbe(){
     DWORD old=0;if(!VirtualProtect(base+0x6000,4096,PAGE_NOACCESS,&old))return false;
     const bool inaccessible=!ReadNativeEntitySnapshot(base,reordered,error,address) && Encode(reordered)==encoded;
     DWORD ignored=0;VirtualProtect(base+0x6000,4096,old,&ignored);if(!check(inaccessible,"protected type memory rejects safely"))return false;
-    REXLOG_INFO("Native entity probe tests passed: canonical order, field presence, immutable reads, real protection, cycles, NaNs and no partial publication");return true;
+    PPC_STORE_U32(0x2000+152,0x9000);PPC_STORE_U32(0x2000+228,0x9400);
+    PPC_STORE_U32(0x4000+44,1);PPC_STORE_U32(0x8008,0x8211DCE0);
+    NativeEntityOwnership ownership;
+    if(!check(ReadNativeEntityOwnership(base,ownership,error,address) && ownership.entities.size()==2 && ownership.entities[0].components.size()==1,"ownership captures native component instances"))return false;
+    const auto original_ownership=ownership;
+    PPC_STORE_U32(0x8000+172,0x40800000);
+    if(!check(ReadNativeEntityOwnership(base,ownership,error,address) && ownership==original_ownership,"movement does not change ownership"))return false;
+    PPC_STORE_U32(0x7000,0x8108);PPC_STORE_U32(0x8108,0x8211DCE0);
+    if(!check(ReadNativeEntityOwnership(base,ownership,error,address) && ownership!=original_ownership,"same-type component replacement changes ownership"))return false;
+    PPC_STORE_U32(0x7000,0x8008);ownership=original_ownership;
+    PPC_STORE_U32(0x2000+196,1);
+    if(!check(!ReadNativeEntityOwnership(base,ownership,error,address) && ownership==original_ownership,"pending teardown rejects without partial publication"))return false;
+    PPC_STORE_U32(0x2000+196,0);PPC_STORE_U8(0x6007,1);
+    if(!check(!ReadNativeEntityOwnership(base,ownership,error,address) && ownership==original_ownership,"out-of-range native slot rejects"))return false;
+    PPC_STORE_U8(0x6007,0);
+    REXLOG_INFO("Native entity probe tests passed: canonical order, field presence, immutable reads, real protection, cycles, NaNs, component ownership and pending teardown rejection");return true;
 }

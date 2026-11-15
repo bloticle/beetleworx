@@ -53,6 +53,7 @@ public:
     bool halted()const;
     bool waiting()const;
     bool completion_pending()const;
+    bool passive_input_pending()const;
     uint64_t committed_tick()const;
     // Owner-thread read only, outside the native update. Eligibility proves
     // completed input/physics ownership, not storage idle or renderer fences.

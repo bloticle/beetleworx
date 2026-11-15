@@ -61,6 +61,7 @@ bool TestOnlineMenuBoot(const std::filesystem::path& fixture){
         check(pump([&]{return std::all_of(peers.begin(),peers.end(),[](const auto& p){return p->LobbyStartConfirmed();});}),"All menu clients confirm frozen native startup");
         std::vector<NativeMenuReady> owned;
         for(unsigned i=0;i<3;++i){auto result=peers[i]->TakeReady();check(result && result->room && !result->session && result->room->local_peer()==i+1 && result->room->native_bootstrap() && result->room->state()==RoomState::Loading,"Native menu returns correct exclusive Room owner");
+            check(result->room->host_correction_mode() && result->room->gameplay_verification_window()==8,"Regular menu host and guests negotiate host correction with eight-update credit");
             check(!peers[i]->TakeReady(),"Frozen Room handed off once");owned.push_back(std::move(*result));}
         peers.clear();check(std::all_of(owned.begin(),owned.end(),[](const auto& r){return r.room->lobby().players.size()==3 && r.room->lobby().locked;}),"Menu coordinator destruction retains frozen transports");
         const auto after=PackCheckpoint(root/"source");check(after.value && after.value->bytes==before.value->bytes,"Native menu preparation preserves source campaign");

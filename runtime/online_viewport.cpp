@@ -1,9 +1,11 @@
 #include "online_viewport.h"
 #include "online_runtime.h"
 #include "online_room_gameplay.h"
+#include "online_cutscene_input.h"
 #include "online_native_menu.h"
 #include "online.h"
 #include "guest_read_batch.h"
+#include "allocation_trace.h"
 #include "ppc_context.h"
 #include <rex/cvar.h>
 #include <rex/logging.h>
@@ -23,6 +25,8 @@ REXCVAR_DEFINE_BOOL(em2_online_single_view,true,"Online","Use the local player's
 REXCVAR_DEFINE_BOOL(em2_native_lobby_qa_input_sequence,false,"Debug","Private validated loopback only: fixed native controller movement, jump and camera sequence");
 namespace {
 thread_local uint32_t online_view_app=0;
+thread_local uint32_t online_primary_camera_owner=0;
+thread_local uint64_t online_primary_camera_load=0;
 struct Preserve {
     PPCContext& ctx;PPCContext saved=ctx;DWORD error=GetLastError();unsigned csr=_mm_getcsr();
     ~Preserve(){ctx=saved;SetLastError(error);_mm_setcsr(csr);}
@@ -62,8 +66,17 @@ uint32_t GuestCamera(PPCContext& ctx,uint8_t* base,PPCFunc* resolve){
 void Construct(PPCContext& ctx,uint8_t* base,bool enabled,std::optional<unsigned> slot,PPCFunc* resolve,PPCFunc* original){
     const bool primary=Enabled(enabled,slot) && ctx.lr==0x829EC82C && ctx.r8.u64==0;
     const auto requested=ctx.r4.u32;
+    if(primary){
+        Preserve preserve{ctx};em2::GuestReadBatch reads;
+        const auto owner=ctx.r30.u32;
+        online_primary_camera_owner=Readable(owner,16,base) && PPC_LOAD_U32(owner+12)==requested?owner:0;
+        online_primary_camera_load=em2::CurrentNativeLoadGeneration();
+    }
     const bool local=Enabled(enabled,slot) && (*slot==1 || em2::net::NativeRoomLocalCameraController()) && ctx.lr==0x829EC82C && ctx.r8.u64==0;
-    if(local){
+    em2::net::NativeGameOverState control;uint32_t control_mode=0;
+    const bool authored=local && em2::net::ReadNativeControlState(ctx,base,control,control_mode) &&
+        em2::net::NativeCutsceneControlMode(control_mode) && em2::net::ReadNativeCutsceneContext(ctx,base,control.registry);
+    if(local && !authored){
         if(const auto camera=GuestCamera(ctx,base,resolve))ctx.r4.u64=camera;
         else {Preserve preserve{ctx};REXLOG_WARN("Online single-view camera unavailable at native primary-view construction; acceptance incomplete");}
     }
@@ -87,8 +100,9 @@ unsigned em2::net::NativeOnlineHudMode(){
     const auto slot=NativeOnlineDisplaySlot();
     return slot && *slot<2?2+*slot:0;
 }
-bool em2::net::BindNativeRoomLocalView(PPCContext& ctx,uint8_t* base){
-    const auto controller=NativeRoomLocalCameraController();if(!controller)return true;
+bool em2::net::BindNativeRoomLocalView(PPCContext& ctx,uint8_t* base,bool authored_cutscene){
+    const auto controller=NativeRoomLocalCameraController();const auto slot=NativeOnlineDisplaySlot();
+    if(!authored_cutscene && !controller && (!slot || *slot!=1))return true;
     if(!REXCVAR_GET(em2_online_single_view) || !Readable(online_view_app,0x2090C,base) || PPC_LOAD_U8(online_view_app+0x107A4))return false;
     const auto view=PPC_LOAD_U32(online_view_app+0x208F4);
     if(!Readable(view,80,base) || PPC_LOAD_U32(view)!=0x82109F40)return false;
@@ -97,13 +111,19 @@ bool em2::net::BindNativeRoomLocalView(PPCContext& ctx,uint8_t* base){
     if(top<32768 || !Readable(top-16384,16384,base))return false;
     struct Stack {uint8_t* memory;std::array<uint8_t,16384> bytes;explicit Stack(uint8_t* p):memory(p){std::memcpy(bytes.data(),p,bytes.size());}~Stack(){std::memcpy(memory,bytes.data(),bytes.size());}}stack(base+top-16384);
     ctx.r1.u64=top-4096;
-    const auto camera=GuestCamera(ctx,base,__imp__sub_82851018);if(!camera)return false;
+    uint32_t camera=0;
+    if(authored_cutscene){
+        if(online_primary_camera_load!=em2::CurrentNativeLoadGeneration() || !Readable(online_primary_camera_owner,16,base))return false;
+        camera=PPC_LOAD_U32(online_primary_camera_owner+12);
+        if(!Readable(camera,368,base) || PPC_LOAD_U32(camera)!=0x8203E610)return false;
+    }else camera=GuestCamera(ctx,base,__imp__sub_82851018);
+    if(!camera)return false;
     const auto previous=PPC_LOAD_U32(view+48);if(previous==camera)return true;
     // Same NiRefObject ownership as the view constructor/destructor: retain
     // the new output and release the old output through native NiPointer.
     ctx.r3.u64=view+48;ctx.r4.u64=camera;__imp__sub_829EFF08(ctx,base);
     const bool retained=PPC_LOAD_U32(view+48)==camera;
-    REXLOG_INFO("Native Room local view rebound: controller {:08X} view {:08X} previous {:08X} retained {:08X} matches {} split {}; native NiPointer ownership",controller,view,previous,PPC_LOAD_U32(view+48),retained,unsigned(PPC_LOAD_U8(online_view_app+0x107A4)));
+    REXLOG_INFO("Native Room local view rebound: controller {:08X} view {:08X} previous {:08X} retained {:08X} matches {} split {} authored {}; native NiPointer ownership",controller,view,previous,PPC_LOAD_U32(view+48),retained,unsigned(PPC_LOAD_U8(online_view_app+0x107A4)),authored_cutscene);
     return retained;
 }
 

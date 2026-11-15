@@ -175,6 +175,32 @@ def inspect(capture, include_components=False, include_input=False, include_init
             actor = dict(slot=slot, handle=f'{key:08X}', entity=f'{entity:08X}',
                          controller=f'{int.from_bytes(record[8:12], "big"):08X}',
                          mode=int.from_bytes(record[12:16], 'big'))
+            override_enabled=read(manager + slot * 320 + 39, 1)[0]
+            spawn_enabled=read(manager + slot * 320 + 38, 1)[0]
+            actor['spawn_transform'] = dict(
+                enabled=spawn_enabled,
+                position=[float_word(read(manager + slot * 320 + 96 + i * 4, 4)) for i in range(3)] if spawn_enabled else None,
+                source='Original SetPlayerSpawnTransform/82769588 record layout')
+            actor['spawn_override'] = dict(
+                enabled=override_enabled,
+                position=[float_word(read(manager + slot * 320 + 160 + i * 4, 4)) for i in range(3)] if override_enabled else None,
+                source='Original ClearOverrideSpawnTransform/OverrideSpawnTransform record layout')
+            # Same original camera prerequisites used by players.cpp. Merely
+            # loading the requested level does not prove its entrance has
+            # restored player control; retain these values for stalled entry.
+            controller = int.from_bytes(record[8:12], 'big')
+            if controller:
+                try:
+                    table = word(controller)
+                    current, normal = word(controller + 24), word(controller + 392)
+                    activated = word(controller + 564)
+                    actor['camera_readiness'] = dict(
+                        vtable=f'{table:08X}', current_mode=f'{current:08X}',
+                        normal_mode=f'{normal:08X}', activated=f'{activated:08X}',
+                        normal_player_camera=bool(key and actor['mode'] == 0 and
+                            table == 0x82112778 and activated and normal and current == normal))
+                except RuntimeError as exc:
+                    actor['camera_readiness'] = dict(read_error=str(exc))
             actor['observed_control_mode'] = {0: 'native human mode0', 1: 'native AI mode1',
                                                2: 'native AI mode2'}.get(actor['mode'], 'other/unavailable native mode')
             actor['identity_note'] = 'Retail record slot; control mode/type observations do not prove character identity'
@@ -482,6 +508,11 @@ def inspect(capture, include_components=False, include_input=False, include_init
                     manager=f'{manager:08X}', manager_vtable=f'{table:08X}', factory_method=f'{factory:08X}',
                     factory_contract='8276A828 selects character 0=Mickey/1=Oswald and human/AI mode; it clones a fresh entity without replacing a PlayerManager slot',
                     prefab_names=prefabs, actors=actors, input_bindings=input_bindings, stable=stable,
+                    entrance_readiness=dict(
+                        profile_players=word(word(0x833DC87C) + 24) if word(0x833DC87C) else None,
+                        manager_enabled=read(manager + 357, 1)[0],
+                        active_camera=f'{word(0x833DDA40):08X}',
+                        note='Read-only prerequisite snapshot; does not invoke NativeCoopReady or prove admission'),
                     limitation='Two existing actors inspected. No additional actor creation, control, replication or 16-player support proven.')
     finally:
         kernel.CloseHandle(handle)

@@ -15,6 +15,7 @@
 #include <windows.h>
 
 PPC_EXTERN_FUNC(__imp__sub_82B6DDC8);
+PPC_EXTERN_FUNC(__imp__KeTlsGetValue);
 PPC_EXTERN_FUNC(__imp__sub_827B3298);
 REXCVAR_DECLARE(bool,em2_private_profile);
 REXCVAR_DECLARE(bool,em2_trace_online_random_owners);
@@ -27,6 +28,8 @@ PPC_EXTERN_FUNC(__imp__sub_830CEC40);
 PPC_EXTERN_FUNC(__imp__sub_828A4FB0);
 PPC_EXTERN_FUNC(__imp__sub_828A4EF0);
 PPC_EXTERN_FUNC(__imp__sub_82973700);
+PPC_EXTERN_FUNC(__imp__sub_827CC8A0);
+PPC_EXTERN_FUNC(__imp__sub_82792878);
 REXCVAR_DEFINE_BOOL(em2_isolate_visual_random,true,"Gameplay","Separate presentation CRT randomness from gameplay randomness");
 namespace {
 thread_local unsigned visual_depth=0;
@@ -102,6 +105,40 @@ void UpdateWind(PPCContext& ctx,uint8_t* base,bool online,PPCFunc* native){
     // material writes still execute; offline behavior remains the retail path.
     if(online){em2::VisualRandomScope scope;native(ctx,base);}
     else native(ctx,base);
+}
+void ConstructScriptResource(PPCContext& ctx,uint8_t* base,bool online,PPCFunc* native){
+    if(online){em2::VisualRandomScope scope;native(ctx,base);}
+    else native(ctx,base);
+}
+bool TestRetailScriptResourceRandom(){
+    auto* base=static_cast<uint8_t*>(VirtualAlloc(nullptr,0x100000000ull,MEM_RESERVE,PAGE_READWRITE));if(!base)return false;
+    struct Release{uint8_t* base;~Release(){VirtualFree(base,0,MEM_RELEASE);}}release{base};
+    if(!VirtualAlloc(base,65536,MEM_COMMIT,PAGE_READWRITE) ||
+       !VirtualAlloc(base+0x8203D000,4096,MEM_COMMIT,PAGE_READWRITE) ||
+       !VirtualAlloc(base+0x833CD000,4096,MEM_COMMIT,PAGE_READWRITE))return false;
+    test_ptd=0x1000;visual_depth=0;REXCVAR_SET(em2_isolate_visual_random,true);
+    constexpr uint32_t local_seed=0x12345678,canonical=0xABCDEF01;
+    std::vector<uint8_t> before(65536),expected_memory(65536);unsigned cases=0;
+    for(bool online:{false,true})for(bool named:{false,true})for(uint32_t references:{0u,3u}){
+        std::memset(base,0,65536);PPC_STORE_U32(0x3000,named?0x3108:0);PPC_STORE_U32(0x3100,references);
+        PPC_STORE_U32(0x8203D278,0);PPC_STORE_U32(0x833CDD8C,0);
+        PPC_STORE_U32(test_ptd+20,online?canonical:local_seed);
+        PPCContext input{};input.r1.u64=0xF000;input.r3.u64=0x2000;input.r4.u64=0x3000;input.fpscr.InitHost();
+        const auto fp=_mm_getcsr();SetLastError(0xA505);std::memcpy(before.data(),base,before.size());
+        PPC_STORE_U32(test_ptd+20,local_seed);auto expected=input;__imp__sub_82792878(expected,base);
+        const auto expected_fp=_mm_getcsr();const auto expected_error=GetLastError();
+        if(online)PPC_STORE_U32(test_ptd+20,canonical);
+        std::memcpy(expected_memory.data(),base,expected_memory.size());
+        const auto expected_count=PPC_LOAD_U32(0x833CDD8C);
+        std::memcpy(base,before.data(),before.size());PPC_STORE_U32(0x833CDD8C,0);
+        visual_state=local_seed;visual_initialized=true;auto actual=input;_mm_setcsr(fp);SetLastError(0xA505);
+        ConstructScriptResource(actual,base,online,__imp__sub_82792878);
+        if(std::memcmp(&actual,&expected,sizeof(actual)) || std::memcmp(base,expected_memory.data(),expected_memory.size()) ||
+           PPC_LOAD_U32(0x833CDD8C)!=expected_count || _mm_getcsr()!=expected_fp || GetLastError()!=expected_error || visual_depth)return false;
+        ++cases;
+    }
+    REXLOG_INFO("Native BSQ parameter constructor passed {} original full-context/64KiB/FP/error comparisons: GUID output, reference counts, native object counter, offline passthrough and online gameplay RNG preservation",cases);
+    return true;
 }
 bool TestRetailWindRandom(){
     auto* base=static_cast<uint8_t*>(VirtualAlloc(nullptr,0x100000000ull,MEM_RESERVE,PAGE_READWRITE));if(!base)return false;
@@ -231,6 +268,19 @@ PPC_FUNC_IMPL(sub_828A4FB0){UpdateWind(ctx,base,em2::net::SynchronizedSessionAct
 PPC_FUNC_IMPL(sub_828A4EF0){UpdateWind(ctx,base,em2::net::SynchronizedSessionActive(),__imp__sub_828A4EF0);}
 PPC_FUNC_IMPL(sub_82973700){SelectDialog(ctx,base,ctx.lr==0x8297399C && em2::net::SynchronizedSessionActive());}
 
+// These constructors create BSQ resource/parameter objects, not world actors.
+// Their base constructor generates four random GUID words. Asynchronous BSQ
+// completion can construct them between agreed ticks (Autotopia's intro creates
+// 55 objects), so those local resource IDs must not consume gameplay randomness.
+// Preserve the entire original constructor and GUID algorithm on the existing
+// local stream. Actual actor construction/cloning retains the canonical stream.
+PPC_FUNC_IMPL(sub_827CC8A0){
+    ConstructScriptResource(ctx,base,em2::net::SynchronizedSessionActive(),__imp__sub_827CC8A0);
+}
+PPC_FUNC_IMPL(sub_82792878){
+    ConstructScriptResource(ctx,base,em2::net::SynchronizedSessionActive(),__imp__sub_82792878);
+}
+
 PPC_FUNC_IMPL(sub_82B6FFE8) {
     const auto caller=ctx.lr;
     if(test_ptd)ctx.r3.u64=test_ptd;else __imp__sub_82B6FFE8(ctx,base);
@@ -268,6 +318,82 @@ PPC_FUNC_IMPL(sub_82B6DD98) {
     Call call(base);
     __imp__sub_82B6DD98(ctx,base);
     if(!call.isolate)em2::RecordNativeRandom(true,uint32_t(caller),uint32_t(seed),0,&ctx,base);
+}
+
+namespace {
+struct RandomHost {
+    PPCContext& ctx;PPCContext saved;DWORD error=GetLastError();unsigned csr=_mm_getcsr();
+    explicit RandomHost(PPCContext& c):ctx(c),saved(c){}
+    ~RandomHost(){ctx=saved;SetLastError(error);_mm_setcsr(csr);}
+};
+struct RandomOwner {uint32_t slot=0,ptd=0,id=0;bool operator==(const RandomOwner&)const=default;};
+bool ReadRandomOwner(PPCContext& ctx,uint8_t* base,RandomOwner& owner){
+    if(!base || visual_depth || Call::current)return false;
+    uint32_t ptd=test_ptd,slot=0;
+    if(!ptd){
+        constexpr uint32_t CrtTlsIndex=0x833AB240; // original 82B6FF10 lis/lwz
+        if(!em2::GuestReadBatch::Readable(base+CrtTlsIndex,4))return false;
+        slot=PPC_LOAD_U32(CrtTlsIndex);
+        {em2::GuestReadBatch::CallbackBoundary boundary;ctx.r3.u64=slot;__imp__KeTlsGetValue(ctx,base);ptd=ctx.r3.u32;}
+    }
+    // Lookup only: never allocate a missing CRT PTD as checkpoint preparation.
+    if(ptd<4096 || uint64_t(ptd)+24>0x100000000ull || !em2::GuestReadBatch::Readable(base+ptd,24))return false;
+    owner={slot,ptd,PPC_LOAD_U32(ptd)};return true;
+}
+}
+struct em2::NativeRandomCheckpoint::Impl {
+    uint8_t* base=nullptr;uint64_t epoch=0;uint32_t thread=0,state=0,visual=0;
+    RandomOwner owner;bool initialized=false,isolate=false,fixture=false;
+    OnlineSeed online,world;
+    bool Check(PPCContext& ctx,uint8_t* memory,uint64_t expected,std::string& error)const{
+        RandomOwner current;
+        if(!epoch || expected!=epoch || memory!=base || thread!=GetCurrentThreadId() || fixture!=(test_ptd!=0) ||
+            isolate!=REXCVAR_GET(em2_isolate_visual_random) || !ReadRandomOwner(ctx,memory,current) || current!=owner){
+            error="Native random checkpoint owner/TLS/policy/world epoch changed";return false;
+        }return true;
+    }
+};
+em2::NativeRandomCheckpoint::NativeRandomCheckpoint():impl_(std::make_unique<Impl>()){}
+em2::NativeRandomCheckpoint::~NativeRandomCheckpoint()=default;
+bool em2::NativeRandomCheckpoint::Capture(PPCContext& ctx,uint8_t* base,uint64_t epoch,std::string& error){
+    RandomHost host(ctx);GuestReadBatch reads;RandomOwner owner;
+    if(!epoch || impl_->epoch || !ReadRandomOwner(ctx,base,owner)){error="Native random capture requires an initialized owner PTD outside random/visual calls";return false;}
+    auto& s=*impl_;s.base=base;s.owner=owner;s.epoch=epoch;s.thread=GetCurrentThreadId();s.state=PPC_LOAD_U32(owner.ptd+20);
+    s.visual=visual_state;s.initialized=visual_initialized;s.online=online_seed;s.world=world_seed;s.fixture=test_ptd!=0;s.isolate=REXCVAR_GET(em2_isolate_visual_random);
+    error.clear();return true;
+}
+bool em2::NativeRandomCheckpoint::Restore(PPCContext& ctx,uint8_t* base,uint64_t epoch,std::string& error)const{
+    RandomHost host(ctx);GuestReadBatch reads;const auto& s=*impl_;if(!s.Check(ctx,base,epoch,error))return false;
+    PPC_STORE_U32(s.owner.ptd+20,s.state);visual_state=s.visual;visual_initialized=s.initialized;online_seed=s.online;world_seed=s.world;
+    error.clear();return true;
+}
+bool em2::NativeRandomCheckpoint::Matches(PPCContext& ctx,uint8_t* base,uint64_t epoch,std::string& error)const{
+    RandomHost host(ctx);GuestReadBatch reads;const auto& s=*impl_;if(!s.Check(ctx,base,epoch,error))return false;
+    if(PPC_LOAD_U32(s.owner.ptd+20)!=s.state || visual_state!=s.visual || visual_initialized!=s.initialized ||
+        online_seed.pending!=s.online.pending || online_seed.value!=s.online.value || world_seed.pending!=s.world.pending || world_seed.value!=s.world.value){
+        error="Native random streams or pending initialization differ from checkpoint";return false;
+    }
+    error.clear();return true;
+}
+bool em2::NativeRandomCheckpoint::TestRoundTrip(PPCContext& ctx,uint8_t* base,uint64_t epoch,std::string& error)const{
+    RandomHost host(ctx);if(!Matches(ctx,base,epoch,error))return false;
+    struct Undo {const NativeRandomCheckpoint& cp;PPCContext& ctx;uint8_t* base;uint64_t epoch;~Undo(){std::string ignored;cp.Restore(ctx,base,epoch,ignored);}}undo{*this,ctx,base,epoch};
+    std::array<std::array<uint32_t,48>,2> output{};
+    for(unsigned pass=0;pass<2;++pass){
+        for(unsigned i=0;i<32;++i){ctx=host.saved;__imp__sub_82B6DDC8(ctx,base);output[pass][i]=ctx.r3.u32;}
+        for(unsigned i=32;i<48;++i){VisualRandomScope visual;ctx=host.saved;sub_82B6DDC8(ctx,base);output[pass][i]=ctx.r3.u32;}
+        online_seed={ !online_seed.pending,online_seed.value^0xA531C9D7u };
+        world_seed={ !world_seed.pending,world_seed.value^0x7254B1E3u };
+        visual_initialized=!visual_initialized;visual_state^=0x6A29D083u;
+        const auto online=online_seed,world=world_seed;const auto initialized=visual_initialized;
+        const auto changed=PPC_LOAD_U32(impl_->owner.ptd+20),visual=visual_state;
+        if(Restore(ctx,base,epoch+1,error) || PPC_LOAD_U32(impl_->owner.ptd+20)!=changed || visual_state!=visual || visual_initialized!=initialized ||
+            online_seed.pending!=online.pending || online_seed.value!=online.value || world_seed.pending!=world.pending || world_seed.value!=world.value){error="Random checkpoint wrong epoch changed a native stream";return false;}
+        if(!Restore(ctx,base,epoch,error) || !Matches(ctx,base,epoch,error))return false;
+    }
+    if(output[0]!=output[1]){error="Native CRT/presentation random outputs differ after restore";return false;}
+    REXLOG_INFO("Native random checkpoint roundtrip passed: 32 original CRT draws and 16 presentation-scope draws reproduced (isolation {}), mutated pending seeds/visual initialization restored, wrong epoch rejected; owner thread only, other engine generators not covered",impl_->isolate);
+    error.clear();return true;
 }
 
 bool em2::TestNativeRandom() {
@@ -381,7 +507,7 @@ bool em2::TestNativeRandom() {
             }
         }
     }
-    if(!TestRetailParticleRandom() || !TestRetailWindRandom() || !TestRetailDialogRandom())return false;
+    if(!TestRetailParticleRandom() || !TestRetailWindRandom() || !TestRetailDialogRandom() || !TestRetailScriptResourceRandom())return false;
     REXLOG_INFO("Native CRT tests passed: full-context forwarding and identical gameplay sequence across 0/1/2/4/16 presentations per tick, nested scopes, visual reseeding and exact online-only vocalization cooldown isolation");
     return true;
 }

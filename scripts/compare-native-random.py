@@ -3,7 +3,7 @@ import argparse, collections, difflib, json, re
 from pathlib import Path
 parser=argparse.ArgumentParser();parser.add_argument('pair_root',type=Path);args=parser.parse_args()
 event=re.compile(r'Native online CRT event: tick (\d+), index (\d+), seed (true|false), caller ([0-9A-F]{8}), state ([0-9A-F]{8}), result ([0-9A-F]{8})')
-header=re.compile(r'Native gameplay observation v4:[^\n]*?epoch \d+, tick (\d+),[^\n]*?CRT calls/seeds (\d+)/(\d+)')
+header=re.compile(r'Native gameplay observation v[45]:[^\n]*?epoch \d+, tick (\d+),[^\n]*?CRT calls/seeds (\d+)/(\d+)')
 owner=re.compile(r'Native online CRT owner: tick (\d+), index (\d+), r29 ([0-9A-F]{8}) head ([0-9A-F]{8}), r30 ([0-9A-F]{8}) head ([0-9A-F]{8}), r31 ([0-9A-F]{8}) head ([0-9A-F]{8})')
 stack=re.compile(r'Native online CRT stack: tick (\d+), index (\d+), returns ((?:[0-9A-F]{8} ?){6})')
 schedule=re.compile(r'Native online CRT schedule: tick (\d+), index (\d+), scene ([0-9A-F]{8}), last ([0-9A-F]{8}), interval ([0-9A-F]{8}), budget ([0-9A-F]{8}), gate ([0-9A-F]{8})')

@@ -8,7 +8,7 @@ bool TestNativeOnlineViewport();
 unsigned NativeOnlineHudMode();
 // Completed native camera boundary only. Rebinds the cached primary view after
 // extra actors/cameras are admitted later than ordinary view construction.
-bool BindNativeRoomLocalView(PPCContext&,uint8_t*);
+bool BindNativeRoomLocalView(PPCContext&,uint8_t*,bool authored_cutscene=false);
 // Current retained primary NiCamera, render owner only; no native calls.
 uint32_t NativeRoomViewCamera(uint8_t*);
 // Private loopback-only functional input test. Pads still cross the real

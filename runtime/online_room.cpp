@@ -16,23 +16,27 @@
 #include <future>
 #include <limits>
 #include <map>
+#include <set>
 #include <optional>
 #include <span>
 #include <sstream>
 #include <thread>
+#include <utility>
 
 namespace em2::net {
 namespace {
 using Clock=std::chrono::steady_clock;
 using Bytes=std::vector<uint8_t>;
 constexpr size_t Window=64,MaxPacket=8192,MaxQueued=256*1024;
-constexpr uint8_t WireVersion=9;
+constexpr uint8_t WireVersion=12;
+static_assert(100+16*31+kAuthorityCharacterBatch*46<=MaxPacket);
 constexpr auto Timeout=std::chrono::seconds(15);
 constexpr auto StartupTimeout=std::chrono::seconds(180);
 constexpr auto TransferTimeout=std::chrono::seconds(120);
 enum class Wire:uint8_t {Hello=1,Welcome,Profile,Snapshot,Start,Input,Frame,Ping,Pong,ProfileReply,WorldReady,Activate,
     CheckpointBegin,CheckpointChunk,CheckpointEnd,CheckpointProgress,CheckpointInstalled,CheckpointReady,CheckpointAck,
-    BootstrapWorldReady,BootstrapBegin,BootstrapPad,BootstrapFrame,BootstrapComplete,BootstrapContinue,BootstrapActivate,GameplayComplete,GameplayVerified,ChatRequest,ChatMessage,VoiceRequest,VoiceOffer,LoadVote,LoadAgreed,ReloadVote,ReloadBegin,Kicked,Rejected};
+    BootstrapWorldReady,BootstrapBegin,BootstrapPad,BootstrapFrame,BootstrapComplete,BootstrapContinue,BootstrapActivate,GameplayComplete,GameplayVerified,ChatRequest,ChatMessage,VoiceRequest,VoiceOffer,LoadVote,LoadAgreed,ReloadVote,ReloadBegin,Kicked,Rejected,
+    RollbackOffer,RollbackStateBegin,RollbackStateChunk,RollbackStateEnd,RollbackStateReceived,RollbackInputs,AuthorityState,AuthorityApplied};
 bool Winsock(){
     struct Startup {bool ok=false;Startup(){WSADATA data{};ok=WSAStartup(MAKEWORD(2,2),&data)==0;}~Startup(){if(ok)WSACleanup();}};
     static Startup startup;return startup.ok;
@@ -51,6 +55,52 @@ struct Reader {
 Bytes Packet(Wire kind){return {'B','W','R','M',WireVersion,uint8_t(kind)};}
 using Hash=std::array<uint8_t,32>;
 bool Nonzero(const Hash& hash){return std::any_of(hash.begin(),hash.end(),[](auto n){return n!=0;});}
+bool ValidAuthorityActors(const RoomAuthorityState& state){
+    if(!state.players_mask || state.actors.size()!=std::popcount(state.players_mask))return false;
+    uint16_t mask=0;
+    for(const auto& actor:state.actors){
+        if(actor.peer<1 || actor.peer>kOnlineRoomCapacity)return false;
+        const auto bit=uint16_t(1u<<(actor.peer-1));if(mask&bit)return false;mask|=bit;
+        for(unsigned i=0;i<3;++i)if(!std::isfinite(actor.position[i]) || !std::isfinite(actor.velocity[i]) ||
+            std::abs(actor.position[i])>1e7f || std::abs(actor.velocity[i])>1e5f)return false;
+    }
+    if(mask!=state.players_mask || state.characters.size()>kAuthorityCharacterBatch)return false;
+    std::set<std::array<uint32_t,4>> ids;
+    for(const auto& character:state.characters){
+        if(!std::any_of(character.id.begin(),character.id.end(),[](auto word){return word!=0;}) || !ids.insert(character.id).second)return false;
+        for(unsigned i=0;i<3;++i)if(!std::isfinite(character.position[i]) || !std::isfinite(character.velocity[i]) ||
+            std::abs(character.position[i])>1e7f || std::abs(character.velocity[i])>1e5f)return false;
+    }
+    return true;
+}
+void WriteAuthorityState(Bytes& bytes,const RoomAuthorityState& state){
+    U64(bytes,state.tick);U64(bytes,state.roster_revision);bytes.insert(bytes.end(),state.world.begin(),state.world.end());
+    bytes.insert(bytes.end(),state.completion.begin(),state.completion.end());
+    U64(bytes,state.players_mask,2);U8(bytes,uint8_t(state.actors.size()));
+    for(const auto& actor:state.actors){U8(bytes,uint8_t(actor.peer));U8(bytes,uint8_t(actor.active));
+        for(const auto* vector:{&actor.position,&actor.velocity})for(float value:*vector)U64(bytes,std::bit_cast<uint32_t>(value),4);
+        U8(bytes,actor.health.has_value());if(actor.health)U64(bytes,std::bit_cast<uint32_t>(*actor.health),4);}
+    U64(bytes,state.characters.size(),2);
+    for(const auto& character:state.characters){for(auto word:character.id)U64(bytes,word,4);U8(bytes,uint8_t(character.active));
+        for(const auto* vector:{&character.position,&character.velocity})for(float value:*vector)U64(bytes,std::bit_cast<uint32_t>(value),4);
+        U8(bytes,character.health.has_value());if(character.health)U64(bytes,std::bit_cast<uint32_t>(*character.health),4);}
+}
+bool ReadAuthorityState(Reader& reader,RoomAuthorityState& state){
+    state.tick=reader.Number(8);state.roster_revision=reader.Number(8);for(auto& byte:state.world)byte=reader.Byte();
+    for(auto& byte:state.completion)byte=reader.Byte();
+    state.players_mask=uint16_t(reader.Number(2));const auto count=reader.Byte();if(count>kOnlineRoomCapacity)return false;
+    for(unsigned i=0;i<count;++i){RoomActorState actor;actor.peer=reader.Byte();const auto active=reader.Byte();if(active>1)return false;actor.active=active!=0;
+        for(auto* vector:{&actor.position,&actor.velocity})for(float& value:*vector)value=std::bit_cast<float>(uint32_t(reader.Number(4)));
+        const auto health=reader.Byte();if(health>1)return false;if(health)actor.health=std::bit_cast<int32_t>(uint32_t(reader.Number(4)));
+        state.actors.push_back(actor);}
+    const auto character_count=reader.Number(2);if(character_count>kAuthorityCharacterBatch)return false;
+    for(unsigned i=0;i<character_count;++i){RoomCharacterState character;for(auto& word:character.id)word=uint32_t(reader.Number(4));
+        const auto active=reader.Byte();if(active>1)return false;character.active=active!=0;
+        for(auto* vector:{&character.position,&character.velocity})for(float& value:*vector)value=std::bit_cast<float>(uint32_t(reader.Number(4)));
+        const auto health=reader.Byte();if(health>1)return false;if(health)character.health=std::bit_cast<int32_t>(uint32_t(reader.Number(4)));
+        state.characters.push_back(character);}
+    return reader.Done() && ValidAuthorityActors(state);
+}
 std::string HashText(const Hash& hash){
     constexpr char hex[]="0123456789abcdef";std::string out;out.reserve(64);
     for(auto byte:hash){out+=hex[byte>>4];out+=hex[byte&15];}return out;
@@ -62,6 +112,14 @@ void WritePad(Bytes& bytes,const Pad& pad){
 Pad ReadPad(Reader& reader){
     Pad pad;pad.buttons=uint16_t(reader.Number(2));pad.left_trigger=reader.Byte();pad.right_trigger=reader.Byte();
     for(auto* n:{&pad.left_x,&pad.left_y,&pad.right_x,&pad.right_y})*n=std::bit_cast<int16_t>(uint16_t(reader.Number(2)));return pad;
+}
+void WriteRollbackScope(Bytes& b,const RollbackScope& s){
+    b.insert(b.end(),s.session.begin(),s.session.end());b.insert(b.end(),s.schema.begin(),s.schema.end());
+    U64(b,s.world_epoch);U64(b,s.roster_revision);U64(b,s.players_mask,2);
+}
+RollbackScope ReadRollbackScope(Reader& r){
+    RollbackScope s;for(auto& b:s.session)b=r.Byte();for(auto& b:s.schema)b=r.Byte();
+    s.world_epoch=r.Number(8);s.roster_revision=r.Number(8);s.players_mask=uint16_t(r.Number(2));return s;
 }
 void WriteIdentity(Bytes& b,const Identity& id){
     for(const auto* p:{&id.build,&id.content,&id.checkpoint})b.insert(b.end(),p->begin(),p->end());
@@ -178,12 +236,19 @@ struct Connection {
     Transfer transfer=Transfer::None;size_t transfer_sent=0,transfer_acked=0;
     Clock::time_point transfer_progress=received;
     Bytes incoming,outgoing;size_t sent=0;
+    uint64_t incarnation=0,rollback_serial=0;bool rollback_offered=false,rollback_ready=false,rollback_ended=false;
+    std::shared_ptr<const RollbackBytes> rollback_send;size_t rollback_offset=0;
+    Clock::time_point rollback_started{};
     ~Connection(){Close(socket);}
-    bool Queue(const Bytes& body){
+    bool Queue(const Bytes& body)try{
         if(body.size()>MaxPacket || outgoing.size()-sent+body.size()+4>MaxQueued)return false;
         if(sent){outgoing.erase(outgoing.begin(),outgoing.begin()+sent);sent=0;}
+        // Allocate before appending the length: allocation failure must never
+        // leave a partial packet in an otherwise valid stream.
+        const auto needed=outgoing.size()+body.size()+4;
+        if(outgoing.capacity()<needed)outgoing.reserve(std::min(MaxQueued,std::max(needed,outgoing.capacity()*2)));
         U64(outgoing,body.size(),4);outgoing.insert(outgoing.end(),body.begin(),body.end());return true;
-    }
+    }catch(...){return false;}
     bool Flush(){
         while(sent<outgoing.size()){
             const int n=send(socket,reinterpret_cast<const char*>(outgoing.data()+sent),int(outgoing.size()-sent),0);
@@ -201,6 +266,12 @@ struct Room::Impl {
     Identity id{};LobbyRoster roster{2};LobbySnapshot lobby;uint64_t peer=0;
     std::shared_ptr<class InternetRelay> internet_relay;
     std::vector<std::unique_ptr<Connection>> connections;
+    std::optional<Hash> rollback_schema;uint64_t connection_serial=0;
+    std::shared_ptr<RollbackBytes> rollback_download;
+    std::shared_ptr<const RollbackBytes> rollback_received;
+    uint64_t rollback_receive_serial=0;size_t rollback_receive_size=0;
+    std::vector<RoomRollbackCommands> rollback_commands;size_t rollback_command_count=0;
+    void ClearRollback(){rollback_download.reset();rollback_received.reset();rollback_commands.clear();rollback_command_count=0;rollback_receive_size=0;}
     std::unique_ptr<VoiceTransport> voice;bool want_voice=false;std::string voice_bind;
     VoiceTime voice_request_at{};std::optional<VoiceKeys> voice_keys;
     std::optional<RoomDiagnosticSnapshot> failed_snapshot;
@@ -231,6 +302,10 @@ struct Room::Impl {
     uint64_t gameplay_tick=0;
     bool gameplay_exhausted=false;
     std::optional<uint64_t> gameplay_pending,gameplay_verified;
+    std::optional<uint64_t> authority_sent,authority_received,authority_applied,authority_taken;
+    std::deque<RoomAuthorityState> authority_states;
+    std::map<uint64_t,Hash> authority_pending;
+    bool host_correction=false;
     uint8_t gameplay_window=1;
     RoomHistory gameplay_history;
     RoomLoadExchange loads;
@@ -273,7 +348,7 @@ struct Room::Impl {
         if(failed_snapshot)return;
         failed_snapshot=CaptureDiagnostics();failed_snapshot->mismatch=mismatch;
         if(internet_relay)internet_relay->Stop();
-        voice.reset();error=std::move(why);state=RoomState::Error;Close(listener);connections.clear();inputs.clear();echoes.clear();frames.clear();
+        voice.reset();error=std::move(why);state=RoomState::Error;Close(listener);connections.clear();inputs.clear();echoes.clear();frames.clear();ClearRollback();
     }
     uint16_t VoiceMask()const{uint16_t mask=0;for(const auto& player:lobby.players)mask|=uint16_t(1u<<(player.peer-1));return mask;}
     bool HostVoice(){
@@ -317,15 +392,35 @@ struct Room::Impl {
         }
         return true;
     }
+    bool PumpRollback(Connection& c){
+        if(!rollback_schema || !c.welcomed)return true;
+        if(!c.rollback_offered){auto packet=Packet(Wire::RollbackOffer);packet.insert(packet.end(),rollback_schema->begin(),rollback_schema->end());
+            if(!c.Queue(packet))return false;c.rollback_offered=true;}
+        if(!host || !c.rollback_ready || !c.rollback_send || c.rollback_ended)return true;
+        const auto& bytes=*c.rollback_send;
+        for(unsigned i=0;i<16 && c.rollback_offset<bytes.size();++i){
+            const auto count=std::min<size_t>(4096,bytes.size()-c.rollback_offset);
+            // Corrections must leave room for chat, voice control and inputs.
+            if(c.outgoing.size()-c.sent+count+32>MaxQueued/2)break;
+            auto packet=Packet(Wire::RollbackStateChunk);U64(packet,c.rollback_serial);U64(packet,c.rollback_offset,4);U64(packet,count,2);
+            packet.insert(packet.end(),bytes.begin()+c.rollback_offset,bytes.begin()+c.rollback_offset+count);
+            if(!c.Queue(packet))return false;c.rollback_offset+=count;
+        }
+        if(c.rollback_offset==bytes.size() && c.outgoing.size()-c.sent+32<=MaxQueued/2){
+            auto packet=Packet(Wire::RollbackStateEnd);U64(packet,c.rollback_serial);if(!c.Queue(packet))return false;c.rollback_ended=true;
+        }
+        return true;
+    }
     void BeginLoading(Clock::time_point now){state=RoomState::Loading;loading_started=now;Close(listener);}
     void ResetRawRound(uint64_t tick){raw_tick=tick;raw_pads={};raw_proofs={};raw_frame.reset();local_proof.reset();local_raw_pad.reset();raw_consumed=false;}
     void BeginRaw(){state=RoomState::Bootstrapping;ResetRawRound(id.first_tick);}
     bool BeginRunning(Clock::time_point now,uint64_t first){
-        if(!local_world || !gameplay_history.Reset({id,*local_world,lobby.revision,first,PlayerMask()})){Fail("Could not establish native gameplay input history scope");return false;}
+        if(!local_world || !gameplay_history.Reset({id,*local_world,lobby.revision,first,PlayerMask(),host_correction})){Fail("Could not establish native gameplay input history scope");return false;}
         state=RoomState::Running;submit_next=first+id.input_delay;frame_next=consume_next=first;loads=RoomLoadExchange{};
         raw_pads={};raw_proofs={};raw_frame.reset();local_proof.reset();local_raw_pad.reset();raw_consumed=false;
         progress=now;gameplay_tick=first;gameplay_exhausted=false;
         gameplay_pending.reset();gameplay_verified.reset();gameplay_rounds.clear();gameplay_proof_next.fill(first);gameplay_proof_exhausted={};Close(listener);
+        authority_sent.reset();authority_received.reset();authority_applied.reset();authority_taken.reset();authority_states.clear();authority_pending.clear();
         for(auto& c:connections){c->wire_next=submit_next;c->received=c->pinged=now;}
         for(uint64_t t=first;t<submit_next;++t){
             if(host)for(const auto& p:lobby.players)inputs[t][p.peer]=Neutral();
@@ -376,7 +471,7 @@ struct Room::Impl {
         return reader.Done() && local_world && identity==id && token==*local_world && revision==lobby.revision && mask==PlayerMask() && Nonzero(digest);
     }
     bool GameplayVerified(uint64_t tick,const Hash& digest,Clock::time_point now){
-        if(!gameplay_history.Verify(tick,digest)){Fail("Native gameplay input history acknowledgement lost ordering at tick "+std::to_string(tick));return false;}
+        if(!(host_correction?gameplay_history.AcknowledgeAuthority(tick,digest):gameplay_history.Verify(tick,digest))){Fail("Native gameplay input history acknowledgement lost ordering at tick "+std::to_string(tick));return false;}
         gameplay_verified=tick;gameplay_rounds.erase(tick);progress=now;loads.Verified(tick);
         if(tick==UINT64_MAX)gameplay_exhausted=true;else gameplay_tick=tick+1;
         return true;
@@ -499,13 +594,14 @@ struct Room::Impl {
         }
         if(kind==Wire::Hello){
             if(!host || c.welcomed || (state!=RoomState::Listening && state!=RoomState::Lobby))return false;
-            const auto identity=ReadIdentity(r);const auto mode=r.Byte(),window=r.Byte();auto name=r.String();std::string normalized;
+            const auto identity=ReadIdentity(r);const auto mode=r.Byte(),window=r.Byte(),correction=r.Byte();auto name=r.String();std::string normalized;
             auto reject=[&](uint8_t reason){
                 auto response=Packet(Wire::Rejected);U8(response,reason);c.Queue(response);c.Flush();
                 REXLOG_WARN("Online lobby rejected pending guest: {}",rejection_messages[reason]);return false;
             };
             if(!r.Done())return reject(0);
             if(window!=gameplay_window)return reject(5);
+            if(correction!=uint8_t(host_correction))return reject(5);
             if(mode!=uint8_t(checkpoint_mode))return reject(4);
             if(identity.build!=id.build)return reject(1);
             if(identity.content!=id.content)return reject(2);
@@ -517,7 +613,7 @@ struct Room::Impl {
             uint64_t assigned=2;while(assigned<=roster.capacity() && roster.Find(assigned))++assigned;
             if(assigned>roster.capacity() || roster.Join(assigned,normalized)!=LobbyResult::Ok)return false;
             c.peer=assigned;c.welcomed=true;state=RoomState::Lobby;
-            auto welcome=Packet(Wire::Welcome);WriteIdentity(welcome,id);U64(welcome,assigned);U8(welcome,uint8_t(checkpoint_mode));U8(welcome,gameplay_window);
+            auto welcome=Packet(Wire::Welcome);WriteIdentity(welcome,id);U64(welcome,assigned);U8(welcome,uint8_t(checkpoint_mode));U8(welcome,gameplay_window);U8(welcome,uint8_t(host_correction));
             if(!c.Queue(welcome)){Fail("Room welcome queue full");return true;}
             if(!Publish())return true;
             if(checkpoint_mode){
@@ -529,13 +625,74 @@ struct Room::Impl {
         }
         if(kind==Wire::Welcome){
             if(host || c.welcomed || state!=RoomState::Connecting)return false;
-            const auto identity=ReadIdentity(r);const auto assigned=r.Number(8);const auto mode=r.Byte(),window=r.Byte();
-            if(!r.Done() || window!=gameplay_window || mode!=uint8_t(checkpoint_mode) || !ValidIdentity(identity) || (checkpoint_mode?!CompatibleCheckpoint(identity,id):identity!=id) || assigned<2 || assigned>kOnlineRoomCapacity)return false;
+            const auto identity=ReadIdentity(r);const auto assigned=r.Number(8);const auto mode=r.Byte(),window=r.Byte(),correction=r.Byte();
+            if(!r.Done() || correction!=uint8_t(host_correction) || window!=gameplay_window || mode!=uint8_t(checkpoint_mode) || !ValidIdentity(identity) || (checkpoint_mode?!CompatibleCheckpoint(identity,id):identity!=id) || assigned<2 || assigned>kOnlineRoomCapacity)return false;
             id=identity;peer=assigned;c.peer=1;c.welcomed=true;
             state=checkpoint_mode?RoomState::Transferring:RoomState::Lobby;
             if(checkpoint_mode){c.transfer=Connection::Transfer::Sending;c.transfer_progress=now;}return true;
         }
         if(!c.welcomed)return false;
+        if(kind==Wire::AuthorityState){
+            RoomAuthorityState incoming;
+            if(host || c.peer!=1 || state!=RoomState::Running || !local_world || !ReadAuthorityState(r,incoming) ||
+                incoming.world!=*local_world || incoming.roster_revision!=lobby.revision || incoming.players_mask!=PlayerMask() ||
+                !gameplay_history.scope() || incoming.tick<gameplay_history.scope()->first_tick ||
+                (incoming.tick>consume_next && incoming.tick-consume_next>=gameplay_window) ||
+                (authority_received && incoming.tick<=*authority_received))return false;
+            if(host_correction){
+                if(!Nonzero(incoming.completion) || authority_pending.size()>=gameplay_window ||
+                    (authority_received && *authority_received==UINT64_MAX) ||
+                    incoming.tick!=(authority_received?*authority_received+1:gameplay_history.scope()->first_tick))return false;
+                authority_pending.emplace(incoming.tick,incoming.completion);
+            }
+            authority_received=incoming.tick;
+            // Sparse diagnostic samples may coalesce. Applied-state mode must
+            // retain every result until its matching update is acknowledged.
+            if(authority_states.size()==8){if(host_correction)return false;authority_states.pop_front();}
+            authority_states.push_back(std::move(incoming));return true;
+        }
+        if(kind>=Wire::RollbackOffer && kind<=Wire::RollbackInputs){
+            if(!rollback_schema || (state!=RoomState::Listening && state!=RoomState::Lobby))return false;
+            if(kind==Wire::RollbackOffer){
+                Hash schema{};for(auto& b:schema)b=r.Byte();if(!r.Done() || schema!=*rollback_schema || c.rollback_ready)return false;
+                c.rollback_ready=true;return true;
+            }
+            if(!c.rollback_ready)return false;
+            if(kind==Wire::RollbackStateBegin){
+                const auto serial=r.Number(8),size=r.Number(4);
+                if(host || !r.Done() || !serial || serial<=rollback_receive_serial || rollback_download || rollback_received || !size || size>16*1024*1024+512)return false;
+                auto download=std::make_shared<Bytes>();download->reserve(size);
+                rollback_download=std::move(download);rollback_receive_size=size;rollback_receive_serial=serial;c.rollback_started=now;return true;
+            }
+            if(kind==Wire::RollbackStateChunk){
+                const auto serial=r.Number(8),offset=r.Number(4),count=r.Number(2);
+                if(host || !r.good || !rollback_download || serial!=rollback_receive_serial || offset!=rollback_download->size() || !count || count>4096 || count!=r.bytes.size()-r.at || count>rollback_receive_size-offset)return false;
+                rollback_download->insert(rollback_download->end(),r.bytes.begin()+r.at,r.bytes.end());c.rollback_started=now;return true;
+            }
+            if(kind==Wire::RollbackStateEnd){
+                const auto serial=r.Number(8);
+                if(host || !r.Done() || !rollback_download || serial!=rollback_receive_serial || rollback_download->size()!=rollback_receive_size)return false;
+                const auto decoded=DecodeRollbackSnapshot(*rollback_download,16*1024*1024);
+                if(!decoded || decoded->scope.session!=id.session || decoded->scope.schema!=*rollback_schema)return false;
+                rollback_received=std::move(rollback_download);rollback_receive_size=0;return true;
+            }
+            if(kind==Wire::RollbackStateReceived){
+                const auto serial=r.Number(8);if(!host || !r.Done() || !c.rollback_send || !c.rollback_ended || serial!=c.rollback_serial)return false;
+                // Receipt acknowledges transfer integrity, not native restore.
+                c.rollback_send.reset();c.rollback_offset=0;c.rollback_ended=false;return true;
+            }
+            if(kind==Wire::RollbackInputs){
+                const auto scope=ReadRollbackScope(r);const auto count=r.Byte();
+                if(!host || !count || count>32 || rollback_command_count+count>256 || scope.session!=id.session || scope.schema!=*rollback_schema || !scope.world_epoch || !scope.roster_revision || !scope.players_mask)return false;
+                RoomRollbackCommands commands;commands.peer=c.peer;commands.connection=c.incarnation;commands.scope=scope;
+                uint64_t previous=0;
+                for(unsigned i=0;i<count;++i){RoomRollbackInput input;input.tick=r.Number(8);input.pad=ReadPad(r);
+                    if(!r.good || input.tick==UINT64_MAX || (i && input.tick<=previous))return false;
+                    previous=input.tick;commands.inputs.push_back(input);}
+                if(!r.Done())return false;rollback_commands.push_back(std::move(commands));rollback_command_count+=count;return true;
+            }
+            return false;
+        }
         if(kind==Wire::VoiceRequest){
             if(host && r.Done() && (c.voice_requested_at==VoiceTime{} || now-c.voice_requested_at>=std::chrono::seconds(2))){
                 c.voice_requested_at=now;c.voice_requested=true;if(c.voice_offered && voice)voice->RemovePeer(unsigned(c.peer));c.voice_offered=false;
@@ -641,6 +798,7 @@ struct Room::Impl {
             lobby=std::move(*snapshot);return true;
         }
         if(kind==Wire::Start){
+            if(rollback_schema)return false;
             if(host || state!=RoomState::Lobby)return false;
             const auto mode=r.Byte();if(mode>1)return false;
             auto snapshot=ReadRoster(r);if(!r.Done() || !snapshot || !snapshot->locked || snapshot->players.size()<2 || snapshot->capacity!=lobby.capacity || snapshot->players.size()!=lobby.players.size())return false;
@@ -690,10 +848,12 @@ struct Room::Impl {
                 next!=completed+1 || digest!=local_proof->digest || (activate && (!local_proof->ready || next>UINT64_MAX-id.input_delay)))return false;
             if(activate)return BeginRunning(now,next);ResetRawRound(next);return true;
         }
-        if(kind==Wire::GameplayComplete){
+        if(kind==Wire::GameplayComplete || kind==Wire::AuthorityApplied){
+            if((kind==Wire::AuthorityApplied)!=host_correction)return false;
             if(!host || state!=RoomState::Running || gameplay_exhausted || !c.peer || c.peer>kOnlineRoomCapacity || gameplay_proof_exhausted[c.peer-1])return false;
             uint64_t tick=0;Hash digest{};
             if(!ReadGameplayProof(r,tick,digest) || !ProofCredit(tick) || tick!=gameplay_proof_next[c.peer-1] || (!frame_exhausted && frame_next<=tick))return false;
+            if(host_correction && (!authority_sent || *authority_sent<tick || !gameplay_rounds[tick].local || digest!=*gameplay_rounds[tick].local))return false;
             auto& round=gameplay_rounds[tick];if(round.proofs[c.peer-1])return false;round.proofs[c.peer-1]=digest;
             if(tick==UINT64_MAX)gameplay_proof_exhausted[c.peer-1]=true;else gameplay_proof_next[c.peer-1]=tick+1;
             return AdvanceGameplay(now);
@@ -721,7 +881,9 @@ struct Room::Impl {
             uint64_t tick=0;Hash digest{};
             if(!ReadGameplayProof(r,tick,digest) || tick!=gameplay_tick)return false;
             const auto round=gameplay_rounds.find(tick);
-            if(round==gameplay_rounds.end() || !round->second.local || digest!=*round->second.local)return false;
+            if(round==gameplay_rounds.end() || !round->second.local)return false;
+            if(host_correction){if(!round->second.proofs[peer-1] || digest!=*round->second.proofs[peer-1])return false;}
+            else if(digest!=*round->second.local)return false;
             return GameplayVerified(tick,digest,now);
         }
         if(kind==Wire::Input){
@@ -754,7 +916,72 @@ Room::Room():impl_(std::make_unique<Impl>()){}
 Room::~Room()=default;
 void Room::KeepInternetRelay(std::shared_ptr<InternetRelay> relay){impl_->internet_relay=std::move(relay);}
 bool Room::SetGameplayVerificationWindow(uint8_t window){auto& p=*impl_;if(p.state!=RoomState::Idle || window<1 || window>8)return false;p.gameplay_window=window;return true;}
+bool Room::SetHostCorrectionMode(bool enabled){auto& p=*impl_;if(p.state!=RoomState::Idle || p.rollback_schema)return false;p.host_correction=enabled;return true;}
+bool Room::host_correction_mode()const{return impl_->host_correction;}
+bool Room::EnableRollbackTransport(const Hash& schema){
+    auto& p=*impl_;if(p.state!=RoomState::Idle || p.rollback_schema || p.host_correction || !Nonzero(schema))return false;p.rollback_schema=schema;return true;
+}
+bool Room::rollback_peer_ready(uint64_t peer)const{
+    const auto& p=*impl_;for(const auto& c:p.connections)if(c->peer==peer && c->welcomed && c->rollback_ready && c->rollback_offered)return true;return false;
+}
+uint64_t Room::rollback_connection_id(uint64_t peer)const{
+    const auto& p=*impl_;for(const auto& c:p.connections)if(c->peer==peer && c->welcomed && c->rollback_ready && c->rollback_offered)return c->incarnation;return 0;
+}
+bool Room::SendRollbackSnapshot(uint64_t peer,std::shared_ptr<const RollbackBytes> bytes)try{
+    auto& p=*impl_;if(!p.host || !p.rollback_schema || !bytes || (p.state!=RoomState::Listening && p.state!=RoomState::Lobby))return false;
+    const auto found=std::find_if(p.connections.begin(),p.connections.end(),[&](const auto& c){return c->peer==peer && c->welcomed && c->rollback_ready && c->rollback_offered;});
+    if(found==p.connections.end())return false;auto& c=**found;
+    if(c.rollback_send || c.rollback_serial==UINT64_MAX || c.outgoing.size()-c.sent>MaxQueued/2)return false;
+    const auto decoded=DecodeRollbackSnapshot(*bytes,16*1024*1024);if(!decoded || decoded->scope.session!=p.id.session || decoded->scope.schema!=*p.rollback_schema)return false;
+    auto begin=Packet(Wire::RollbackStateBegin);U64(begin,c.rollback_serial+1);U64(begin,bytes->size(),4);if(!c.Queue(begin))return false;
+    ++c.rollback_serial;c.rollback_send=std::move(bytes);c.rollback_offset=0;c.rollback_ended=false;c.rollback_started=Clock::now();return true;
+}catch(...){return false;}
+std::shared_ptr<const RollbackBytes> Room::TakeRollbackSnapshot(){
+    auto& p=*impl_;if(!p.rollback_received || p.connections.size()!=1 || p.host)return {};
+    auto ack=Packet(Wire::RollbackStateReceived);U64(ack,p.rollback_receive_serial);
+    if(!p.connections.front()->Queue(ack))return {};return std::exchange(p.rollback_received,{});
+}
+bool Room::SendRollbackInputs(const RollbackScope& scope,std::span<const RoomRollbackInput> inputs)try{
+    auto& p=*impl_;if(p.host || !p.rollback_schema || p.state!=RoomState::Lobby || !rollback_peer_ready(1) || inputs.empty() || inputs.size()>32 || scope.session!=p.id.session || scope.schema!=*p.rollback_schema || !scope.world_epoch || !scope.roster_revision || !scope.players_mask)return false;
+    auto packet=Packet(Wire::RollbackInputs);WriteRollbackScope(packet,scope);U8(packet,uint8_t(inputs.size()));uint64_t previous=0;
+    for(unsigned i=0;i<inputs.size();++i){const auto& input=inputs[i];if(input.pad.menu_pause || input.tick==UINT64_MAX || (i && input.tick<=previous))return false;
+        previous=input.tick;U64(packet,input.tick);WritePad(packet,input.pad);}
+    auto& c=*p.connections.front();return c.outgoing.size()-c.sent+packet.size()+4<=MaxQueued/2 && c.Queue(packet);
+}catch(...){return false;}
+std::vector<RoomRollbackCommands> Room::TakeRollbackInputs(){auto& p=*impl_;p.rollback_command_count=0;return std::exchange(p.rollback_commands,{});}
 uint8_t Room::gameplay_verification_window()const{return impl_->gameplay_window;}
+bool Room::PublishAuthorityState(const RoomAuthorityState& state){
+    auto& p=*impl_;
+    if(!p.host || p.state!=RoomState::Running || !p.local_world || state.world!=*p.local_world ||
+        state.roster_revision!=p.lobby.revision || state.players_mask!=p.PlayerMask() || !ValidAuthorityActors(state) ||
+        !p.gameplay_history.scope() || state.tick<p.gameplay_history.scope()->first_tick ||
+        (!p.gameplay_proof_exhausted[0] && state.tick>=p.gameplay_proof_next[0]) ||
+        (p.authority_sent && state.tick<=*p.authority_sent))return false;
+    if(p.host_correction){const auto round=p.gameplay_rounds.find(state.tick);
+        if(round==p.gameplay_rounds.end() || !round->second.local || state.completion!=*round->second.local ||
+            (p.authority_sent && *p.authority_sent==UINT64_MAX) ||
+            state.tick!=(p.authority_sent?*p.authority_sent+1:p.gameplay_history.scope()->first_tick))return false;}
+    auto packet=Packet(Wire::AuthorityState);WriteAuthorityState(packet,state);
+    for(const auto& c:p.connections)if(c->welcomed && c->outgoing.size()-c->sent+packet.size()+4>MaxQueued/2)return false;
+    for(auto& c:p.connections)if(c->welcomed && !p.Queue(*c,packet))return false;
+    p.authority_sent=state.tick;return true;
+}
+std::optional<RoomAuthorityState> Room::TakeAuthorityState(){
+    auto& p=*impl_;if(p.host || p.state!=RoomState::Running || p.authority_states.empty() || (p.host_correction && p.authority_taken))return {};
+    auto state=std::move(p.authority_states.front());p.authority_states.pop_front();if(p.host_correction)p.authority_taken=state.tick;return state;
+}
+bool Room::AcknowledgeAuthorityState(uint64_t tick,const Hash& completion){
+    auto& p=*impl_;if(p.host || !p.host_correction || p.state!=RoomState::Running)return false;
+    const auto pending=p.authority_pending.find(tick);
+    const auto round=p.gameplay_rounds.find(tick);
+    if(pending==p.authority_pending.end() || pending->second!=completion || p.authority_taken!=tick || !p.gameplay_history.scope() ||
+        (p.authority_applied && *p.authority_applied==UINT64_MAX) ||
+        tick!=(p.authority_applied?*p.authority_applied+1:p.gameplay_history.scope()->first_tick) ||
+        round==p.gameplay_rounds.end() || !round->second.local || round->second.proofs[p.peer-1])return false;
+    auto packet=Packet(Wire::AuthorityApplied);p.WriteGameplayProof(packet,tick,completion);
+    if(!p.Queue(*p.connections.front(),packet))return false;
+    round->second.proofs[p.peer-1]=completion;p.authority_pending.erase(pending);p.authority_applied=tick;p.authority_taken.reset();return true;
+}
 bool Room::Host(const Identity& id,std::string_view address,uint16_t port,uint8_t capacity,std::string_view name){
     auto& p=*impl_;std::string normalized;const auto endpoint=ParseNumericAddress(address,true);
     if(p.state!=RoomState::Idle || !Winsock() || !endpoint || !ValidIdentity(id) || capacity<2 || capacity>16 || !Name(name,normalized))return false;
@@ -768,6 +995,7 @@ bool Room::Join(const Identity& id,std::string_view address,uint16_t port,std::s
     return JoinInternal(id,address,port,name,false);
 }
 bool Room::HostWithCheckpoint(const Identity& id,std::string_view address,uint16_t port,uint8_t capacity,std::string_view name,std::shared_ptr<const CheckpointBundle> bundle){
+    if(impl_->rollback_schema)return false;
     if(!bundle || bundle->identity!=id.checkpoint || !BundleHeader(bundle->bytes,id.checkpoint))return false;
     if(!Host(id,address,port,capacity,name))return false;
     impl_->checkpoint_mode=true;impl_->offered=std::move(bundle);return true;
@@ -777,6 +1005,7 @@ bool Room::JoinWithCheckpoint(const Identity& id,std::string_view address,uint16
 }
 bool Room::JoinInternal(const Identity& id,std::string_view address,uint16_t port,std::string_view name,bool checkpoint){
     auto& p=*impl_;std::string normalized;auto endpoint=ParseNumericAddress(address);
+    if(checkpoint && p.rollback_schema)return false;
     auto check=id;if(checkpoint)check.checkpoint[0]=1;
     if(p.state!=RoomState::Idle || !Winsock() || !endpoint || !port || !ValidIdentity(check) || !Name(name,normalized))return false;
     endpoint->Port(port);auto c=std::make_unique<Connection>();c->socket=socket(endpoint->storage.ss_family,SOCK_STREAM,IPPROTO_TCP);
@@ -784,7 +1013,7 @@ bool Room::JoinInternal(const Identity& id,std::string_view address,uint16_t por
     const auto result=connect(c->socket,reinterpret_cast<const sockaddr*>(&endpoint->storage),endpoint->size);
     if(result==SOCKET_ERROR && WSAGetLastError()!=WSAEWOULDBLOCK)return false;
     c->connecting=result!=0;p.id=id;p.join_name=normalized;p.state=RoomState::Connecting;p.checkpoint_mode=checkpoint;
-    auto hello=Packet(Wire::Hello);WriteIdentity(hello,id);U8(hello,uint8_t(checkpoint));U8(hello,p.gameplay_window);Text(hello,normalized);if(!c->Queue(hello))return false;
+    auto hello=Packet(Wire::Hello);WriteIdentity(hello,id);U8(hello,uint8_t(checkpoint));U8(hello,p.gameplay_window);U8(hello,uint8_t(p.host_correction));Text(hello,normalized);if(!c->Queue(hello))return false;
     p.connections.push_back(std::move(c));return true;
 }
 std::shared_ptr<const std::vector<uint8_t>> Room::DownloadedCheckpoint()const{
@@ -821,8 +1050,8 @@ void Room::Poll(Clock::time_point now){
     if(p.host && p.listener!=INVALID_SOCKET){
         // Bounded work per poll, including unauthenticated sockets.
         for(unsigned i=0;i<16;++i){auto socket=accept(p.listener,nullptr,nullptr);if(socket==INVALID_SOCKET)break;
-            if(p.connections.size()>=15 || !Nonblocking(socket)){Close(socket);continue;}
-            auto c=std::make_unique<Connection>();c->socket=socket;c->received=c->pinged=now;p.connections.push_back(std::move(c));}
+            if(p.connections.size()>=15 || p.connection_serial==UINT64_MAX || !Nonblocking(socket)){Close(socket);continue;}
+            auto c=std::make_unique<Connection>();c->socket=socket;c->incarnation=++p.connection_serial;c->received=c->pinged=now;p.connections.push_back(std::move(c));}
     }
     for(size_t i=0;i<p.connections.size();){
         auto& c=*p.connections[i];bool alive=true,graceful_eof=false;
@@ -857,10 +1086,12 @@ void Room::Poll(Clock::time_point now){
             if(graceful_eof)stop("connection closed by peer");
             if(alive && c.welcomed && now-c.pinged>=std::chrono::seconds(2)){auto ping=Packet(Wire::Ping);if(!c.Queue(ping))stop("send queue limit exceeded");c.pinged=now;}
             if(alive && p.host && p.checkpoint_mode && !p.PumpCheckpoint(c))stop("checkpoint transfer failed");
+            if(alive && p.rollback_schema && !p.PumpRollback(c))stop("rollback transfer failed");
             if(alive && !c.Flush())stop("socket send failed",WSAGetLastError());
         }
         const bool transferring=p.checkpoint_mode && c.welcomed && c.transfer!=Connection::Transfer::Complete;
         if(transferring && now-c.transfer_progress>TransferTimeout)stop("checkpoint progress deadline exceeded");
+        if((c.rollback_send || p.rollback_download) && now-c.rollback_started>TransferTimeout)stop("rollback snapshot transfer deadline exceeded");
         if(now-c.received>((p.state==RoomState::Loading || p.state==RoomState::Bootstrapping)?StartupTimeout:(transferring || p.loads.Tracking())?TransferTimeout:Timeout))stop("participant response deadline exceeded");
         if(!alive){
             if(!p.host || (c.welcomed && (p.state==RoomState::Loading || p.state==RoomState::Bootstrapping || p.state==RoomState::Running))){
@@ -948,7 +1179,7 @@ std::vector<RoomChatMessage> Room::TakeChatMessages(){auto& q=impl_->chat;std::v
 bool Room::Start(){return StartInternal(false);}
 bool Room::StartNativeBootstrap(){return StartInternal(true);}
 bool Room::StartInternal(bool bootstrap){
-    auto& p=*impl_;if(!p.host || p.state!=RoomState::Lobby || p.roster.players().size()<2)return false;
+    auto& p=*impl_;if(p.rollback_schema || !p.host || p.state!=RoomState::Lobby || p.roster.players().size()<2)return false;
     if(p.checkpoint_mode && std::any_of(p.connections.begin(),p.connections.end(),[](const auto& c){return c->welcomed && c->transfer!=Connection::Transfer::Complete;}))return false;
     if(p.roster.Start()!=LobbyResult::Ok)return false;p.lobby=Snapshot(p.roster);
     // Pending unadmitted TCP sockets do not become gameplay participants.
@@ -1023,10 +1254,11 @@ bool Room::CompleteGameplay(uint64_t tick,const Hash& digest){
     const auto now=Clock::now();if(p.loads.Expired(now) || (!p.loads.Tracking() && now-p.progress>Timeout)){p.Fail("Online room completed-world progress timed out; simulation stopped");return false;}
     auto& round=p.gameplay_rounds[tick];if(round.local || round.proofs[p.peer-1])return false;
     if(!p.gameplay_history.Complete(tick,digest)){p.Fail("Native gameplay input history could not complete tick "+std::to_string(tick));return false;}
-    round.local=digest;round.proofs[p.peer-1]=digest;
+    round.local=digest;if(p.host || !p.host_correction)round.proofs[p.peer-1]=digest;
     p.gameplay_pending.reset();
     if(tick==UINT64_MAX)p.gameplay_proof_exhausted[p.peer-1]=true;else p.gameplay_proof_next[p.peer-1]=tick+1;
     if(p.host)return p.AdvanceGameplay(now);
+    if(p.host_correction)return true; // Explicit applied-state acknowledgement follows native correction.
     auto packet=Packet(Wire::GameplayComplete);p.WriteGameplayProof(packet,tick,digest);return p.Queue(*p.connections.front(),packet);
 }
 bool Room::gameplay_completion_pending()const{return impl_->gameplay_pending.has_value() || impl_->LocalUnverified()!=0;}
@@ -1059,14 +1291,15 @@ RoomHistoryResult Room::ReadGameplayHistory(const RoomHistoryScope& scope,uint64
 RoomHistoryResult Room::FingerprintGameplayHistory(const RoomHistoryScope& scope,uint64_t first,uint64_t last,std::string& out)const{
     std::vector<RoomHistoryEntry> records;const auto result=ReadGameplayHistory(scope,first,last,records);if(result!=RoomHistoryResult::Ready)return result;
     // Versioned canonical bytes, never native struct padding or guest pointers.
-    Bytes bytes{'B','W','H','2'};WriteIdentity(bytes,scope.identity);bytes.insert(bytes.end(),scope.world.begin(),scope.world.end());
+    Bytes bytes{'B','W','H','3'};WriteIdentity(bytes,scope.identity);bytes.insert(bytes.end(),scope.world.begin(),scope.world.end());U8(bytes,uint8_t(scope.host_correction));
     U64(bytes,scope.roster_revision);U64(bytes,scope.first_tick);U64(bytes,scope.players_mask,2);U64(bytes,first);U64(bytes,last);
     for(const auto& record:records){U64(bytes,record.frame.tick);U64(bytes,record.frame.players_mask,2);
         for(unsigned i=0;i<16;++i)if(record.frame.players_mask&(1u<<i))WriteCommand(bytes,record.frame.players[i]);
-        bytes.insert(bytes.end(),record.completed->begin(),record.completed->end());}
+        bytes.insert(bytes.end(),record.completed->begin(),record.completed->end());
+        if(scope.host_correction){if(!record.authority)return RoomHistoryResult::Unverified;bytes.insert(bytes.end(),record.authority->begin(),record.authority->end());}}
     out=rex::util::sha256(std::string_view(reinterpret_cast<const char*>(bytes.data()),bytes.size()));return result;
 }
-void Room::Disconnect(){auto& p=*impl_;if(p.state==RoomState::Disconnected)return;if(p.internet_relay)p.internet_relay->Stop();if(!p.failed_snapshot)p.failed_snapshot=p.CaptureDiagnostics();p.voice.reset();Close(p.listener);p.connections.clear();p.inputs.clear();p.echoes.clear();p.frames.clear();p.state=RoomState::Disconnected;}
+void Room::Disconnect(){auto& p=*impl_;if(p.state==RoomState::Disconnected)return;if(p.internet_relay)p.internet_relay->Stop();if(!p.failed_snapshot)p.failed_snapshot=p.CaptureDiagnostics();p.voice.reset();Close(p.listener);p.connections.clear();p.inputs.clear();p.echoes.clear();p.frames.clear();p.ClearRollback();p.state=RoomState::Disconnected;}
 RoomState Room::state()const{return impl_->state;}
 uint16_t Room::port()const{return impl_->bound_port;}
 uint64_t Room::local_peer()const{return impl_->peer;}
@@ -1171,6 +1404,64 @@ bool TestOnlineRoomChat(){
     check(pump([&]{return std::all_of(rooms.begin(),rooms.end(),[](const auto& r){return r->impl_->chat.size()==1;});}),"running participants all receive chat without taking frames");
     check(rooms[0]->next_tick()==running_tick && rooms[0]->next_submit_tick()==running_submit && rooms[0]->lobby().revision==running_revision,"running chat leaves input timeline and roster untouched");
     if(ok)REXLOG_INFO("Room chat passed {} UTF-8/rate/real16-peer/order/identity/history/isolation checks; no voice or native gameplay assertion",checks);return ok;
+}
+bool TestRoomRollbackTransport(){
+    unsigned checks=0;auto check=[&](bool ok,const char* why){++checks;if(!ok)REXLOG_ERROR("Room rollback transport: {}",why);return ok;};
+    Identity id;id.build[0]=1;id.content[0]=2;id.checkpoint[0]=3;id.session[0]=79;
+    Hash schema{};schema[0]=31;
+    std::vector<std::unique_ptr<Room>> rooms;
+    auto pump=[&](const auto& done){const auto deadline=Clock::now()+std::chrono::seconds(4);
+        do{for(auto& room:rooms)room->Poll();if(done())return true;std::this_thread::sleep_for(std::chrono::milliseconds(1));}while(Clock::now()<deadline);return false;};
+    auto make_guest=[&](std::string name){auto guest=std::make_unique<Room>();if(!guest->EnableRollbackTransport(schema) || !guest->Join(id,"127.0.0.1",rooms[0]->port(),name))return false;rooms.push_back(std::move(guest));return true;};
+    auto host=std::make_unique<Room>();
+    if(!check(!host->EnableRollbackTransport({}) && host->EnableRollbackTransport(schema) && host->Host(id,"127.0.0.1",0,16,"Host"),"rollback mode explicitly negotiates a nonzero schema before hosting"))return false;
+    rooms.push_back(std::move(host));if(!make_guest("Friend") || !make_guest("Other friend"))return false;
+    if(!check(pump([&]{return rooms[0]->rollback_peer_ready(2) && rooms[0]->rollback_peer_ready(3) && rooms[1]->rollback_peer_ready(1) && rooms[2]->rollback_peer_ready(1);}),"existing real TCP room negotiates snapshot mode in both directions"))return false;
+    if(!check(!rooms[0]->Start() && !rooms[0]->StartNativeBootstrap() && !rooms[0]->EnableRollbackTransport(schema),"snapshot mode cannot accidentally freeze the roster or enter lockstep startup"))return false;
+    RollbackSnapshot snapshot;snapshot.scope.session=id.session;snapshot.scope.schema=schema;snapshot.scope.world_epoch=snapshot.scope.roster_revision=1;snapshot.scope.players_mask=7;
+    snapshot.tick=300;snapshot.revision=9;snapshot.state.resize(128*1024);for(size_t i=0;i<snapshot.state.size();++i)snapshot.state[i]=uint8_t(i*13);
+    auto encoded=EncodeRollbackSnapshot(snapshot,16*1024*1024);if(!encoded)return false;
+    auto packet=std::make_shared<const RollbackBytes>(std::move(*encoded));
+    if(!check(rooms[0]->SendRollbackSnapshot(2,packet) && rooms[0]->SendRollbackSnapshot(3,packet) && !rooms[0]->SendRollbackSnapshot(2,packet) && !rooms[1]->SendRollbackSnapshot(1,packet),
+       "one bounded in-flight snapshot per peer; only the admitted host may send state"))return false;
+    const RoomRollbackInput commands[]={{300,Pad{.buttons=0x1000}},{301,Pad{.left_x=8192}},{302,Pad{}}};
+    if(!check(rooms[1]->SendRollbackInputs(snapshot.scope,commands) && rooms[2]->SendChat("chat during snapshot"),"held input batches and chat use the existing channel during transfer"))return false;
+    if(!check(pump([&]{return rooms[1]->impl_->rollback_received && rooms[2]->impl_->rollback_received && !rooms[0]->impl_->rollback_commands.empty() && !rooms[0]->impl_->chat.empty();}),
+       "chunked snapshots, input and chat all make progress without advancing a lockstep frame"))return false;
+    auto first=rooms[1]->TakeRollbackSnapshot(),second=rooms[2]->TakeRollbackSnapshot();
+    if(!check(first && second && *first==*packet && *second==*packet,"larger-than-packet snapshots arrive byte-exact with envelope integrity checked"))return false;
+    if(!check(pump([&]{return !rooms[0]->impl_->connections[0]->rollback_send && !rooms[0]->impl_->connections[1]->rollback_send;}),"receipt backpressure releases transfer ownership only after the consumer takes its state"))return false;
+    auto received=rooms[0]->TakeRollbackInputs();const auto incarnation=rooms[0]->rollback_connection_id(2);
+    if(!check(received.size()==1 && received[0].peer==2 && incarnation && received[0].connection==incarnation && received[0].scope==snapshot.scope &&
+       received[0].inputs.size()==3 && received[0].inputs[0].pad==commands[0].pad && received[0].inputs[2].tick==302,
+       "host binds held commands to its assigned connection incarnation and scope, not a sender-chosen peer"))return false;
+    auto wrong=snapshot.scope;wrong.session[0]^=1;
+    if(!check(!rooms[1]->SendRollbackInputs(wrong,commands),"other-room inputs are rejected before queuing"))return false;
+    auto bad_snapshot=snapshot;bad_snapshot.scope.schema[0]^=1;auto bad=EncodeRollbackSnapshot(bad_snapshot,16*1024*1024);
+    if(!check(bad && !rooms[0]->SendRollbackSnapshot(2,std::make_shared<const RollbackBytes>(std::move(*bad))),"incompatible native state schemas cannot be sent as corrections"))return false;
+    rooms[1]->Disconnect();
+    if(!check(pump([&]{return rooms[0]->lobby().players.size()==2;}) && rooms[0]->state()==RoomState::Lobby && rooms[0]->rollback_connection_id(2)==0,
+       "guest socket departure leaves host listener and remaining guest intact"))return false;
+    if(!make_guest("Friend returned"))return false;
+    if(!check(pump([&]{return rooms[0]->rollback_peer_ready(2) && rooms.back()->rollback_peer_ready(1);}) && rooms[0]->rollback_connection_id(2)!=incarnation,
+       "a new connection can join while the host remains open; reused slots get a fresh connection identity"))return false;
+    for(unsigned i=4;i<=16;++i)if(!make_guest("Player "+std::to_string(i)))return false;
+    if(!check(pump([&]{if(rooms[0]->lobby().players.size()!=16)return false;for(unsigned i=2;i<=16;++i)if(!rooms[0]->rollback_peer_ready(i))return false;return true;}),
+       "sixteen-player snapshot mode leaves live admission open without lockstep Start"))return false;
+    // A guest cannot forge authoritative state; retire only that socket.
+    auto forged=Packet(Wire::RollbackStateBegin);U64(forged,1);U64(forged,1024,4);rooms[2]->impl_->connections.front()->Queue(forged);
+    if(!check(pump([&]{return rooms[0]->lobby().players.size()==15;}) && rooms[0]->state()==RoomState::Lobby && rooms[0]->rollback_peer_ready(2),
+       "a guest-sent world snapshot is rejected without disconnecting the host or other participants"))return false;
+    // Inject a legal transfer with damaged content directly through the real
+    // host socket to exercise receiver integrity, not only sender validation.
+    auto target=std::find_if(rooms[0]->impl_->connections.begin(),rooms[0]->impl_->connections.end(),[](const auto& c){return c->peer==2;});
+    if(target==rooms[0]->impl_->connections.end())return false;auto corrupt=*packet;corrupt.back()^=1;
+    (*target)->rollback_send=std::make_shared<const Bytes>(std::move(corrupt));(*target)->rollback_offset=0;(*target)->rollback_ended=false;(*target)->rollback_started=Clock::now();++(*target)->rollback_serial;
+    auto begin=Packet(Wire::RollbackStateBegin);U64(begin,(*target)->rollback_serial);U64(begin,packet->size(),4);(*target)->Queue(begin);
+    Room* returned=rooms[3].get();
+    if(!check(pump([&]{return returned->state()==RoomState::Error;}) && !returned->TakeRollbackSnapshot(),"corrupt native state never reaches the consumer"))return false;
+    if(!check(pump([&]{return rooms[0]->lobby().players.size()==14;}) && rooms[0]->state()==RoomState::Lobby,"a failed correction transfer cannot terminate the host's running room"))return false;
+    REXLOG_INFO("Room rollback transport passed {} real-TCP snapshot/chunk/integrity/input/identity/16-peer/live-admission/departure checks; native EM2 state restore remains unimplemented",checks);return true;
 }
 bool TestOnlineRoomLoads(){
     bool ok=true;unsigned checks=0;
@@ -1288,7 +1579,7 @@ bool TestOnlineRoom(){
     Identity id;id.session[0]=7;id.build[0]=1;id.content[0]=2;id.checkpoint[0]=3;id.first_tick=100;id.input_delay=2;
     std::array<uint8_t,32> world{};world[0]=9;
     std::vector<std::unique_ptr<Room>> rooms;
-    uint8_t fixture_verification_window=1;
+    uint8_t fixture_verification_window=1;bool fixture_host_correction=false;
     auto pump=[&](auto done){const auto deadline=Clock::now()+std::chrono::seconds(5);do{for(auto& r:rooms)r->Poll();if(done())return true;std::this_thread::sleep_for(std::chrono::milliseconds(1));}while(Clock::now()<deadline);return false;};
     // Explicit fixture digests acknowledge fixture processing, not a real game world.
     auto fixture_digest=[](uint64_t tick){Hash digest{};digest[0]=0xF1;for(unsigned i=0;i<8;++i)digest[24+i]=uint8_t(tick>>(56-i*8));return digest;};
@@ -1305,8 +1596,8 @@ bool TestOnlineRoom(){
             fingerprint=current;
         }return true;
     };
-    auto setup=[&](unsigned count){rooms.clear();rooms.push_back(std::make_unique<Room>());if(!rooms[0]->SetGameplayVerificationWindow(fixture_verification_window) || !rooms[0]->Host(id,"127.0.0.1",0,uint8_t(count),"Host"))return false;
-        for(unsigned i=1;i<count;++i){rooms.push_back(std::make_unique<Room>());if(!rooms.back()->SetGameplayVerificationWindow(fixture_verification_window) || !rooms.back()->Join(id,"127.0.0.1",rooms[0]->port(),"Guest "+std::to_string(i)))return false;}
+    auto setup=[&](unsigned count){rooms.clear();rooms.push_back(std::make_unique<Room>());if(!rooms[0]->SetGameplayVerificationWindow(fixture_verification_window) || !rooms[0]->SetHostCorrectionMode(fixture_host_correction) || !rooms[0]->Host(id,"127.0.0.1",0,uint8_t(count),"Host"))return false;
+        for(unsigned i=1;i<count;++i){rooms.push_back(std::make_unique<Room>());if(!rooms.back()->SetGameplayVerificationWindow(fixture_verification_window) || !rooms.back()->SetHostCorrectionMode(fixture_host_correction) || !rooms.back()->Join(id,"127.0.0.1",rooms[0]->port(),"Guest "+std::to_string(i)))return false;}
         return pump([&]{return std::all_of(rooms.begin(),rooms.end(),[&](const auto& r){return r->lobby().players.size()==count;});});};
     if(!check(setup(16),"sixteen real simultaneous loopback participants handshake and receive the host roster"))return false;
     for(unsigned i=0;i<16;++i)check(rooms[i]->local_peer()==i+1,"peer IDs assigned by host connection, never client supplied");
@@ -1481,6 +1772,31 @@ bool TestOnlineRoom(){
     check(!rooms[0]->CompleteGameplay(id.first_tick,{}) && !rooms[0]->CompleteGameplay(id.first_tick+1,proof) &&
         rooms[0]->CompleteGameplay(id.first_tick,proof) && !rooms[0]->CompleteGameplay(id.first_tick,proof),
         "completion requires exact consumed tick, nonzero digest and a single immutable local proof");
+    RoomAuthorityState authority;authority.tick=id.first_tick;authority.roster_revision=rooms[0]->lobby().revision;
+    authority.world=world;authority.players_mask=3;
+    authority.actors={{1,true,{1,2,3},{4,5,6}},{2,true,{-10,20,30},{-4,0,6}}};
+    authority.actors[0].health=5;authority.actors[1].health=0;
+    for(unsigned i=0;i<kAuthorityCharacterBatch;++i)authority.characters.push_back({{i+100,2,3,4},true,{float(i),2,3},{4,5,float(i)}});
+    authority.characters[0].health=-1;authority.characters[1].health=std::numeric_limits<int32_t>::max();
+    auto invalid_authority=authority;invalid_authority.actors[1].peer=1;
+    check(!rooms[0]->PublishAuthorityState(invalid_authority) && !rooms[1]->PublishAuthorityState(authority),
+        "duplicate actor slots and client-authored authority updates cannot publish");
+    invalid_authority=authority;invalid_authority.world[0]^=1;
+    check(!rooms[0]->PublishAuthorityState(invalid_authority),"old or foreign level authority state cannot publish");
+    invalid_authority=authority;invalid_authority.actors[0].position[0]=std::numeric_limits<float>::infinity();
+    check(!rooms[0]->PublishAuthorityState(invalid_authority),"nonfinite authority positions cannot enter the wire");
+    invalid_authority=authority;invalid_authority.characters.push_back({{999,2,3,4},true,{1,2,3},{4,5,6}});
+    check(!rooms[0]->PublishAuthorityState(invalid_authority),"world-character batches cannot exceed bounded packet capacity");
+    invalid_authority=authority;invalid_authority.characters[1].id=invalid_authority.characters[0].id;
+    check(!rooms[0]->PublishAuthorityState(invalid_authority),"duplicate world-character GUIDs cannot target an entity twice");
+    invalid_authority=authority;invalid_authority.characters[1].id={};
+    check(!rooms[0]->PublishAuthorityState(invalid_authority),"zero world-character GUIDs cannot enter correction state");
+    check(rooms[0]->PublishAuthorityState(authority) && !rooms[0]->PublishAuthorityState(authority),
+        "host publishes each actual completed state at most once");
+    std::optional<RoomAuthorityState> received_authority;
+    check(pump([&]{received_authority=rooms[1]->TakeAuthorityState();return received_authority.has_value();}) &&
+        received_authority==authority && !rooms[1]->TakeAuthorityState(),
+        "real TCP preserves peer ownership, a full128-GUID world-character batch, active state, positions, velocities and level scope exactly once");
     for(unsigned i=0;i<5;++i)for(auto& room:rooms)room->Poll();
     for(auto& room:rooms){RoomFrame next;check(room->gameplay_completion_pending() && !room->PeekFrame(next) && !room->TakeFrame(next) && !room->verified_gameplay_tick(),
         "queued next frame and heartbeats cannot bypass a missing peer's completed-world proof");}
@@ -1675,6 +1991,64 @@ bool TestOnlineRoom(){
         !room->CompleteGameplay(0,proof) && !room->SubmitLocal(0,Neutral()),"exhausted verification/consumption/source clocks cannot restart atzero");}
     id=window_saved_id;
     fixture_verification_window=1;
+
+    fixture_host_correction=true;
+    if(!check(running() && take_fixture_tick(id.first_tick),"negotiated authority mode enters real TCP gameplay"))return false;
+    auto client_drift=proof;client_drift[0]^=0x32;
+    if(!check(rooms[0]->CompleteGameplay(id.first_tick,proof) && rooms[1]->CompleteGameplay(id.first_tick,client_drift),
+        "independent local diagnostics remain distinct in authority mode"))return false;
+    RoomAuthorityState host_state;host_state.tick=id.first_tick;host_state.world=world;host_state.completion=proof;
+    host_state.roster_revision=rooms[0]->lobby().revision;host_state.players_mask=3;
+    host_state.actors={{1,true,{1,2,3},{4,5,6}},{2,true,{-1,2,3},{4,0,6}}};
+    host_state.actors[0].health=5;host_state.actors[1].health=3;
+    host_state.characters={{{55,2,3,4},true,{55,6,7},{0,0,1}},{{66,2,3,4},false,{0,0,0},{0,0,0}}};
+    if(!check(rooms[0]->PublishAuthorityState(host_state),"host sends actual completed authority result"))return false;
+    std::optional<RoomAuthorityState> correction;
+    if(!check(pump([&]{correction=rooms[1]->TakeAuthorityState();return correction.has_value();}) && correction==host_state,
+        "guest receives exact scoped correction despite its different local world digest"))return false;
+    check(!rooms[0]->verified_gameplay_tick() && !rooms[1]->verified_gameplay_tick() &&
+        !rooms[1]->AcknowledgeAuthorityState(id.first_tick,client_drift),"receiving state and claiming a different correction never acknowledge application");
+    check(rooms[1]->AcknowledgeAuthorityState(id.first_tick,proof) && !rooms[1]->AcknowledgeAuthorityState(id.first_tick,proof) &&
+        pump([&]{return rooms[0]->verified_gameplay_tick()==id.first_tick && rooms[1]->verified_gameplay_tick()==id.first_tick;}),
+        "only explicit exactly-once host-state application acknowledgement releases the next update");
+    std::vector<RoomHistoryEntry> drift_history;const auto drift_scope=rooms[1]->gameplay_history_scope();
+    check(drift_scope && drift_scope->host_correction && rooms[1]->ReadGameplayHistory(*drift_scope,id.first_tick,id.first_tick,drift_history)==RoomHistoryResult::Ready &&
+        drift_history.size()==1 && drift_history[0].completed==client_drift && drift_history[0].authority==proof,
+        "history preserves actual divergent local digest separately from acknowledged authority digest");
+    fixture_verification_window=8;
+    if(!check(running(),"eight-update authority credit negotiates through real TCP startup"))return false;
+    for(uint64_t i=0;i<10;++i)for(auto& room:rooms)
+        if(!check(room->SubmitLocal(id.first_tick+id.input_delay+i,Neutral()),"pipeline fixture queues real future controls"))return false;
+    std::vector<RoomAuthorityState> pipelined;
+    auto complete_authority_tick=[&](uint64_t tick){
+        if(!take_fixture_tick(tick))return false;
+        const auto host_digest=fixture_digest(tick);auto local_digest=host_digest;local_digest[0]^=0x42;
+        if(!rooms[0]->CompleteGameplay(tick,host_digest) || !rooms[1]->CompleteGameplay(tick,local_digest))return false;
+        auto state=host_state;state.tick=tick;state.completion=host_digest;state.roster_revision=rooms[0]->lobby().revision;
+        state.actors[0].position[0]=float(tick-id.first_tick);
+        if(!rooms[0]->PublishAuthorityState(state))return false;pipelined.push_back(state);return true;
+    };
+    for(unsigned i=0;i<8;++i)if(!check(complete_authority_tick(id.first_tick+i),"native completion transport can progress eight updates without remote application acknowledgements"))return false;
+    if(!check(pump([&]{return rooms[1]->impl_->authority_states.size()==8;}) &&
+        rooms[1]->impl_->authority_pending.size()==8 && !rooms[0]->verified_gameplay_tick(),
+        "eight distinct authority results remain bounded and ordered while application is delayed"))return false;
+    for(auto& room:rooms){RoomFrame ninth;check(!room->TakeFrame(ninth),"bounded correction credit still stops a ninth unacknowledged update");}
+    check(!rooms[1]->AcknowledgeAuthorityState(id.first_tick+1,pipelined[1].completion),"out-of-order application is rejected locally instead of disconnecting the host");
+    const auto oldest=rooms[1]->TakeAuthorityState();
+    check(!rooms[1]->TakeAuthorityState(),"an in-progress native correction cannot discard another unapplied result");
+    if(!check(oldest==pipelined[0] && rooms[1]->AcknowledgeAuthorityState(oldest->tick,oldest->completion) &&
+        pump([&]{return rooms[0]->verified_gameplay_tick()==id.first_tick && rooms[1]->verified_gameplay_tick()==id.first_tick;}),
+        "applying only the oldest queued state releases exactly one credit"))return false;
+    if(!check(complete_authority_tick(id.first_tick+8) && pump([&]{return rooms[1]->impl_->authority_states.size()==8;}),
+        "released credit admits a ninth result without replacing the seven older unapplied states"))return false;
+    for(unsigned i=1;i<9;++i){const auto state=rooms[1]->TakeAuthorityState();
+        if(!check(state==pipelined[i] && rooms[1]->AcknowledgeAuthorityState(state->tick,state->completion),
+            "each delayed correction is retained and applied once in exact tick order"))return false;
+    }
+    check(pump([&]{return rooms[0]->verified_gameplay_tick()==id.first_tick+8 && rooms[1]->verified_gameplay_tick()==id.first_tick+8;}),
+        "delayed application acknowledgements drain the authority pipeline contiguously");
+    fixture_verification_window=1;
+    fixture_host_correction=false;
 
     if(!check(setup(2),"unsolicited WorldReady fixture connects lobby"))return false;
     auto premature=Packet(Wire::WorldReady);premature.insert(premature.end(),world.begin(),world.end());rooms[1]->impl_->connections.front()->Queue(premature);

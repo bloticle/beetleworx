@@ -54,8 +54,8 @@ std::optional<std::array<uint8_t,32>> HashPlayerObservations(uint64_t tick,const
     return HashEncoded(bytes);
 }
 std::optional<std::array<uint8_t,32>> HashGameplayObservation(uint64_t tick,const GameplayObservation& state) {
-    if(!state.includes_character_physics && !state.characters.empty())return {};
-    std::string bytes=state.includes_character_physics?"EM2-gameplay-observation-v5":"EM2-gameplay-observation-v4";
+    if(!state.includes_character_physics && (!state.characters.empty() || state.passive_character_physics))return {};
+    std::string bytes=state.includes_character_physics?(state.passive_character_physics?"EM2-gameplay-observation-v6-passive":"EM2-gameplay-observation-v5"):"EM2-gameplay-observation-v4";
     auto put=[&](uint64_t value,unsigned count){for(unsigned i=count;i;--i)bytes.push_back(char(value>>((i-1)*8)));};
     put(tick,8);
     for(const auto* name:{&state.world.level,&state.world.state,&state.world.interior}){
@@ -71,13 +71,13 @@ std::optional<std::array<uint8_t,32>> HashGameplayObservation(uint64_t tick,cons
     for(float value:state.ammo){if(!std::isfinite(value))return {};put(std::bit_cast<uint32_t>(value),4);}
     put(state.random.calls,8);put(state.random.seeds,8);put(state.random.last_state,4);put(state.random.sequence,8);
     if(state.includes_character_physics){
-        if(state.characters.size()<2 || state.characters.size()>4096)return {};
+        if((!state.passive_character_physics && state.characters.size()<2) || state.characters.size()>4096)return {};
         if(state.player_ids[0]==state.player_ids[1])return {};
         for(unsigned slot=0;slot<2;++slot){
             if(state.player_ids[slot]==std::array<uint32_t,4>{})return {};
             const auto actor=std::find_if(state.characters.begin(),state.characters.end(),[&](const auto& c){return c.id==state.player_ids[slot];});
-            if(actor==state.characters.end())return {};
-            for(unsigned axis=0;axis<3;++axis)if(actor->active && actor->position[axis]!=std::bit_cast<uint32_t>(state.players[slot].position[axis]))return {};
+            if(actor==state.characters.end() && !state.passive_character_physics)return {};
+            if(actor!=state.characters.end())for(unsigned axis=0;axis<3;++axis)if(actor->active && actor->position[axis]!=std::bit_cast<uint32_t>(state.players[slot].position[axis]))return {};
             for(auto word:state.player_ids[slot])put(word,4);
         }
         put(state.characters.size(),4);std::array<uint32_t,4> previous{};bool first=true;

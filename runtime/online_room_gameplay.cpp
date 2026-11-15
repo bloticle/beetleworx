@@ -26,6 +26,9 @@
 #include "simulation.h"
 #include "guest_read_batch.h"
 #include "world_observation.h"
+#include "native_character_physics.h"
+#include "native_entity_probe.h"
+#include "native_actor_health.h"
 #include <rex/logging.h>
 #include <rex/input/input_system.h>
 #include <windows.h>
@@ -33,12 +36,15 @@
 #include <cstring>
 #include <cmath>
 #include <algorithm>
+#include <bit>
 #include <thread>
 #include <optional>
 #include <exception>
 #include <vector>
 #include <rex/cvar.h>
 REXCVAR_DECLARE(bool,em2_private_profile);
+REXCVAR_DEFINE_BOOL(em2_probe_room_authority_state,false,"Debug","Private native Room: publish real completed player positions/velocities over the host-state channel; does not apply corrections or disable proofs");
+REXCVAR_DEFINE_BOOL(em2_probe_room_authority_drift,false,"Debug","Private correction-mode guest only: inject one player/world position error and one player health error, then require native host-state repair");
 REXCVAR_DECLARE(bool,em2_profile_world_memory);
 REXCVAR_DECLARE(bool,em2_probe_room_recovery_controller);
 REXCVAR_DEFINE_BOOL(em2_probe_unfenced_cutscene_return,false,"Debug","Private native lobby QA only: reproduce old carried-button behavior for the held-return regression");
@@ -150,6 +156,7 @@ struct NativeRoomGameplay::Impl {
     bool return_pending=false;
     std::optional<uint64_t> return_wait_start;
     std::optional<uint64_t> cutscene_entry,cutscene_resume;
+    bool startup_cutscene=false;
     std::unique_ptr<NativeCutsceneSkipSource> private_skip_source;
     NativeCutsceneUiGate skip_gate;
     std::optional<uint16_t> departing_cutscene_buttons;
@@ -215,6 +222,9 @@ struct NativeRoomGameplay::Impl {
     std::optional<uint64_t> submitted;
     std::optional<RoomFrame> prepared,consumed;
     bool stopped=false,pending=false,delivered=false,started=false,ready_logged=false;
+    bool authority_drift_injected=false;
+    bool authority_world_drift_injected=false;
+    bool authority_health_drift_injected=false;
     uint64_t load_sequence=0;unsigned load_depth=0;
     bool transition_pending=false,transition_reentry=false;
     std::optional<LoadPoint> last_load;
@@ -437,9 +447,9 @@ void NativeRoomGameplay::UpdateExtraCameras(PPCContext& ctx,uint8_t* base){
     if(!s.Owner() || s.stopped || !s.pending || !s.delivered || !s.actors->mask() || !s.World(base) ||
         !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed || !Readable(0x833DAB60,4,base))return;
     NativeGameOverState control;uint32_t mode=0;
-    if(ReadNativeControlState(ctx,base,control,mode) && NativeMovieControlMode(mode) && control.registry==s.registry &&
+    if(ReadNativeControlState(ctx,base,control,mode) && NativeCutsceneControlMode(mode) && control.registry==s.registry &&
        ReadNativeCutsceneContext(ctx,base,s.registry,s.movie_sequence_target)){
-        if(tick%60==0)REXLOG_INFO("Native Room movie camera retained: tick {}; original movie view, no independent gameplay look or local view replacement",tick);
+        if(tick%60==0)REXLOG_INFO("Native Room authored camera retained: tick {}; original cutscene view, no independent gameplay look or local view replacement",tick);
         return;
     }
     const auto manager=PPC_LOAD_U32(0x833DAB60);
@@ -449,7 +459,7 @@ void NativeRoomGameplay::UpdateExtraCameras(PPCContext& ctx,uint8_t* base){
 }
 bool NativeRoomGameplay::ReadMovieClock(uint32_t manager,PPCContext& ctx,uint8_t* base,uint64_t& tick)const{
     Environment environment;Context context(ctx);const auto& s=*impl_;
-    if(!s.Owner() || s.stopped || !s.started || !s.native_completed || !s.World(base) || !s.Canonical() ||
+    if(!s.Owner() || s.stopped || !s.started || !s.World(base) || !s.Canonical() ||
        s.room->state()!=RoomState::Running || !Readable(0x833DCCB8,4,base) ||
        PPC_LOAD_U32(0x833DCCB8)!=manager || !Readable(manager,132,base))return false;
     NativeGameOverState control;uint32_t mode=0;
@@ -458,7 +468,10 @@ bool NativeRoomGameplay::ReadMovieClock(uint32_t manager,PPCContext& ctx,uint8_t
     uint64_t current=0;
     if(em2::CurrentAgreedSimulationTick(current)){
         if(!s.pending || !s.delivered || current!=s.committed)return false;
-    }else current=*s.native_completed;
+    }else{
+        if(!s.native_completed)return false;
+        current=*s.native_completed;
+    }
     tick=current;return true;
 }
 bool NativeRoomGameplay::Readiness(PPCContext& ctx,uint8_t* base){
@@ -594,7 +607,7 @@ bool NativeRoomGameplay::RearmInputContext(uint64_t tick,PPCContext& ctx,uint8_t
     step="owned frame coordinator";if(!frames->Configure(s.roster_mask,3,epochs,first,s.registry,ValidateRetailMovementFrame,next_epoch) || !s.actors->BindFrames(*frames,ctx,base))return false;
     if(s.native_buttons)for(const auto& actor:s.actors->actors())
         if(!frames->BindButtons(actor.room_peer,s.button_definitions[actor.actor.action_user],ctx,base))return false;
-    finished=true;s.actor_frames=std::move(frames);s.input_epoch=next_epoch;s.cutscene_resume=*s.native_completed;s.cutscene_entry.reset();s.movie_sequence_target=0;s.movie_control_mode=0;s.return_pending=false;s.return_wait_start.reset();
+    finished=true;s.startup_cutscene=false;s.actor_frames=std::move(frames);s.input_epoch=next_epoch;s.cutscene_resume=*s.native_completed;s.cutscene_entry.reset();s.movie_sequence_target=0;s.movie_control_mode=0;s.return_pending=false;s.return_wait_start.reset();
     s.skip_receiver.reset();s.movie_receiver.reset();s.skip_target_available=false;s.skip_target_mode=0;s.skip_target_entry.reset();
     REXLOG_INFO("Native Room cutscene bindings re-admitted: source tick {}, first delivery {}, input epoch {}; actor/world/controls incarnation retained, fresh producer/receiver leases",tick,first,next_epoch);
     return true;
@@ -642,16 +655,34 @@ RoomGameplayAdmission NativeRoomGameplay::Prepare(PPCContext& ctx,uint8_t* base,
     NativeGameOverState control;uint32_t mode=0;
     if(!ReadNativeControlState(ctx,base,control,mode) || control.registry!=s.registry){s.Stop("Native input control-state query lost world ownership");return RoomGameplayAdmission::Stopped;}
     if(NativeCutsceneControlMode(mode) && !s.cutscene_entry){
-        if(!s.started || !s.native_completed || !s.normal_control_mode || s.input_epoch==UINT64_MAX ||
+        if(!BindNativeRoomLocalView(ctx,base,true)){s.Stop("Could not retain the original authored cutscene camera");return RoomGameplayAdmission::Stopped;}
+        const auto first=s.room->next_tick(),raw=s.bootstrap->committed_tick();
+        const bool startup=!s.started && !s.native_completed && !s.first_game_tick && s.ready_logged &&
+            !s.bootstrap->completion_pending() && raw!=UINT64_MAX && first==raw+1 && s.input_epoch==1;
+        if((!startup && (!s.started || !s.native_completed || !s.normal_control_mode)) || s.input_epoch==UINT64_MAX ||
            !(s.input_epoch&1) || !ReadNativeCutsceneContext(ctx,base,s.registry)){
             s.Stop("Native cutscene entry lacks a completed owned input epoch");return RoomGameplayAdmission::Stopped;}
+        if(startup){s.startup_cutscene=true;s.first_game_tick=first;
+            REXLOG_INFO("Native Room opening cutscene admitted from verified bootstrap tick {}; first gameplay tick {}; no prior gameplay frame fabricated",raw,first);}
+
         for(const auto& player:s.roster.players)s.cutscene_schemas[player.peer-1]=s.button_schemas[player.character==LobbyCharacter::Mickey?0:1];
-        s.cutscene_entry=*s.native_completed;s.cutscene_resume.reset();++s.input_epoch;
+        s.cutscene_entry=startup?raw:*s.native_completed;s.cutscene_resume.reset();++s.input_epoch;
         s.movie_sequence_target=0;s.movie_control_mode=0;
         s.private_skip_source.reset();s.private_skip_armed=false;s.private_skip_failed=false;s.skip_gate={};s.skip_receiver.reset();s.movie_receiver.reset();s.skip_target_available=false;s.skip_target_mode=0;s.skip_target_entry.reset();s.departing_cutscene_buttons.reset();
         REXLOG_INFO("Native Room cutscene input suspended: entry tick {}, input epoch {}; original state {} and native cutscene ownership, actor incarnations unchanged",*s.cutscene_entry,s.input_epoch,mode);
     }
     if(s.cutscene_entry && !NativeCutsceneControlMode(mode)){
+        if(s.startup_cutscene){
+            // The opening film has no prior gameplay control mode to restore.
+            // Adopt its first native gameplay selector only after the same
+            // registry, human actors and owned cameras pass normal validation.
+            if(mode==7 || !em2::NativeCoopRuntimeReady(base)){s.Stop("Opening cutscene did not return to the owned human world");return RoomGameplayAdmission::Stopped;}
+            if(!s.normal_control_mode)s.normal_control_mode=mode;
+            std::string selected;
+            if(ReadNativeInputContextName(base,selected) && selected!="CutScene" && !selected.empty())s.normal_context_name=selected;
+            else if(s.normal_context_name=="CutScene")s.normal_context_name.clear();
+        }
+
         if(!s.normal_control_mode || mode!=*s.normal_control_mode){
             s.Stop("Native cutscene returned to an unowned control mode");return RoomGameplayAdmission::Stopped;}
         std::string selected;
@@ -678,7 +709,7 @@ RoomGameplayAdmission NativeRoomGameplay::Prepare(PPCContext& ctx,uint8_t* base,
             (mode==2 && NativeMovieAcceptTargetAvailable(s.registry,ctx,base)));
         if(target_available!=s.skip_target_available || (target_available && s.skip_target_mode!=mode)){
             s.skip_receiver.reset();s.movie_receiver.reset();s.skip_gate={};s.skip_target_available=target_available;s.skip_target_mode=target_available?mode:0;
-            s.skip_target_entry=target_available?s.native_completed:std::nullopt;
+            s.skip_target_entry=target_available?(s.native_completed?s.native_completed:s.cutscene_entry):std::nullopt;
         }
         if(s.prepared){output=*s.prepared;return RoomGameplayAdmission::Ready;}
         const auto tick=s.room->next_tick();
@@ -701,6 +732,7 @@ RoomGameplayAdmission NativeRoomGameplay::Prepare(PPCContext& ctx,uint8_t* base,
             s.Stop("Native cutscene authoritative frame failed input-epoch admission");return RoomGameplayAdmission::Stopped;}
         s.prepared=frame;s.prepared_passive=true;output=frame;gameplay_waiting.store(false,std::memory_order_release);return RoomGameplayAdmission::Ready;
     }
+    if(!BindNativeRoomLocalView(ctx,base)){s.Stop("Could not restore the local gameplay camera");return RoomGameplayAdmission::Stopped;}
     s.normal_control_mode=mode;
     if(!RefreshOwnedActorTaskPermissions(ctx,base)){s.Stop("Could not refresh authored extra-human ability policy");return RoomGameplayAdmission::Stopped;}
     if(s.prepared){output=*s.prepared;return RoomGameplayAdmission::Ready;}
@@ -819,7 +851,7 @@ bool NativeRoomGameplay::Deliver(PPCContext& ctx,uint8_t* base){
     if(const auto reason=s.WorldFailure(base))return s.Stop(std::string("Native world changed before input delivery: ")+reason);
     if(s.game_over_entry || s.consumed_passive){
         if(s.game_over_entry?!s.GameOverFrame(*s.consumed,ctx,base):!s.CutsceneFrame(*s.consumed,ctx,base))return s.Stop("Native no-gameplay input phase changed before native update");
-        if(!BeginRetailPassiveTick(s.registry,tick,ctx,base))return s.Stop("Could not retain retail quarantine for native GameOver");
+        if(!BeginRetailPassiveTick(s.registry,tick,ctx,base))return s.Stop("Could not retain retail quarantine for native passive input phase");
         if(!s.game_over_entry && s.cutscene_entry && !s.return_pending && s.skip_target_available && s.skip_target_entry && tick>*s.skip_target_entry+s.identity.input_delay){
             const bool ui=std::any_of(s.consumed->players.begin(),s.consumed->players.end(),[](const auto& c){return c.source==RoomMovementSource::NativeCutsceneUiV6;});
             if(ui || s.skip_receiver || s.movie_receiver){
@@ -870,7 +902,7 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
         !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed)return false;
     if(const auto failure=s.WorldFailure(base))return s.Stop(std::string("Native gameplay completion rejected: ")+failure);
     if(s.game_over_entry || s.consumed_passive){
-        if(!FinishRetailPassiveTick(tick,ctx,base))return s.Stop("Native GameOver passive quarantine completion failed");
+        if(!FinishRetailPassiveTick(tick,ctx,base))return s.Stop("Native passive input quarantine completion failed");
     }else{
         NativeGameOverState control;uint32_t mode=0;
         const bool movie_entry=!s.cutscene_entry && ReadNativeControlState(ctx,base,control,mode) && NativeMovieControlMode(mode) &&
@@ -901,6 +933,143 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
     s.native_completed=tick;
     if(REXCVAR_GET(em2_profile_world_memory) && tick%300==0)em2::ReportWorldGraphicsMemory("agreed-world",em2::CurrentNativeLoadGeneration());
     if(!s.room->CompleteGameplay(tick,digest))return s.Stop("Native gameplay world verification failed");
+    const bool authority=s.room->host_correction_mode();
+    if((authority || (REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_authority_state))) && s.peer==1){
+        // Read the native physics result, not interpolated presentation poses.
+        // Existing typed/epoch-owned roster resolution covers retail and extra
+        // players without sending a guest pointer or local handle over the wire.
+        const auto scope=s.room->gameplay_history_scope();
+        RoomAuthorityState state;state.tick=tick;state.completion=digest;
+        std::vector<OnlineNameActor> actors;uint64_t local=0;
+        std::vector<std::array<uint32_t,4>> player_ids;
+        bool ready=scope && NameTagActors(actors,local,base);
+        if(ready){state.world=scope->world;state.roster_revision=scope->roster_revision;state.players_mask=scope->players_mask;
+            for(const auto& actor:actors){
+                GameplayObservation::CharacterPhysics physics;
+                if(!em2::ReadNativeActorPhysics(base,actor.entity,physics)){ready=false;break;}
+                player_ids.push_back(physics.id);
+                RoomActorState sample;sample.peer=actor.peer;sample.active=physics.active;
+                if(authority){sample.health=em2::ReadNativeActorHealth(ctx,base,actor.entity);if(!sample.health){ready=false;break;}}
+                for(unsigned i=0;i<3;++i){sample.position[i]=std::bit_cast<float>(physics.position[i]);sample.velocity[i]=std::bit_cast<float>(physics.velocity[i]);}
+                state.actors.push_back(sample);
+            }
+        }
+        if(authority && ready){
+            std::vector<GameplayObservation::CharacterPhysics> world;
+            ready=em2::ReadNativeCharacterPhysics(base,world);
+            if(ready){
+                em2::NativeEntitySnapshot entities;const char* error=nullptr;uint32_t address=0;
+                ready=em2::ReadNativeEntitySnapshot(base,entities,error,address,false);
+                world.erase(std::remove_if(world.begin(),world.end(),[&](const auto& character){return std::find(player_ids.begin(),player_ids.end(),character.id)!=player_ids.end();}),world.end());
+                // Incremental batches keep even large inventories inside one
+                // bounded packet without stalling input behind a bulk transfer.
+                const auto count=std::min(world.size(),kAuthorityCharacterBatch);
+                const auto first=world.empty()?0:size_t((tick%world.size())*kAuthorityCharacterBatch%world.size());
+                for(size_t i=0;ready && i<count;++i){const auto& physics=world[(first+i)%world.size()];RoomCharacterState sample;
+                    sample.id=physics.id;sample.active=physics.active;
+                    const auto entity=std::lower_bound(entities.records.begin(),entities.records.end(),physics.id,[](const auto& record,const auto& id){return record.id<id;});
+                    if(entity==entities.records.end() || entity->id!=physics.id){ready=false;break;}
+                    sample.health=em2::ReadNativeActorHealth(ctx,base,entity->debug_address);
+                    for(unsigned axis=0;axis<3;++axis){sample.position[axis]=std::bit_cast<float>(physics.position[axis]);sample.velocity[axis]=std::bit_cast<float>(physics.velocity[axis]);}
+                    state.characters.push_back(sample);
+                }
+            }
+        }
+        if(authority && (!ready || !s.room->PublishAuthorityState(state)))return s.Stop("Could not publish completed host actor state");
+        if(!authority && ready && !s.room->PublishAuthorityState(state))
+            REXLOG_WARN("Private host-state publication deferred: tick {}; no correction or verification bypass",tick);
+    }
+    if(authority && s.peer!=1){
+        // Do not apply a packet from an earlier/later update to the current
+        // physics world. The host may pipeline later results within negotiated
+        // credit; the client applies only this exact update's result.
+        std::optional<RoomAuthorityState> state;
+        const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+        while(s.room->state()==RoomState::Running && !state && std::chrono::steady_clock::now()<until && !NativeRoomLoadsCancelled()){
+            UpdateNativeRoomSession(base,false);state=s.room->TakeAuthorityState();
+            if(!state)std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if(!state || state->tick!=tick)return s.Stop("Host correction did not arrive at the matching completed update");
+        std::vector<OnlineNameActor> actors;uint64_t local=0;
+        if(!NameTagActors(actors,local,base) || actors.size()!=state->actors.size())return s.Stop("Host correction roster has no current native bindings");
+        bool discontinuity=false;unsigned corrected=0,health_corrected=0;
+        auto health=[&](uint32_t entity,const std::optional<int32_t>& target,uint64_t player){
+            if(!target)return true;
+            auto current=em2::ReadNativeActorHealth(ctx,base,entity);if(!current)return false;
+            if(player && REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_authority_drift) && !s.authority_health_drift_injected && *current>1 && *current<1000){
+                if(!em2::CorrectNativeActorHealth(ctx,base,entity,*current-1))return false;
+                s.authority_health_drift_injected=true;current=em2::ReadNativeActorHealth(ctx,base,entity);
+                if(!current)return false;
+                REXLOG_INFO("Private native authority health drift injected: tick {}, peer {}, health {} (host {}) through original property setter",tick,player,*current,*target);
+            }
+            if(*current==*target)return true;
+            if(!em2::CorrectNativeActorHealth(ctx,base,entity,*target))return false;
+            ++health_corrected;
+            if(player && s.authority_health_drift_injected && REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_authority_drift))
+                REXLOG_INFO("Private native authority health correction verified: tick {}, peer {}, {} -> {}; original property setter/readback, damage effects not replicated",tick,player,*current,*target);
+            return true;
+        };
+        std::vector<std::array<uint32_t,4>> player_ids;
+        for(const auto& sample:state->actors){
+            const auto actor=std::find_if(actors.begin(),actors.end(),[&](const auto& entry){return entry.peer==sample.peer;});
+            GameplayObservation::CharacterPhysics current;
+            if(actor==actors.end() || !em2::ReadNativeActorPhysics(base,actor->entity,current) || current.active!=sample.active)
+                return s.Stop("Host correction actor lifetime differs; native lifecycle synchronization required");
+            player_ids.push_back(current.id);
+            if(!health(actor->entity,sample.health,sample.peer))return s.Stop("Original native player health correction failed");
+            if(!sample.active)continue;
+            if(REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_authority_drift) && !s.authority_drift_injected){
+                std::array<float,3> moved{},velocity{};
+                for(unsigned i=0;i<3;++i){moved[i]=std::bit_cast<float>(current.position[i]);velocity[i]=std::bit_cast<float>(current.velocity[i]);}
+                moved[0]+=0.5f;
+                if(!em2::CorrectNativeActorPhysics(ctx,base,actor->entity,moved,velocity) ||
+                    !em2::ReadNativeActorPhysics(base,actor->entity,current))return s.Stop("Private native drift injection failed");
+                s.authority_drift_injected=true;
+                REXLOG_INFO("Private native authority drift injected: tick {}, peer {}, +0.5m via original physics setters",tick,sample.peer);
+            }
+            float distance=0,velocity_error=0;
+            for(unsigned i=0;i<3;++i){const float d=sample.position[i]-std::bit_cast<float>(current.position[i]);distance+=d*d;
+                const float v=sample.velocity[i]-std::bit_cast<float>(current.velocity[i]);velocity_error+=v*v;}
+            if(distance<=0.000001f && velocity_error<=0.000025f)continue;
+            if(!em2::CorrectNativeActorPhysics(ctx,base,actor->entity,sample.position,sample.velocity))
+                return s.Stop("Original native physics correction failed");
+            if(REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_authority_drift) && corrected==0 && s.authority_drift_injected)
+                REXLOG_INFO("Private native authority correction verified: tick {}, peer {}, squared position error {} before repair; native readback passed",tick,sample.peer,distance);
+            discontinuity|=distance>4.0f;++corrected;
+        }
+        unsigned world_corrected=0,world_missing=0,world_inactive=0;
+        if(!state->characters.empty()){
+            em2::NativeEntitySnapshot entities;const char* error=nullptr;uint32_t address=0;
+            if(!em2::ReadNativeEntitySnapshot(base,entities,error,address,false))return s.Stop("Current native entity registry unavailable for host world corrections");
+            for(const auto& sample:state->characters){
+                if(std::find(player_ids.begin(),player_ids.end(),sample.id)!=player_ids.end())return s.Stop("Host world correction overlaps player identity");
+                const auto found=std::lower_bound(entities.records.begin(),entities.records.end(),sample.id,[](const auto& entity,const auto& id){return entity.id<id;});
+                GameplayObservation::CharacterPhysics current;
+                if(found==entities.records.end() || found->id!=sample.id || !em2::ReadNativeActorPhysics(base,found->debug_address,current)){++world_missing;continue;}
+                if(current.active!=sample.active){++world_inactive;continue;}
+                if(!health(found->debug_address,sample.health,0))return s.Stop("Original native world-character health correction failed");
+                if(!sample.active)continue;
+                if(REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_authority_drift) && !s.authority_world_drift_injected){
+                    std::array<float,3> moved{},velocity{};
+                    for(unsigned i=0;i<3;++i){moved[i]=std::bit_cast<float>(current.position[i]);velocity[i]=std::bit_cast<float>(current.velocity[i]);}moved[0]+=0.5f;
+                    if(!em2::CorrectNativeActorPhysics(ctx,base,found->debug_address,moved,velocity) || !em2::ReadNativeActorPhysics(base,found->debug_address,current))return s.Stop("Private native world-character drift injection failed");
+                    s.authority_world_drift_injected=true;
+                    REXLOG_INFO("Private native world-character drift injected: tick {}, GUID {:08X}/{:08X}/{:08X}/{:08X}, +0.5m via original physics setters",tick,sample.id[0],sample.id[1],sample.id[2],sample.id[3]);
+                }
+                float distance=0,velocity_error=0;
+                for(unsigned i=0;i<3;++i){const float d=sample.position[i]-std::bit_cast<float>(current.position[i]);distance+=d*d;
+                    const float v=sample.velocity[i]-std::bit_cast<float>(current.velocity[i]);velocity_error+=v*v;}
+                if(distance<=0.000001f && velocity_error<=0.000025f)continue;
+                if(!em2::CorrectNativeActorPhysics(ctx,base,found->debug_address,sample.position,sample.velocity))return s.Stop("Original native world-character correction failed");
+                if(REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_authority_drift) && !world_corrected && s.authority_world_drift_injected)
+                    REXLOG_INFO("Private native world-character correction verified: tick {}, squared position error {} before repair; native GUID resolution/readback passed",tick,distance);
+                discontinuity|=distance>4.0f;++world_corrected;
+            }
+        }
+        if(discontinuity)em2::ResetNetworkPresentationHistory(ctx,base);
+        if(!s.room->AcknowledgeAuthorityState(tick,state->completion))return s.Stop("Could not acknowledge applied native host state");
+        if(tick%60==0)REXLOG_INFO("Native host correction applied: tick {}, actors {}, corrected {}; world characters {}, corrected {}, missing {}, active mismatch {}; health corrections {}; original native setters, no rollback",tick,actors.size(),corrected,state->characters.size(),world_corrected,world_missing,world_inactive,health_corrected);
+    }
     // A completed 30 Hz update does not itself mean presentation is stalled.
     // Freeze interpolation only when Prepare actually cannot admit a due tick.
     s.pending=false;s.consumed.reset();return true;
@@ -910,6 +1079,7 @@ bool NativeRoomGameplay::active()const{return impl_->Configured();}
 bool NativeRoomGameplay::halted()const{return impl_->stopped;}
 bool NativeRoomGameplay::waiting()const{return gameplay_waiting.load(std::memory_order_acquire);}
 bool NativeRoomGameplay::completion_pending()const{return impl_->pending;}
+bool NativeRoomGameplay::passive_input_pending()const{const auto& s=*impl_;return s.Owner() && !s.stopped && s.pending && s.delivered && (s.consumed_passive || s.game_over_entry.has_value());}
 uint64_t NativeRoomGameplay::committed_tick()const{return impl_->committed;}
 bool NativeRoomGameplay::SampleRecoveryButtons(uint16_t& buttons)const{
     Environment environment;const auto& s=*impl_;buttons=0;

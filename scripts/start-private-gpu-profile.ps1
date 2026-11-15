@@ -1,7 +1,18 @@
-param([ValidateSet(1,2,3)][int]$Scale=2,[switch]$BenchmarkTransfers,[switch]$BenchmarkZeroStencil,[switch]$BenchmarkStencilValue,[switch]$BenchmarkStencilClear,[switch]$BenchmarkStencilBarriers,[switch]$BenchmarkStencilCopies,[switch]$BenchmarkBoundedDivision,[switch]$BenchmarkFusedDepthStencil,[switch]$BenchmarkDrawExtent,[switch]$BenchmarkDirectColorResolve,[switch]$StencilSurvey,[switch]$StencilClearProbe,[switch]$CpuDrawExtents,[ValidateRange(120,600)][int]$StencilSurveyFrames=600,[switch]$ManualContinue,[ValidateSet('rtv','rov')][string]$RenderPath='rtv',[switch]$OriginalLighting,[switch]$NoGpuProfile,[ValidateRange(1,4096)][int]$GpuReportGroups=16,[switch]$TraceShadowPreparation,[switch]$TraceShadowGpuState,[switch]$OriginalRenderBindings,[switch]$DistanceShadows,[switch]$BenchmarkDistanceShadows,[ValidateSet(-1,2,3)][int]$ShadowCastMode=-1,[switch]$OpaqueShadowCasters,[switch]$ShadowPixels,[switch]$ShadowDepthPixels,[switch]$TraceTiming,[switch]$DetailedMotionTrace,[switch]$PresentCamera,[switch]$TraceCameraBackground,[ValidateSet(-1,0,1)][int]$GameplayTiming=-1,[switch]$EnhancedLighting,[switch]$NativePhysics60,[switch]$NativePhysicsVariable,[ValidateSet(30,40,50,60,90,120,144,165,240,0)][int]$FrameCap=60,[ValidatePattern("^([a-z0-9_.]{1,47})?$")][string]$BootLevel="",[ValidatePattern("^([a-z0-9_.]{1,47})?$")][string]$StartLevel="",[string]$Em1SourceRvz='',[switch]$Em1PublicDemo,[switch]$Em1RememberSource,[switch]$Em1ProbeLevelEntry,[switch]$Em1AccelerateCollision,[switch]$Em1ValidateCollisionActivation,[switch]$Em1ValidateCollisionReload,[switch]$QuietEm1Loader,[switch]$Em1DiskArchiveProbe,[string]$Em1RegisterLevel="",[string]$Em1ValidateLevel='',[switch]$Em1ValidateSceneConstruction,[switch]$Em1ValidateInventoryWrites,[string]$Em1ValidateLevelModels='',[string]$Em1ValidateLevelKeyframes='',[string]$Em1ValidateLevelAnimationManagers='',[switch]$Em1ValidateAnimationPlayback,[switch]$Em1ValidateJigsawRays,[switch]$Em1RegistryRoundtrip,[switch]$Em1ValidateAnimations,[switch]$DirectResolveSurvey,[switch]$Em1ValidateModel,[switch]$Em1ValidateLegacyModel,[switch]$Em1ValidateStaticModels,[switch]$Em1ValidateStaticPhysicsResource,[switch]$Em1ValidateBehaviorResources,[string]$Em1NativeStaticResource='',[switch]$Em1PreviewCourtyard,[switch]$Em1EnterCourtyard,[switch]$Em1CapturePreview,[switch]$Em1LegacyMaterials,[switch]$Em1BlendCandidate,[switch]$Em1VertexAlphaCandidate,[switch]$Em1DualUvCandidate,[switch]$Em1CutoutCandidate,[switch]$Em1UvProbe,[switch]$Em1UvCheckerProbe,[switch]$Em1VerifyNativeGlobals,[switch]$Em1VerifyNativeTrigger,[switch]$Em1VerifyNativeTriggerActivation,[switch]$Em1ValidateParticleAssets,[switch]$Em1VerifyParticleActivation,[switch]$Em1ParticleMaterialCandidate,[switch]$Em1ValidateGearAssets,[switch]$Em1VerifyNativeGearActivation,[switch]$Em1VerifyGearUnload,[switch]$Em1VerifyGearRotation,[ValidateRange(0,14)][int]$ExtraPlayerInstances=0,[ValidateRange(0,900)][int]$ExtraPlayerHoldSeconds=0,[switch]$OnlineMovementProbe,[ValidateSet("", "host", "guest")][string]$OnlineRoomRole="",[string]$OnlineRoomInvitationFile="",[ValidateRange(2,16)][int]$OnlineRoomExpectedPlayers=2,[switch]$AllowConcurrentRoomProbe,[switch]$TraceRoomInitialization,[switch]$TraceRoomEntities,[switch]$OnlineRoomGameplay,[switch]$OnlineNativeButtons,[string]$OnlineRoomReplayInvitation="",[uint32]$OnlineRoomBehaviorTraceStart=0,[uint32]$OnlineRoomBehaviorDumpTick=4294967295,[ValidateRange(1,8)][int]$OnlineRoomVerificationWindow=1,[switch]$OwnedPlayerReference,[switch]$RejectOwnedPlayer,[switch]$TraceMickeyEars,[switch]$InstanceMickeyEars,[switch]$Em1TraceDrawState,[string]$DebugLevelRequest="",[switch]$OriginalInkCycle,[string]$EmrClipProbeDirectory="",[switch]$FinalDemoAssets)
+param([ValidatePattern("^([a-z0-9_.]{1,47})?$")][string]$DebugLevel="",[ValidateSet(1,2,3)][int]$Scale=2,[switch]$BenchmarkTransfers,[switch]$BenchmarkZeroStencil,[switch]$BenchmarkStencilValue,[switch]$BenchmarkStencilClear,[switch]$BenchmarkStencilBarriers,[switch]$BenchmarkStencilCopies,[switch]$BenchmarkBoundedDivision,[switch]$BenchmarkFusedDepthStencil,[switch]$BenchmarkDrawExtent,[switch]$BenchmarkDirectColorResolve,[switch]$StencilSurvey,[switch]$StencilClearProbe,[switch]$CpuDrawExtents,[ValidateRange(120,600)][int]$StencilSurveyFrames=600,[switch]$ManualContinue,[ValidateSet('rtv','rov')][string]$RenderPath='rtv',[switch]$OriginalLighting,[switch]$NoGpuProfile,[ValidateRange(1,4096)][int]$GpuReportGroups=16,[switch]$TraceShadowPreparation,[switch]$TraceShadowGpuState,[switch]$OriginalRenderBindings,[switch]$DistanceShadows,[switch]$BenchmarkDistanceShadows,[ValidateSet(-1,2,3)][int]$ShadowCastMode=-1,[switch]$OpaqueShadowCasters,[switch]$ShadowPixels,[switch]$ShadowDepthPixels,[switch]$TraceTiming,[switch]$DetailedMotionTrace,[switch]$PresentCamera,[switch]$TraceCameraBackground,[ValidateSet(-1,0,1)][int]$GameplayTiming=-1,[switch]$EnhancedLighting,[switch]$NativePhysics60,[switch]$NativePhysicsVariable,[ValidateSet(30,40,50,60,90,120,144,165,240,0)][int]$FrameCap=60,[ValidatePattern("^([a-z0-9_.]{1,47})?$")][string]$BootLevel="",[ValidatePattern("^([a-z0-9_.]{1,47})?$")][string]$StartLevel="",[string]$Em1SourceRvz='',[switch]$Em1PublicDemo,[switch]$Em1RememberSource,[switch]$Em1ProbeLevelEntry,[switch]$Em1AccelerateCollision,[switch]$Em1ValidateCollisionActivation,[switch]$Em1ValidateCollisionReload,[switch]$QuietEm1Loader,[switch]$Em1DiskArchiveProbe,[string]$Em1RegisterLevel="",[string]$Em1ValidateLevel='',[switch]$Em1ValidateSceneConstruction,[switch]$Em1ValidateInventoryWrites,[string]$Em1ValidateLevelModels='',[string]$Em1ValidateLevelKeyframes='',[string]$Em1ValidateLevelAnimationManagers='',[switch]$Em1ValidateAnimationPlayback,[switch]$Em1ValidateJigsawRays,[switch]$Em1RegistryRoundtrip,[switch]$Em1ValidateAnimations,[switch]$DirectResolveSurvey,[switch]$Em1ValidateModel,[switch]$Em1ValidateLegacyModel,[switch]$Em1ValidateStaticModels,[switch]$Em1ValidateStaticPhysicsResource,[switch]$Em1ValidateBehaviorResources,[string]$Em1NativeStaticResource='',[switch]$Em1PreviewCourtyard,[switch]$Em1EnterCourtyard,[switch]$Em1CapturePreview,[switch]$Em1LegacyMaterials,[switch]$Em1BlendCandidate,[switch]$Em1VertexAlphaCandidate,[switch]$Em1DualUvCandidate,[switch]$Em1CutoutCandidate,[switch]$Em1UvProbe,[switch]$Em1UvCheckerProbe,[switch]$Em1VerifyNativeGlobals,[switch]$Em1VerifyNativeTrigger,[switch]$Em1VerifyNativeTriggerActivation,[switch]$Em1ValidateParticleAssets,[switch]$Em1VerifyParticleActivation,[switch]$Em1ParticleMaterialCandidate,[switch]$Em1ValidateGearAssets,[switch]$Em1VerifyNativeGearActivation,[switch]$Em1VerifyGearUnload,[switch]$Em1VerifyGearRotation,[ValidateRange(0,14)][int]$ExtraPlayerInstances=0,[ValidateRange(0,900)][int]$ExtraPlayerHoldSeconds=0,[switch]$OnlineMovementProbe,[ValidateSet("", "host", "guest")][string]$OnlineRoomRole="",[string]$OnlineRoomInvitationFile="",[ValidateRange(2,16)][int]$OnlineRoomExpectedPlayers=2,[switch]$AllowConcurrentRoomProbe,[switch]$TraceRoomInitialization,[switch]$TraceRoomRandomOwners,[uint32]$OnlineRandomTraceStartTick=0,[switch]$TraceRoomLuaOwners,[switch]$TraceRoomEntities,[switch]$OnlineRoomGameplay,[switch]$OnlineRoomScriptedInput,[switch]$OnlineRoomMixedCharacters,[switch]$TraceOnlineClothing,[string]$OnlineClothingDirectory="",[switch]$BindOnlineClothing,[switch]$OnlineClothingLifecycle,[switch]$OnlineTriggerMathProbe,[switch]$OnlineNativeButtons,[switch]$OnlineHostCorrection,[switch]$OnlineHostCorrectionDrift,[ValidatePattern("^([a-z0-9_.]{1,63})?$")][string]$OnlineRoomLevelTarget="",[ValidateRange(60,1000000)][uint32]$OnlineRoomLevelTick=600,[ValidateSet("clean","transition")][string]$OnlineRoomLevelMethod="clean",[ValidateRange(0,3)][uint32]$OnlineRoomDamagePlayer=0,[ValidateRange(1,1000)][uint32]$OnlineRoomDamageAmount=1,[switch]$OriginalEventOrder,[string]$OnlineRoomReplayInvitation="",[uint32]$OnlineRoomBehaviorTraceStart=0,[uint32]$OnlineRoomBehaviorDumpTick=4294967295,[ValidateRange(1,8)][int]$OnlineRoomVerificationWindow=1,[ValidatePattern("^([0-9A-Fa-f]{32})?$")][string]$OnlineRoomMotionTraceGuid="",[switch]$OwnedPlayerReference,[switch]$OwnedPlayerInput,[ValidateSet(0,1)][int]$OwnedPlayerCharacter=0,[switch]$RejectOwnedPlayer,[switch]$TraceMickeyEars,[switch]$InstanceMickeyEars,[switch]$Em1TraceDrawState,[string]$DebugLevelRequest="",[switch]$OriginalInkCycle,[string]$EmrClipProbeDirectory="",[switch]$FinalDemoAssets,[string]$ReplayCheckpointDirectory="",[switch]$ProbeScriptPersistence,[switch]$ProbeNativeFrameCheckpoint,[switch]$FrameCheckpointScripts,[switch]$FrameCheckpointReplay,[switch]$RestoreNativeScripts,[switch]$RestoreNativePhysics,[ValidateSet(0,1,2)][int]$ScriptRootMode=0,[ValidatePattern("^[a-zA-Z0-9_.@]{0,128}$")][string]$ScriptRootGlobal="")
 $ErrorActionPreference='Stop'
+if($FrameCheckpointReplay -and !$FrameCheckpointScripts){throw 'FrameCheckpointReplay requires FrameCheckpointScripts.'}
+if($FrameCheckpointScripts -and (!$ProbeNativeFrameCheckpoint -or !$ProbeScriptPersistence -or $RestoreNativeScripts -or $RestoreNativePhysics -or $ScriptRootMode -or $ScriptRootGlobal)){throw 'FrameCheckpointScripts requires full-context ProbeScriptPersistence and ProbeNativeFrameCheckpoint, without earlier immediate-restore flags.'}
+if($RestoreNativePhysics -and !$ProbeScriptPersistence){throw 'RestoreNativePhysics requires ProbeScriptPersistence.'}
+if($RestoreNativeScripts -and (!$ProbeScriptPersistence -or $ScriptRootMode -or $ScriptRootGlobal)){throw 'RestoreNativeScripts requires full-context ProbeScriptPersistence.'}
+if($ScriptRootMode -and !$ProbeScriptPersistence){throw 'ScriptRootMode requires ProbeScriptPersistence.'}
+if($ScriptRootGlobal -and (!$ProbeScriptPersistence -or $ScriptRootMode -ne 1)){throw 'ScriptRootGlobal requires globals-only ScriptRootMode 1.'}
+if($DebugLevel -and ($OnlineRoomRole -or $BootLevel -or $ManualContinue)){throw 'DebugLevel requires isolated offline automatic Continue.'}
+if($OwnedPlayerInput -and (!$OwnedPlayerReference -or $RejectOwnedPlayer -or $ExtraPlayerHoldSeconds -lt 12)){throw 'OwnedPlayerInput requires an owned reference, no forced rejection and at least 12 seconds of hold time.'}
+if($OwnedPlayerInput -and $ExtraPlayerInstances -ne 1){throw 'The live trajectory program currently requires one extra actor; group admission uses OwnedPlayerReference without OwnedPlayerInput.'}
+if($OwnedPlayerCharacter -and !$OwnedPlayerReference){throw 'OwnedPlayerCharacter requires OwnedPlayerReference.'}
 if($RejectOwnedPlayer -and !$OwnedPlayerReference){throw 'RejectOwnedPlayer requires OwnedPlayerReference.'}
-if($OwnedPlayerReference -and $ExtraPlayerInstances -ne 1){throw 'OwnedPlayerReference requires exactly one extra player.'}
+if($OwnedPlayerReference -and $ExtraPlayerInstances -lt 1){throw 'OwnedPlayerReference requires 1..14 extra humans.'}
+if($OwnedPlayerReference -and $ExtraPlayerInstances -gt 1 -and $PSBoundParameters.ContainsKey('OwnedPlayerCharacter')){throw 'OwnedPlayerCharacter selects the single-actor case; larger private rosters alternate both human prefabs.'}
 if($TraceCameraBackground -and (!$PresentCamera -or !$TraceTiming)){throw 'TraceCameraBackground requires PresentCamera and TraceTiming; it never samples or consumes input.'}
 if($Em1PublicDemo -and (!$Em1SourceRvz -or $StartLevel -or $BootLevel -or $Em1EnterCourtyard)){throw 'Em1PublicDemo needs an RVZ and a fresh direct demo startup, without other level overrides.'}
 if($Em1PublicDemo){$ManualContinue=$true}
@@ -67,9 +78,14 @@ if($OnlineRoomRole){
     if(!$OnlineRoomInvitationFile.StartsWith($analysisRoot,[StringComparison]::OrdinalIgnoreCase)){throw 'Room invitation must be inside the workspace analysis directory.'}
 }
 if($OnlineRoomReplayInvitation -and $OnlineRoomRole -ne 'host'){throw 'Only a private Room host may select a replay invitation.'}
+if($OnlineRoomMotionTraceGuid -and !$OnlineRoomRole){throw 'Motion GUID tracing requires an explicit private Room.'}
 if($TraceRoomEntities -and !$OnlineRoomRole){throw 'Entity capture requires an explicit private Room.'}
-if($OnlineRoomGameplay -and (!$OnlineRoomRole -or $OnlineRoomExpectedPlayers -ne 2)){throw 'Native retail gameplay requires an explicit private two-participant Room.'}
+if($OnlineTriggerMathProbe -and (!$OnlineRoomRole -or !$OnlineRoomGameplay)){throw 'Trigger math probing requires explicit private retail gameplay.'}
 if($OnlineNativeButtons -and (!$OnlineRoomRole -or !$OnlineRoomGameplay)){throw 'Native button delivery requires explicit private retail gameplay.'}
+if($OriginalEventOrder -and (!$OnlineRoomRole -or !$OnlineRoomGameplay)){throw 'Event-order control requires an isolated native Room gameplay comparison.'}
+if($OnlineRoomGameplay -and !$OnlineRoomRole){throw 'Native gameplay requires an explicit private Room.'}
+if($OnlineRoomScriptedInput -and (!$OnlineRoomGameplay -or !$OnlineRoomRole -or $OnlineRoomExpectedPlayers -lt 2)){throw 'Scripted SDK input requires an isolated native Room roster with at least two participants.'}
+if($OnlineRoomMixedCharacters -and (!$OnlineRoomGameplay -or !$OnlineRoomRole -or $OnlineRoomExpectedPlayers -lt 3)){throw 'Mixed character selection requires an isolated native Room roster with extra humans.'}
 if($TraceRoomInitialization -and !$OnlineRoomRole){throw 'Native initialization tracing is restricted to a private Room probe.'}
 if($AllowConcurrentRoomProbe -and !$OnlineRoomRole){throw 'Concurrent launch is restricted to the explicit Room probe.'}
 $existingGames=@(Get-CimInstance Win32_Process -Filter "Name='beetleworx.exe' OR Name='EM2Recomp.exe'")
@@ -89,6 +105,15 @@ $symbolMap=Join-Path $runtime 'beetleworx.map'
 if(Test-Path -LiteralPath $symbolMap -PathType Leaf){Copy-Item -LiteralPath $symbolMap -Destination (Join-Path $root 'beetleworx.map')}
 $baseline=@{}
 foreach($file in Get-ChildItem -LiteralPath (Join-Path $runtime 'user_data') -Recurse -File){$baseline[$file.FullName]=(Get-FileHash -LiteralPath $file.FullName).Hash}
+[int]$script:privateStaticCopyFallbacks=0
+function Copy-PrivateStaticAsset([string]$Source,[string]$Target){
+    try { New-Item -ItemType HardLink -Path $Target -Target $Source -ErrorAction Stop | Out-Null }
+    catch {
+        if(Test-Path -LiteralPath $Target){throw}
+        Copy-Item -LiteralPath $Source -Destination $Target -ErrorAction Stop
+        ++$script:privateStaticCopyFallbacks
+    }
+}
 foreach($entry in Get-ChildItem -LiteralPath (Join-Path $runtime 'pc-assets') -Force){
     $target=Join-Path $content $entry.Name
     if(($Em1BlendCandidate -or $FinalDemoAssets) -and $entry.Name -eq 'packfiles'){
@@ -100,16 +125,26 @@ foreach($entry in Get-ChildItem -LiteralPath (Join-Path $runtime 'pc-assets') -F
                 Copy-Item -LiteralPath (Join-Path $demoArchiveRoot $pack.Name) -Destination $packTarget
             }elseif($Em1BlendCandidate -and $pack.Name -eq 'shaders.pak'){
                 Copy-Item -LiteralPath $em1ShaderArchive -Destination $packTarget
-            }else{New-Item -ItemType HardLink -Path $packTarget -Target $pack.FullName | Out-Null}
+            }else{Copy-PrivateStaticAsset $pack.FullName $packTarget}
         }
     }
     elseif($entry.PSIsContainer){New-Item -ItemType Junction -Path $target -Target $entry.FullName | Out-Null}
-    elseif($entry.Name -eq 'ConfigFiles.ini'){Copy-Item -LiteralPath $entry.FullName -Destination $target}
-    else{New-Item -ItemType HardLink -Path $target -Target $entry.FullName | Out-Null}
+    # Each concurrent launch must own these small files. Creating another hard
+    # link changes NTFS ChangeTime on the shared file while an earlier client
+    # fingerprints it, even when its bytes and LastWriteTime stay unchanged.
+    # Keep strict runtime identity verification; avoid introducing that race.
+    else{Copy-Item -LiteralPath $entry.FullName -Destination $target -ErrorAction Stop}
 }
+if($script:privateStaticCopyFallbacks){Write-Output ('Copied '+$script:privateStaticCopyFallbacks+' private static assets after hard-link failures.')}
 # Copy campaign and root preference files. Cache records remain private; no
 # writable save, preferences or renderer-cache files are hard-linked.
-if(!$Em1PublicDemo){Copy-Item -LiteralPath (Join-Path $runtime 'user_data/42560816') -Destination $user -Recurse}
+$campaignSource=Join-Path $runtime 'user_data/42560816'
+if($ReplayCheckpointDirectory){
+    if($Em1PublicDemo -or !$OnlineRoomRole){throw 'Checkpoint replay requires an isolated Room launch without EM1 demo setup.'}
+    $campaignSource=(Resolve-Path -LiteralPath (Join-Path $ReplayCheckpointDirectory '42560816')).Path
+    if(!(Test-Path -LiteralPath (Join-Path $campaignSource '00000001/SAVEGAME/save.dat') -PathType Leaf)){throw 'Replay checkpoint has no retail campaign save.'}
+}
+if(!$Em1PublicDemo){Copy-Item -LiteralPath $campaignSource -Destination $user -Recurse}
 foreach($file in Get-ChildItem -LiteralPath (Join-Path $runtime 'user_data') -File){Copy-Item -LiteralPath $file.FullName -Destination $user}
 $settings=Join-Path $user 'pc-settings.ini'
 $lines=Get-Content -LiteralPath $settings
@@ -123,13 +158,25 @@ if($OnlineRoomRole){$lines=$lines -replace '^window_mode=.*$','window_mode=0' -r
 $info=[Diagnostics.ProcessStartInfo]::new($executable)
 $info.UseShellExecute=$false;$info.WorkingDirectory=$runtime;$info.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
 $info.ArgumentList.Add("--em2_private_profile=true")
+if($OnlineRoomDamagePlayer){if(!$OnlineRoomRole -or $OnlineRoomLevelTarget){throw "Damage fixture requires a Room role without a level target"};$info.ArgumentList.Add("--em2_native_lobby_qa_restart_tick="+$OnlineRoomLevelTick);$info.ArgumentList.Add("--em2_native_lobby_qa_damage_player="+$OnlineRoomDamagePlayer);$info.ArgumentList.Add("--em2_native_lobby_qa_damage_amount="+$OnlineRoomDamageAmount)}
+if($OnlineHostCorrection){$info.ArgumentList.Add("--em2_room_probe_host_correction=true")}
+if($OnlineHostCorrectionDrift){$info.ArgumentList.Add("--em2_probe_room_authority_drift=true")}
+if($OnlineRoomLevelTarget){if(!$OnlineRoomRole){throw "Native level fixture requires an isolated Room role"};$info.ArgumentList.Add("--em2_native_lobby_qa_restart_tick="+$OnlineRoomLevelTick);$info.ArgumentList.Add("--em2_native_lobby_qa_level_target="+$OnlineRoomLevelTarget);$info.ArgumentList.Add("--em2_native_lobby_qa_clean_level_load="+($OnlineRoomLevelMethod -eq "clean").ToString().ToLowerInvariant())}
+if($FrameCheckpointReplay){$info.ArgumentList.Add("--em2_probe_native_frame_replay=true")}
+if($FrameCheckpointScripts){$info.ArgumentList.Add("--em2_probe_native_frame_scripts=true")}
+if($ProbeNativeFrameCheckpoint){$info.ArgumentList.Add("--em2_probe_native_frame_checkpoint=true");$info.ArgumentList.Add("--em2_fixed_simulation=true")}
+if($ProbeScriptPersistence){$info.ArgumentList.Add("--em2_probe_native_script_persistence=true");$info.ArgumentList.Add("--em2_probe_native_vm_root_mode="+$ScriptRootMode)}
+if($RestoreNativePhysics){$info.ArgumentList.Add("--em2_probe_native_physics_restore=true")}
+if($RestoreNativeScripts){$info.ArgumentList.Add("--em2_probe_native_script_restore=true")}
+if($ScriptRootGlobal){$info.ArgumentList.Add("--em2_probe_native_vm_global="+$ScriptRootGlobal)}
 if($FinalDemoAssets){$info.ArgumentList.Add('--em2_demo_build=true')}
 if($Em1PublicDemo){$info.ArgumentList.Add("--em2_demo_build=true");$info.ArgumentList.Add("--em2_demo_em1=true");$info.ArgumentList.Add("--em2_trace_auto_continue=true")}
 if($TraceMickeyEars){$info.ArgumentList.Add("--em2_trace_mickey_ears=true")}
 if($InstanceMickeyEars){$info.ArgumentList.Add("--em2_instance_mickey_ears=true")}
 if($RejectOwnedPlayer){$info.ArgumentList.Add("--em2_probe_owned_native_player_reject=true")}
-if($OwnedPlayerReference){$info.ArgumentList.Add("--em2_probe_owned_native_player=true")}
+if($OwnedPlayerReference){$info.ArgumentList.Add("--em2_probe_owned_native_player=true");$info.ArgumentList.Add("--em2_probe_owned_native_player_character="+$OwnedPlayerCharacter)}
 if($OnlineMovementProbe){$info.ArgumentList.Add("--em2_probe_online_local_movement=true")}
+if($OwnedPlayerInput){$info.ArgumentList.Add("--em2_probe_owned_native_player_input=true");$info.ArgumentList.Add("--em2_fixed_simulation=true")}
 if($OnlineRoomRole){
     $info.ArgumentList.Add('--em2_room_probe_role='+$OnlineRoomRole)
     $info.ArgumentList.Add('--em2_room_probe_invitation_file='+$OnlineRoomInvitationFile.Replace('\','/'))
@@ -137,15 +184,26 @@ if($OnlineRoomRole){
     $info.ArgumentList.Add('--em2_trace_online_observations=true')
     $info.ArgumentList.Add('--em2_trace_players=true')
     if($TraceRoomInitialization){$info.ArgumentList.Add('--em2_trace_room_initialization=true')}
+    if($TraceRoomRandomOwners){$info.ArgumentList.Add('--em2_trace_online_random_owners=true');$info.ArgumentList.Add('--em2_trace_online_random_start_tick='+$OnlineRandomTraceStartTick)}
+    if($TraceRoomLuaOwners){$info.ArgumentList.Add('--em2_trace_online_lua_owners=true')}
     if($TraceRoomEntities){
         $info.ArgumentList.Add('--em2_trace_native_entities=true')
         $info.ArgumentList.Add('--em2_native_entity_directory='+$root.Replace('\','/')+'/entities')
     }
     if($OnlineRoomGameplay){$info.ArgumentList.Add('--em2_room_probe_gameplay=true')}
+    if($OnlineRoomScriptedInput){$info.ArgumentList.Add('--em2_room_probe_scripted_input=true')}
+    if($OnlineRoomMixedCharacters){$info.ArgumentList.Add('--em2_room_probe_mixed_characters=true')}
+    if($TraceOnlineClothing){$info.ArgumentList.Add('--em2_trace_online_clothing=true')}
+    if($BindOnlineClothing){$info.ArgumentList.Add('--em2_online_clothing_bind=true')}
+    if($OnlineClothingLifecycle){$info.ArgumentList.Add('--em2_probe_online_clothing_lifecycle=true')}
+    if($OnlineClothingDirectory){$info.ArgumentList.Add('--em2_probe_online_clothing_directory='+$OnlineClothingDirectory.Replace('\','/'))}
+    if($OnlineTriggerMathProbe){$info.ArgumentList.Add('--em2_probe_room_triggers=true')}
     if($OnlineNativeButtons){$info.ArgumentList.Add('--em2_room_native_buttons=true')}
+    if($OriginalEventOrder){$info.ArgumentList.Add('--em2_online_event_order=false')}
     $info.ArgumentList.Add('--em2_behavior_trace_start_tick='+$OnlineRoomBehaviorTraceStart)
     $info.ArgumentList.Add('--em2_behavior_trace_dump_tick='+$OnlineRoomBehaviorDumpTick)
     $info.ArgumentList.Add('--em2_room_probe_verification_window='+$OnlineRoomVerificationWindow)
+    if($OnlineRoomMotionTraceGuid){$info.ArgumentList.Add('--em2_behavior_motion_guid='+$OnlineRoomMotionTraceGuid)}
     if($OnlineRoomReplayInvitation){$replay=(Resolve-Path -LiteralPath $OnlineRoomReplayInvitation).Path;$info.ArgumentList.Add('--em2_room_probe_replay_invitation_file='+$replay.Replace('\','/'))}
 }
 if($ExtraPlayerInstances){$info.ArgumentList.Add("--em2_probe_extra_native_players="+$ExtraPlayerInstances)}
@@ -185,7 +243,9 @@ if($NativePhysics60){if($GameplayTiming -ne 1){throw 'NativePhysics60 requires G
 if($PSBoundParameters.ContainsKey('NativePhysicsVariable') -or $NativePhysics60){
  $info.ArgumentList.Add('--em2_native_physics_variable='+([bool]$NativePhysicsVariable).ToString().ToLowerInvariant())
 }
+if($StartLevel){$info.ArgumentList.Add('--em2_trace_players=true')}
 if($StartLevel){$info.ArgumentList.Add('--em2_qa_start_level='+$StartLevel)}
+if($DebugLevel){$info.ArgumentList.Add('--em2_qa_debug_level='+$DebugLevel)}
 if($BootLevel){if(!$ManualContinue){throw 'Direct test boot requires ManualContinue.'};$info.ArgumentList.Add('--em2_qa_boot_level='+$BootLevel);$info.ArgumentList.Add('--em2_trace_auto_continue=true')}
 if($Em1RememberSource){
     if(!$Em1SourceRvz){throw 'Remembered-source validation requires Em1SourceRvz.'}
@@ -289,23 +349,45 @@ $record.cpu_draw_extents=if($PSBoundParameters.ContainsKey('CpuDrawExtents')){[b
 $record.em1_register_level=$Em1RegisterLevel
 $record.boot_level=$BootLevel
 $record.start_level=$StartLevel
+$record.debug_level=$DebugLevel
 $record.em1_public_demo=[bool]$Em1PublicDemo
 $record.final_demo_assets=[bool]$FinalDemoAssets
 $record.extra_player_instances=$ExtraPlayerInstances
 $record.online_movement_probe=[bool]$OnlineMovementProbe
 $record.online_room_role=$OnlineRoomRole
 $record.online_room_gameplay=[bool]$OnlineRoomGameplay
+$record.online_room_scripted_input=[bool]$OnlineRoomScriptedInput
+$record.online_room_lua_owners=[bool]$TraceRoomLuaOwners
+$record.online_room_random_owners=[bool]$TraceRoomRandomOwners
+$record.online_event_registration_order=![bool]$OriginalEventOrder
+$record.replay_checkpoint_directory=$ReplayCheckpointDirectory
+$record.online_trigger_math_probe=[bool]$OnlineTriggerMathProbe
 $record.online_native_buttons=[bool]$OnlineNativeButtons
 $record.online_room_replay_invitation=$OnlineRoomReplayInvitation
 $record.online_room_behavior_trace_start=$OnlineRoomBehaviorTraceStart
 $record.online_room_behavior_dump_tick=$OnlineRoomBehaviorDumpTick
 $record.online_room_verification_window=$OnlineRoomVerificationWindow
 $record.online_room_trace_entities=[bool]$TraceRoomEntities
+$record.online_room_motion_trace_guid=$OnlineRoomMotionTraceGuid
 $record.online_room_invitation_file=$OnlineRoomInvitationFile
 $record.online_room_expected_players=$OnlineRoomExpectedPlayers
 $record.owned_player_reference=[bool]$OwnedPlayerReference
+if($OwnedPlayerReference){$record.native_roster_revision=1}
+$record.owned_player_character=$OwnedPlayerCharacter
+$record.owned_player_character_mode=if($OwnedPlayerReference -and $ExtraPlayerInstances -gt 1){'alternating human prefabs'}else{'single selected human prefab'}
+$record.owned_player_input=[bool]$OwnedPlayerInput
+if($OwnedPlayerReference){$record.scope='Private native extra-human roster registration/admission/reference lifetime and synthetic neutral frame preflight; no network frame delivered.'}
+if($OwnedPlayerInput){$record.scope="Private owned-actor canonical Movement/Jump program; see runtime/completion records for actual delivery and trajectory evidence."}
 $record.reject_owned_player=[bool]$RejectOwnedPlayer
 $record.extra_player_hold_seconds=$ExtraPlayerHoldSeconds
+$record.native_script_persistence=[bool]$ProbeScriptPersistence
+$record.native_frame_checkpoint=[bool]$ProbeNativeFrameCheckpoint
+$record.native_frame_scripts=[bool]$FrameCheckpointScripts
+$record.native_frame_replay=[bool]$FrameCheckpointReplay
+$record.native_script_restore=[bool]$RestoreNativeScripts
+$record.native_physics_restore=[bool]$RestoreNativePhysics
+$record.script_root_mode=$ScriptRootMode
+$record.script_root_global=$ScriptRootGlobal
 $record.trace_mickey_ears=[bool]$TraceMickeyEars
 $record.instance_mickey_ears_requested=[bool]$InstanceMickeyEars
 $record.symbol_map_sha256=if(Test-Path -LiteralPath (Join-Path $root 'beetleworx.map') -PathType Leaf){(Get-FileHash -LiteralPath (Join-Path $root 'beetleworx.map')).Hash}else{$null}

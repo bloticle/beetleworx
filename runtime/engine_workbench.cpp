@@ -1,5 +1,6 @@
 #include "online_runtime.h"
 #include "online_native_menu.h"
+#include "online_room_runtime.h"
 #include "online_chat.h"
 #include "online_lobby.h"
 #include "online_voice_runtime.h"
@@ -76,7 +77,7 @@ int SettingIndex(std::string_view name){
     if(auto index=Integer(name);index && *index>=0 && *index<em2::kPCOptionCount)return *index;
     for(int i=0;i<em2::kPCOptionCount;++i)if(name==em2::PCSettingName(i))return i;return -1;
 }
-void SetPanel(Panel panel){requested.store(panel);em2::SetExternalControlCapture(panel!=Panel::Closed);focus_command=panel==Panel::Console;pad_armed=false;}
+void SetPanel(Panel panel){const auto previous=requested.exchange(panel);if(previous!=panel)em2::ClearMenuPointer();em2::SetExternalControlCapture(panel!=Panel::Closed);focus_command=panel==Panel::Console;pad_armed=false;}
 void PadNavigation(ImGuiIO& io){
     auto* input=input_system.load();rex::input::X_INPUT_STATE state{};
     if(input && window_focused.load())em2::PollControlCapture(*input);
@@ -242,6 +243,8 @@ std::optional<std::vector<std::string>> em2::TokenizeEngineConsole(std::string_v
 void em2::SetWorkbenchInputSystem(rex::input::InputSystem* input){input_system.store(input);}
 void em2::ShowEngineSettings(){Log("Open Options > Settings & Mods, or Options > Controls & Camera. These pages use the native game UI.");}
 void em2::ShowEngineConsole(){SetPanel(Panel::Console);}
+void em2::CompleteOnlineDesktopHandoff(){if(requested.load()==Panel::Online)SetPanel(Panel::Closed); }
+void em2::TickOnlineDesktopMenu(){if(requested.load()==Panel::Online)PumpDesktopOnlineMenu();}
 void em2::EngineConsoleMessage(const std::string& message){
     if(em1::RegisteredLevelEntryProbeRequested()){
         const auto error=GetLastError();const auto csr=_mm_getcsr();
@@ -260,7 +263,7 @@ void em2::ResetEngineWorkbenchInput(){f1_held=console_held=false;pad_armed=false
 void em2::SetEngineWorkbenchFocused(bool focused){window_focused.store(focused);ResetEngineWorkbenchInput();}
 bool em2::EngineWorkbenchOption(int id,int command,int& result){
     if(id!=2500)return false;
-    if(command==-2){DispatchDesktopOnlineStart();result=requested.load()==Panel::Online;return true;}
+    if(command==-2){result=requested.load()==Panel::Online;return true;}
     if(command==1)ShowEngineSettings();else if(command==2)ShowEngineConsole();
     else if(command==3){requested_page=5;ShowEngineSettings();}
     else if(command==4)OpenOnlineWorkbench();else if(command==0)CloseWorkbench();
@@ -421,7 +424,7 @@ bool em2::TestOnlineDesktopMenu(){
     };
     for(const auto size:{ImVec2(640,480),ImVec2(1280,720),ImVec2(3840,2160)}){
         io.DisplaySize=size;
-        for(const int state:{0,1,2,3,6,9}){online_ui_fixture=state;SetPanel(Panel::Online);frame();frame();}
+        for(const int state:{0,1,2,3,6,7,9}){online_ui_fixture=state;SetPanel(Panel::Online);frame();frame();}
     }
     io.DisplaySize=ImVec2(1280,720);online_ui_fixture=0;online_ui_host_clicked=false;SetPanel(Panel::Online);frame();
     io.AddMousePosEvent((online_host_min.x+online_host_max.x)*.5f,(online_host_min.y+online_host_max.y)*.5f);frame();
@@ -429,6 +432,9 @@ bool em2::TestOnlineDesktopMenu(){
     ok=ok && online_ui_host_clicked;
     int visible=0;EngineWorkbenchOption(2500,-2,visible);ok=ok && visible==1;
     CloseWorkbench();EngineWorkbenchOption(2500,-2,visible);ok=ok && visible==0;
+    online_ui_fixture=7;SetPanel(Panel::Online);CloseWorkbench();
+    EngineWorkbenchOption(2500,-2,visible);ok=ok && visible==1;
+    CompleteOnlineDesktopHandoff();EngineWorkbenchOption(2500,-2,visible);ok=ok && visible==0;
     online_ui_fixture=-1;online_profile_loaded=false;online_ui_error.clear();online_message[0]=0;
     ImGui::DestroyContext(context);ImGui::SetCurrentContext(previous);SetPanel(saved_panel);
     if(ok)REXLOG_INFO("Desktop online menu passed: idle/preparing/connecting/lobby/error draws, sixteen-player rows at 640/1280/3840 widths, real ImGui mouse Host activation, cross-thread start queue and exclusive window visibility");

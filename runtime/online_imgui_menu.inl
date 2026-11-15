@@ -21,6 +21,15 @@ void DispatchDesktopOnlineStart(){
     }
 }
 
+void PumpDesktopOnlineMenu(){
+    DispatchDesktopOnlineStart();
+    if(requested.load()!=Panel::Online)return;
+    int state=0,role=0;em2::net::NativeOnlineMenuOption(2701,-1,state);
+    em2::net::NativeOnlineMenuOption(2707,-1,role);
+    if(role>0 && state==0)em2::net::NativeOnlineMenuOption(2700,role==1?1:10,state);
+    int can_start=0;
+    if(role==1 && state==6){em2::net::NativeOnlineMenuOption(2706,-1,can_start);if(can_start)em2::net::NativeOnlineMenuOption(2700,7,state);}
+}
 int OnlineOption(int id,int choice=-1){
     if(online_ui_fixture>=0){
         if(id==2700){if(choice==1)online_ui_host_clicked=true;return online_ui_fixture;}
@@ -36,10 +45,10 @@ int OnlineOption(int id,int choice=-1){
         else if(id==2771){text="Player "+std::to_string(choice/128+1);choice%=128;}
         return choice>=0 && size_t(choice)<text.size()?uint8_t(text[size_t(choice)]):0;
     }
-    if(id==2700 && (choice==1 || choice==2 || choice==4 || choice==12)){
+    if(id==2700 && (choice==1 || choice==2 || choice==4 || choice==10 || choice==12)){
         QueueDesktopOnlineStart(choice);return 0;
     }
-    int value=0;em2::net::NativeOnlineMenuOption(id,choice,value);return value;
+    int value=0;em2::net::NativeOnlineMenuOption(id,id==2701?-2:choice,value);return value;
 }
 int OnlineChatOption(int id,int choice=-1){int value=0;em2::net::NativeOnlineChatOption(id,choice,value);return value;}
 int OnlineVoiceOption(int id,int choice=-1){int value=0;em2::net::NativeOnlineVoiceOption(id,choice,value);return value;}
@@ -54,6 +63,7 @@ char online_code[64]{},online_name[100]{},online_message[241]{};
 bool online_profile_loaded=false,online_open_kick=false;
 std::string online_ui_error;
 void CloseWorkbench(){
+    if(requested.load()==Panel::Online && OnlineOption(2701)==7)return;
     TakeDesktopOnlineStart();
     if(requested.load()==Panel::Online)OnlineOption(2700,6);
     SetPanel(Panel::Closed);
@@ -65,8 +75,10 @@ void OpenOnlineWorkbench(){
     OnlineOption(2700,0);SetPanel(Panel::Online);
 }
 void DrawOnlineVoice(){
-    if(!ImGui::CollapsingHeader("Voice chat"))return;
     int mode=OnlineVoiceOption(2800);
+    bool enabled=mode!=0;
+    if(ImGui::Checkbox("Enable voice chat",&enabled)){mode=enabled?2:0;OnlineVoiceOption(2800,mode);}
+    if(!ImGui::CollapsingHeader("Voice settings",ImGuiTreeNodeFlags_DefaultOpen))return;
     if(ImGui::Combo("Microphone mode",&mode,"Off\0Listen only\0Push to talk\0Open microphone\0"))OnlineVoiceOption(2800,mode);
     int positioning=OnlineVoiceOption(2804);
     if(ImGui::Combo("Voice positioning",&positioning,"Party\0Proximity\0"))OnlineVoiceOption(2804,positioning);
@@ -83,10 +95,20 @@ void DrawOnlineVoice(){
     }
     if(ImGui::Button("Refresh audio devices"))OnlineVoiceOption(2810,1);
     const auto status=voiceText(2803);ImGui::TextWrapped("%s",status.c_str());
+    if(mode)ImGui::TextWrapped("Lobby audio reaches everyone. Proximity applies after characters load. Hold your push-to-talk key to speak when that mode is selected.");
 }
 void DrawOnlineLobby(){
     const int state=OnlineOption(2701);
-    if(state==7){SetPanel(Panel::Closed);return;} // Original native save/Continue handoff owns gameplay.
+
+    if(state==7){
+        // Hold menu visibility/input ownership until SaveManager refresh and
+        // original Continue finish, rather than exposing the underlying menu
+        // to the same mouse release that started the online game.
+        ImGui::TextUnformatted("Starting online game...");
+        ImGui::TextWrapped("Loading the shared save and preparing both players. Please wait.");
+        return;
+    }
+    if(state==0 && em2::net::NativeRoomActive()){SetPanel(Panel::Closed);return;}
     if(OnlineOption(2743)!=1){CloseWorkbench();return;}
     ImGui::TextUnformatted("ONLINE MULTIPLAYER");
     ImGui::SameLine();ImGui::TextDisabled("Invite-only rooms / up to 16 players");

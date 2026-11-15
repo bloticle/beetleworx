@@ -180,13 +180,44 @@ whole-frame snapshot.
 
 ## Independent actor input boundary
 
-`online_actor_input.cpp` introduces explicit peer-to-native-actor ownership for extra Mickey actors, validated through the world registry, entity handle and typed Mickey controller. Registered extras are quarantined from ordinary human-input broadcasts; the two retail players retain the original route. Ownership expires when the registry, handle, entity or controller changes, and disabled extras remain quarantined until their native listeners have been removed.
+`online_actor_input.cpp` introduces explicit peer-to-native-actor ownership for extra human actors, validated through the world registry, entity handle and shared human controller. Registered extras are quarantined from ordinary human-input broadcasts; the two retail players retain the original route. Ownership expires when the registry, handle, entity or controller changes, and disabled extras remain quarantined until their native listeners have been removed.
 
 The base movement lookup is scoped to its audited native call site (`8276B968`, return `82783EB0`) and the explicitly replayed listener. It never allocates a third retail player slot. Native callback fixtures send opposite movement samples to two extra controller caches through the original base handler and verify that retail record/health/view sentinels remain untouched. Those sentinels are not a physics or death/respawn test.
 
 `BeginOwnedActorBasisTick` and `PrepareOwnedActorBasis` stage a normalized ground-projected view direction for each peer. The native controller-to-motion boundary (`827874B0`, return `827837E8`, saved `r27` equals the verified owned component) uses that immutable direction only for the current actor and tick. It restores the original native stack argument afterward. Captured transition bases, alternate references, disabled actors and stale world/generation/tick state reject. Native movement, smoothing, permissions and physics continue through the original code.
 
-`ReplayOwnedActorMovement` now delivers the exact native Movement action through the original Mickey handler `82A3C930`, including its pause, per-entity, special-mode, task/FSM and lock gates. It requires a staged basis and claims input once per peer/tick separately from the motion-basis claim. Every admitted tick must deliver a native movement action, including neutral. Missing peer input must stop the world barrier, rather than advancing with a previous input cache. Other actions remain unsupported; this API is not wired to network gameplay or sixteen actors yet.
+`ReplayOwnedActorMovement` delivers the exact native Movement action through the shared human handler `82A3C930`, including its pause, per-entity, special-mode, task/FSM and lock gates. It requires a staged basis and claims input once per peer/tick separately from the motion-basis claim. Every admitted tick must deliver a native movement action, including neutral. Missing peer input must stop the world barrier, rather than advancing with a previous input cache. Jump uses a separate per-actor edge/task path; generic gameplay actions remain blocked. The owned coordinator is not wired to the in-game startup or sixteen actors yet.
+
+## Per-actor native action profiles
+
+Owned registration now pins `action_user`0 or1: native `Movement/Jump` or
+`Movement2/Jump2` action names. This is independent of room peer numbers and
+never indexes a third retail PlayerManager record. Multiple actors may use
+either profile. Frame bindings retain and validate the profile together with
+actor generation, then build Movement and Jump commands from that profile.
+Wrong-profile actions reject before consuming an input/Jump claim.
+
+The shared human handler originally rejected secondary action names for extras
+because its retail-P2 identity query returned false. During an exact owned
+replay only, the query at return82A3C9C8 now classifies the actor using its
+registered action profile. The original query still executes once; ordinary
+retail, other caller and stale ownership paths retain its result. No retail
+player records are reassigned. Death tickets and Jump target leases include
+the profile in their identity checks.
+
+The mixed-profile regressions exercise original native controller callbacks,
+per-peer motion bases, Jump tasks and physics-stimulus delivery through actual
+TCP authoritative frames. They preserve the retail sentinels and reject
+wrong-profile input and forged lifecycle tickets. These are bounded native
+fixtures, not sixteen-player physics or gameplay acceptance.
+
+The private ownership probe can select a human Oswald prefab:
+`-OwnedPlayerReference -OwnedPlayerCharacter 1 -ExtraPlayerInstances 1`.
+It uses the selected character's hull for placement. An authentic Oswald clone
+has passed separate registration, reference retention, admission and deferred
+destruction while preserving the two original player handles. That probe sends
+no movement or Jump input; live controlled Oswald movement/Jump and the full
+larger-room gameplay connection remain separate work.
 
 ## Native movement reference lifetime
 

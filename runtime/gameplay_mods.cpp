@@ -2,6 +2,7 @@
 #include "emr_ability_animation_probe.h"
 #include "guest_read_batch.h"
 #include "gameplay_mods.h"
+#include "native_frame_checkpoint_probe.h"
 #include "console_tools.h"
 #include "native_engine.h"
 #include "ppc_config.h"
@@ -361,7 +362,7 @@ float em2::PlayerSpeedOverride(){return console_speed.load(std::memory_order_rel
 // The player override 829FB9C0 reaches this base motion update at829FBBE0.
 // Prepare before its force-accumulation call at8278DF08, not its later
 // housekeeping call to8278C0A0: newly pressed moves belong to this tick.
-PPC_FUNC_IMPL(sub_8278D4D8){const auto motion=ctx.r3.u32;const auto csr=_mm_getcsr();PrepareMotion(ctx,base,motion,ctx.f1.f64);_mm_setcsr(csr);em2::net::RunNativeMotionTrace(ctx,base,__imp__sub_8278D4D8);}
+PPC_FUNC_IMPL(sub_8278D4D8){em2::ObservePrivateNativeReplayController(ctx,base);const auto motion=ctx.r3.u32;const auto csr=_mm_getcsr();PrepareMotion(ctx,base,motion,ctx.f1.f64);_mm_setcsr(csr);em2::net::RunNativeMotionTrace(ctx,base,__imp__sub_8278D4D8);}
 PPC_FUNC_IMPL(sub_8278BF80){const auto motion=ctx.r3.u32;__imp__sub_8278BF80(ctx,base);const auto csr=_mm_getcsr();ApplyVelocity(motion,base);_mm_setcsr(csr);}
 
 bool em2::TestGameplayMods(const std::filesystem::path& directory){

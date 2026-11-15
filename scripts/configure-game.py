@@ -61,6 +61,7 @@ def main():
         offset = image.find(marker, max(0, end - 4096), end)
         if offset >= 8 and image[offset-4:offset] == bytes.fromhex("48000000") and image[offset+4:offset+8] == bytes.fromhex("48000000"):
             text += f'\n[[main.invalid_instructions]]\ndata = 0x00485645\nsize = 0x{end-offset:X}\n'
+    text += (ROOT / "config/native-event-order-hooks.toml").read_text(encoding="utf-8")
     config.write_text(text, encoding="utf-8")
     metadata["helpers"] = helpers
     metadata["xex_sha256"] = hashlib.sha256((args.game_dir / "default.xex").read_bytes()).hexdigest()

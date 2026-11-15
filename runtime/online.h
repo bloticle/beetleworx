@@ -143,6 +143,9 @@ struct GameplayObservation {
     // Native Room gameplay additionally proves all recognized character proxies,
     // including NPCs. GUID order is canonical; guest pointers never participate.
     bool includes_character_physics=false;
+    // Authored passive phases can detach player bodies while retaining actors.
+    // This changes the proof domain; active gameplay still requires both bodies.
+    bool passive_character_physics=false;
     std::vector<CharacterPhysics> characters;
     std::array<std::array<uint32_t,4>,2> player_ids{};
 };

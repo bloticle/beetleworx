@@ -11,6 +11,8 @@ void SetWorkbenchInputSystem(rex::input::InputSystem*);
 void InitializeEngineWorkbench(const std::filesystem::path&);
 void ShowEngineSettings();
 void ShowEngineConsole();
+void CompleteOnlineDesktopHandoff();
+void TickOnlineDesktopMenu();
 bool EngineWorkbenchKey(unsigned key,bool down);
 void ResetEngineWorkbenchInput();
 void SetEngineWorkbenchFocused(bool focused);

@@ -6,10 +6,12 @@ namespace em2::net {
 using RoomHistoryHash=std::array<uint8_t,32>;
 struct RoomHistoryScope {
     Identity identity;RoomHistoryHash world{};uint64_t roster_revision=0,first_tick=0;uint16_t players_mask=0;
+    bool host_correction=false;
     bool operator==(const RoomHistoryScope&)const=default;
 };
 struct RoomHistoryEntry {
     RoomFrame frame;std::optional<RoomHistoryHash> completed;bool verified=false;
+    std::optional<RoomHistoryHash> authority;
     bool operator==(const RoomHistoryEntry&)const=default;
 };
 enum class RoomHistoryResult {Ready,NotStarted,WrongScope,InvalidRange,Expired,Unavailable,Unverified};
@@ -23,6 +25,7 @@ public:
     bool Capture(const RoomFrame& consumed);
     bool Complete(uint64_t,const RoomHistoryHash&);
     bool Verify(uint64_t,const RoomHistoryHash&);
+    bool AcknowledgeAuthority(uint64_t,const RoomHistoryHash&);
     RoomHistoryResult Read(const RoomHistoryScope&,uint64_t first,uint64_t last,std::vector<RoomHistoryEntry>&)const;
     const std::optional<RoomHistoryScope>& scope()const{return scope_;}
     std::optional<uint64_t> oldest_tick()const;

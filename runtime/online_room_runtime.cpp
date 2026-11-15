@@ -196,7 +196,7 @@ bool UpdateNativeRoomSession(uint8_t* base,bool advance){
     if(!ClaimThread(owner))return true;if(!PollOwned(owner,Clock::now()))return true;
     if(owner.gate.active()){
         owner.loaded_waiting.store(false,std::memory_order_release);
-        if(advance && base && !owner.gate.completion_pending())owner.gate.SetJoining(!em2::NativeCoopReady(base));
+        if(advance && base && !owner.gate.completion_pending())owner.gate.SetJoining(!em2::NativeCoopRuntimeReady(base));
         owner.Publish(owner.room->state()==RoomState::Running?NativeSessionState::Attached:NativeSessionState::Joining,{},InputWait::Peer);return true;
     }
     if(!advance || !base)return true;
@@ -220,7 +220,7 @@ bool UpdateNativeRoomSession(uint8_t* base,bool advance){
     em2::SetOnlineJoinControls(false);em2::ResetNativeSynchronizedJoinTiming();
     if(!owner.gate.Attach(*owner.room)){owner.Fail("Could not attach the agreed native Room bootstrap timeline.");return true;}
     if(!owner.gate.SetReadinessProbe(owner.readiness)){owner.Fail("Could not install the native Room readiness adapter.");return true;}
-    owner.gate.SetJoining(!base || !em2::NativeCoopReady(base));
+    owner.gate.SetJoining(!base || !em2::NativeCoopRuntimeReady(base));
     owner.Publish(NativeSessionState::Joining,{},InputWait::Peer);return true;
 }
 void NotifyNativeRoomLevelLoaded(std::string_view destination){

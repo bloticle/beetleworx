@@ -6,12 +6,16 @@ bytes; prerelease identifiers must match, while SemVer build metadata is ignored
 Protocol, game-content, session and checkpoint checks remain independent. An
 unversioned development tree retains executable-hash compatibility checks.
 
-The current experimental native Room uses deterministic input lockstep and
-completed-world verification. It has separate UDP voice delivery and native
-text chat. Prediction, rollback/replay, authoritative correction and general
-world resynchronization are not implemented. A verified gameplay mismatch
-currently stops the session. Online demo packages enable the native lobby through
-the supplied hosted-relay configuration. The EM1 preview remains offline.
+The current experimental native Room combines delayed synchronized inputs with
+host correction of player and recognized NPC position, velocity and health.
+Inputs still wait for every participant. General world authority, prediction,
+rollback/replay and reconnect remain unfinished. Props, scripts, spawning and
+combat effects may diverge. Online demo packages enable the lobby through the
+supplied hosted-relay configuration. Optional relay voice and text chat are
+available. The EM1 preview remains offline. Current correction evidence and
+limits are recorded in [the correction notes](online-authority-correction-work.md).
+
+The following checkpoint results describe earlier deterministic-path checks.
 
 Native checkpoint-memory reload now coordinates unload and fresh actor/input/
 camera admission across the frozen Room. Two four-process native captures

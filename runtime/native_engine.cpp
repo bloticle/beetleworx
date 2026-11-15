@@ -62,7 +62,7 @@ PPC_EXTERN_FUNC(sub_8283E778);
 PPC_EXTERN_FUNC(__imp__sub_8276A828);
 PPC_EXTERN_FUNC(__imp__sub_827403B0);
 PPC_EXTERN_FUNC(__imp__sub_82732A18);
-PPC_EXTERN_FUNC(__imp__sub_82744E90);
+PPC_EXTERN_FUNC(sub_82744E90);
 PPC_EXTERN_FUNC(__imp__sub_82742F70);
 PPC_EXTERN_FUNC(__imp__sub_827CAE68);
 PPC_EXTERN_FUNC(__imp__sub_8275C728);
@@ -652,7 +652,7 @@ void ProbeExtraNativePlayers(PPCContext& ctx,uint8_t* base,const std::array<em2:
             if(entity!=probe.entities[i] || entity==snapshot[0].entity || entity==snapshot[1].entity){
                 probe.failed=true;REXLOG_ERROR("Extra native player cleanup rejected a changed or retail entity identity");continue;
             }
-            ctx.r3.u64=registry;ctx.r4.u64=entity;__imp__sub_82744E90(ctx,base);
+            ctx.r3.u64=registry;ctx.r4.u64=entity;sub_82744E90(ctx,base);
         }
         probe.queued=true;
         REXLOG_INFO("Extra native player probe: queued native destruction for {} instances, retail handles unchanged {}",probe.entities.size(),originals()==probe.original);

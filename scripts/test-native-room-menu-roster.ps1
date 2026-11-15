@@ -8,8 +8,9 @@ param(
  [switch]$DirectMovie,[switch]$MovieSequence,[switch]$AuthoredConversation,[switch]$CutsceneCycle,[switch]$CutsceneBoundaryMovement,[switch]$CutsceneSkipInput,[switch]$CutsceneHeldReturn,[switch]$UnfencedCutsceneReturn,
  [switch]$ExtraOswald,
  [switch]$ScriptedInput,[switch]$ChatProbe,[switch]$VoiceProbe,[switch]$ButtonTaskProbe,[switch]$PolicyCycle,[switch]$CaptureShutdownHang,
- [switch]$NavigationTrace,[switch]$FaceTargetPoison,[switch]$UnfixedFaceTarget,[switch]$NativeReload,
+ [switch]$NavigationTrace,[switch]$LuaTrace,[switch]$FaceTargetPoison,[switch]$UnfixedFaceTarget,[switch]$NativeReload,
  [ValidateRange(0,100000)][int]$CheckpointReloadTick=0,
+ [ValidateRange(0,3000)][int]$InputWarmupTicks=0,
  [ValidateSet(0,1,2,3,4)][int]$DamagePlayer=0,
  [ValidateRange(0,16)][int]$DamageExtraPeer=0,
  [ValidateRange(-1,16)][int]$PipelineCreationThreads=-1,
@@ -22,13 +23,14 @@ param(
  [switch]$ReturnToTitle,[switch]$ReenterAfterReturn,[switch]$RecoveryPrompt,[switch]$RecoveryController,
  [ValidateRange(0,16)][int]$PartialDeliveryParticipant=0,
  [ValidateRange(400,100000)][int]$PartialDeliveryTick=500,
- [string]$ReuseVerifiedContent='', [string]$ReplayInvitationFile='',
+ [string]$ReuseVerifiedContent='', [string]$ReplayInvitationFile='', [string]$ReplayCheckpointDirectory='',
  [ValidateRange(20,180)][int]$ObserveSeconds=30,
  [ValidateRange(256,8192)][int]$MinimumFreeMemoryMB=1024,
  [ValidateRange(256,16384)][int]$MinimumFreeCommitMB=1536,
  [ValidateRange(120,600)][int]$StartupTimeoutSeconds=360
 )
 $ErrorActionPreference='Stop'
+if($InputWarmupTicks -and (!$ScriptedInput -or $ReenterAfterReturn)){throw 'Input warmup requires scripted input and no separate re-entry warmup.'}
 if($RelayOrigin){$uri=$null;if(![Uri]::TryCreate($RelayOrigin,[UriKind]::Absolute,[ref]$uri) -or $uri.Scheme -ne 'https' -or $uri.UserInfo -or $uri.Query -or $uri.Fragment -or $uri.AbsolutePath -ne '/'){throw 'RelayOrigin requires a plain HTTPS origin without credentials, path, query or fragment.'};if($ReplayInvitationFile){throw 'Hosted relay tests cannot replay a loopback invitation.'}}
 if($Players -eq 2 -and $ButtonTaskProbe){throw 'ButtonTaskProbe compares extra-human tasks and requires at least three players.'}
 if($DirectMovie -and ($MovieSequence -or $AuthoredConversation -or $CutsceneCycle -or $Players -ne 3 -or !$ScriptedInput -or $CheckpointReloadTick -ne 300 -or $CheckpointReloadCount -ne 1 -or $MovieSkipDelay -or $DamagePlayer -or $DamageExtraPeer -or $NativeLevelTarget -or $NativeLevelTargets.Count -or $PolicyCycle -or $ReenterAfterReturn -or $CloseParticipant -or $PartialDeliveryParticipant)){throw 'DirectMovie requires three scripted humans and one original PlayMovieInternal at tick 300, without other fixtures.'}
@@ -205,7 +207,7 @@ try {
    if($entry.PSIsContainer){New-Item -ItemType Junction -Path $target -Target $(if($entry.Name -eq 'packfiles'){$packs}else{$entry.FullName}) | Out-Null}
    else{Copy-Item -LiteralPath $entry.FullName -Destination $target}
   }
-  if($index -eq 0){Copy-Item -LiteralPath (Join-Path $normal '42560816') -Destination $user -Recurse}
+  if($index -eq 0){$checkpoint=if($ReplayCheckpointDirectory){Join-Path (Resolve-Path -LiteralPath $ReplayCheckpointDirectory).Path '42560816'}else{Join-Path $normal '42560816'};Copy-Item -LiteralPath $checkpoint -Destination $user -Recurse}
   else{New-Item -ItemType Directory -Path (Join-Path $user '42560816') | Out-Null}
   [IO.File]::WriteAllText((Join-Path $user '.em2-native-lobby-qa'),'EM2-native-menu-loopback-QA-v1',[Text.UTF8Encoding]::new($false))
   [string[]]$lines=if(Test-Path -LiteralPath (Join-Path $normal 'pc-settings.ini')){@(Get-Content -LiteralPath (Join-Path $normal 'pc-settings.ini'))}else{@()}
@@ -254,6 +256,8 @@ try {
   if($NavigationTrace){foreach($arg in @('--em2_behavior_trace_start_tick=500','--em2_behavior_trace_dump_tick=618','--em2_behavior_motion_guid=000029320000394F00002AAB000002AF','--em2_behavior_trace_motion_input=true','--em2_behavior_trace_motion_trajectory=true','--em2_behavior_trace_navigation=true','--em2_behavior_trace_avoidance=true')){$info.ArgumentList.Add($arg)}}
   if($ReplayInvitationFile -and $peer.role -eq 'host'){$info.ArgumentList.Add('--em2_native_lobby_qa_replay_invitation_file='+$ReplayInvitationFile)}
   if($ScriptedInput){$info.ArgumentList.Add('--em2_room_probe_scripted_input=true')}
+  if($LuaTrace){$info.ArgumentList.Add('--em2_trace_online_lua_owners=true')}
+  if($InputWarmupTicks){$info.ArgumentList.Add('--em2_room_probe_input_warmup_ticks='+$InputWarmupTicks)}
   if($CloseParticipant -or $PartialDeliveryParticipant){$info.ArgumentList.Add('--em2_probe_room_leave_boundary=true')}
   if($ReturnToTitle){$info.ArgumentList.Add('--em2_probe_room_return_title=true')}
   if($RecoveryPrompt){$info.ArgumentList.Add('--em2_probe_room_recovery_prompt=true')}

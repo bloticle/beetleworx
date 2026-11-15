@@ -4,6 +4,7 @@
 #include "demo_support.h"
 #include "controls.h"
 #include "online_native_menu.h"
+#include "engine_workbench.h"
 #include "online_runtime.h"
 #include "online_room_leave.h"
 #include "online_native_handoff.h"
@@ -15,6 +16,7 @@
 #include "online_notice.h"
 #include "online_router.h"
 #include "online_chat.h"
+#include "online_voice_runtime.h"
 #include "demo_setup.h"
 #include "allocation_trace.h"
 #include <rex/runtime.h>
@@ -237,7 +239,14 @@ struct Controller {
             }
         }
         boot->Poll();const auto status=boot->status();
-        if(boot->uses_room() && status.state!=BootState::Taken)PumpOnlineChat(boot->LobbyChatRoom());
+        if(boot->uses_room() && status.state!=BootState::Taken){
+            auto* lobby_room=boot->LobbyChatRoom();PumpOnlineChat(lobby_room);
+            const bool relay_ready=!InternetMode() || (internet && internet->status().ready);
+            if(lobby_room && relay_ready){
+                if(internet)lobby_room->KeepInternetRelay(internet);
+                PumpOnlineVoice(lobby_room);
+            }else PumpOnlineVoice(nullptr);
+        }
         if(internet && (status.state==BootState::WaitingForPeer || status.state==BootState::Ready)){
             const auto relay=internet->status();if(relay.ready){
                 const auto roster=boot->lobby();
@@ -492,7 +501,7 @@ struct Controller {
         }
         return text;
     }
-    void Cancel(){PumpOnlineChat(nullptr);kick_candidate=0;join_input.End();name_input.End();name_input_state=0;campaign_cancel.request_stop();if(boot)boot->Cancel();RetireInternet();internet_join_paths.reset();router.reset();start=false;start_requested=false;error.clear();feedback.clear();advertiser.Stop();browser.Stop();advertised.clear();}
+    void Cancel(){PumpOnlineVoice(nullptr);PumpOnlineChat(nullptr);kick_candidate=0;join_input.End();name_input.End();name_input_state=0;campaign_cancel.request_stop();if(boot)boot->Cancel();RetireInternet();internet_join_paths.reset();router.reset();start=false;start_requested=false;error.clear();feedback.clear();advertiser.Stop();browser.Stop();advertised.clear();}
 };
 Controller& Menu(){static Controller controller;return controller;}
 }
@@ -635,7 +644,7 @@ bool NativeOnlineMenuOption(int id,int choice,int& result){
         result=menu.State();return true;
     }
     if(id==2701){
-        menu.Poll();result=menu.State();
+        if(choice!=-2)menu.Poll();result=menu.State();
         if(result==9){const auto message=menu.Message();if(message!=menu.reported_error){menu.reported_error=message;REXLOG_ERROR("Native online menu preparation failed: {}",message);}}
     }
     else if(id==2702)result=menu.host;
@@ -818,6 +827,7 @@ void CompleteNativeOnlineMenuHandoff(){
     menu.start_requested=false;
     menu.advertised.clear();
     menu.feedback.clear();
+    em2::CompleteOnlineDesktopHandoff();
     REXLOG_INFO("Native online menu released completed preparation; live session retained");
 }
 void SetNativeOnlineMenuHandoffAvailable(bool available){if(!OnlineMenuAvailable())return;auto& menu=Menu();std::lock_guard lock(menu.mutex);menu.handoff_available=available;}

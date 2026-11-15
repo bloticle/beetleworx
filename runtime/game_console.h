@@ -10,6 +10,8 @@ namespace em2 {
 // Fixed-action diagnostics only in a validated isolated native online QA root.
 // Called at the original coroutine-scheduler boundary; never retains a VM.
 void TickPrivateNativeRestart(PPCContext&,uint8_t* base);
+// Explicit private serialization probe only, after original scheduler return.
+void RunPrivateScriptPersistenceBoundary(PPCContext&,uint8_t* base);
 std::string QueueGameLua(std::string_view source,bool needs_world=false);
 std::string QueueRetailLevelLoad(std::string_view state,bool needs_world=true);
 std::optional<std::string> GameLuaConsoleSource(std::string_view line);

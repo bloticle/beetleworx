@@ -36,8 +36,15 @@ bool RoomHistory::Complete(uint64_t tick,const RoomHistoryHash& digest){
     entry->completed=digest;Advance(complete_,complete_exhausted_);return true;
 }
 bool RoomHistory::Verify(uint64_t tick,const RoomHistoryHash& digest){
+    if(scope_ && scope_->host_correction)return false;
     auto* entry=Find(tick);if(!entry || verify_exhausted_ || tick!=verify_ || !entry->completed || *entry->completed!=digest || entry->verified)return false;
     entry->verified=true;Advance(verify_,verify_exhausted_);return true;
+}
+bool RoomHistory::AcknowledgeAuthority(uint64_t tick,const RoomHistoryHash& digest){
+    auto* entry=Find(tick);
+    if(!scope_ || !scope_->host_correction || !Nonzero(digest) || !entry || verify_exhausted_ ||
+        tick!=verify_ || !entry->completed || entry->verified)return false;
+    entry->authority=digest;entry->verified=true;Advance(verify_,verify_exhausted_);return true;
 }
 RoomHistoryResult RoomHistory::Read(const RoomHistoryScope& scope,uint64_t first,uint64_t last,std::vector<RoomHistoryEntry>& out)const{
     if(!scope_)return RoomHistoryResult::NotStarted;if(scope!=*scope_)return RoomHistoryResult::WrongScope;

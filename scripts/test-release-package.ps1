@@ -11,6 +11,7 @@ WriteFixture 'runtime/pc-assets/pc-shader-library/rex-fixture/native-profile-v1/
 WriteFixture 'runtime/pc-assets/pc-shader-library/rex-fixture/native-profile-v1/archive-preparation-results.json' 'private developer audit'
 WriteFixture 'runtime/pc-assets/pc-shader-library/rex-old/native-profile-v1/translated-dxbc-v1/old.em2dxbc' 'stale shader'
 WriteFixture 'sdk/licenses/example/LICENSE.txt' 'provided SDK notice'
+WriteFixture 'runtime/licenses/opus.txt' 'provided static Opus codec notice'
 foreach($unwanted in @('user_data/save.dat','user_data/controls.ini','cache/driver.bin','beetleworx.pdb','beetleworx.map','runtime-tests.log','em2-lowering-tests.exe','EM2Recomp.exe','CMakeCache.txt','pc-assets/default.xex','pc-assets/source-game-directory.txt')){WriteFixture ('runtime/'+$unwanted) 'DO NOT PACKAGE'}
 $record=[IO.File]::ReadAllBytes((Join-Path $runtime 'pc-assets/pc-shader-library/rex-fixture/native-profile-v1/translated-dxbc-v1/test.em2dxbc'))
 $bundle=[IO.MemoryStream]::new();$writer=[IO.BinaryWriter]::new($bundle);$writer.Write([Text.Encoding]::ASCII.GetBytes('EM2DXPK1'));$writer.Write([uint32]1);$writer.Write([uint32]$record.Length);$writer.Write($record);$writer.Flush()

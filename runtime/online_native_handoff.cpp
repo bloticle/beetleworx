@@ -1,4 +1,5 @@
 #include "online_native_handoff.h"
+#include "engine_workbench.h"
 #include "online_native_menu.h"
 #include "online_runtime.h"
 #include "online_room_runtime.h"
@@ -18,6 +19,7 @@
 #include <windows.h>
 
 PPC_EXTERN_FUNC(__imp__sub_82768A40);
+PPC_EXTERN_FUNC(__imp__sub_82827B00);
 PPC_EXTERN_FUNC(__imp__sub_82765DE0);
 PPC_EXTERN_FUNC(__imp__sub_827685C8);
 PPC_EXTERN_FUNC(__imp__sub_827680D0);
@@ -108,6 +110,28 @@ bool QueueRefresh(PPCContext& ctx,uint8_t* base,uint32_t manager){
     ctx.r3.u64=manager;
     __imp__sub_82768A40(ctx,base);
     return true;
+}
+bool RegisterRoomPlayers(PPCContext& ctx,uint8_t* base){
+    if(!handoff.room)return true;
+    if(!Readable(base,0x833DC87C,4))return false;
+    const auto profile=PPC_LOAD_U32(0x833DC87C);
+    if(!Readable(base,profile,36))return false;
+    const auto count=PPC_LOAD_U32(profile+24),first=PPC_LOAD_U32(profile+4),second=PPC_LOAD_U32(profile+8);
+    if(count==2)return first<4 && second<4 && first!=second;
+    const auto devices=PPC_LOAD_U32(profile+12);
+    if(count!=1 || first!=0 || second!=UINT32_MAX || PPC_LOAD_U8(profile+28) || !Readable(base,devices,8))return false;
+    const auto device=PPC_LOAD_U32(devices+4);
+    if(!Readable(base,device,4))return false;
+    const auto table=PPC_LOAD_U32(device);
+    if(!Readable(base,table,24))return false;
+    // Original profile registration owns the slot/device assignment, count,
+    // notifications and co-op save flag. Register before Continue constructs
+    // the world, so Oswald is created as a human even during an opening film.
+    Preserve preserve(ctx);ctx.r3.u64=profile;ctx.r4.u64=1;ctx.r5.u64=1;
+    __imp__sub_82827B00(ctx,base);
+    const bool ready=PPC_LOAD_U32(profile+24)==2 && PPC_LOAD_U32(profile+4)==first && PPC_LOAD_U32(profile+8)==1;
+    REXLOG_INFO("Native online player registration before world load: count {}, first device {}, second device {}, accepted {}; original profile API, no simulated input",PPC_LOAD_U32(profile+24),PPC_LOAD_U32(profile+4),PPC_LOAD_U32(profile+8),ready);
+    return ready;
 }
 bool Resume(PPCContext& ctx,uint8_t* base,uint32_t owner){
     Preserve restore(ctx);
@@ -370,6 +394,7 @@ void UpdateNativeOnlineHandoff(PPCContext& ctx,uint8_t* base){
         if(!campaign.error.empty()){Fail("Could not retain the host's online campaign: "+campaign.error);return;}
         handoff.campaign_lease=std::move(campaign.lease);
         if(handoff.campaign_lease)REXLOG_INFO("Native lobby retained validated host campaign with an exclusive active-session lease");
+        if(!RegisterRoomPlayers(ctx,base)){Fail("The native engine could not register both online players before loading.");return;}
         if(!Resume(ctx,base,owner)){Fail("The native menu did not accept Continue for the shared save.");return;}
         if(!(handoff.room?FinishNativeRoomMenuPreparation():FinishNativeOnlineMenuPreparation())){Fail("The prepared native online session could not enter gameplay.");return;}
         CompleteNativeOnlineMenuHandoff();
@@ -385,6 +410,10 @@ void TickNativeOnlineTitleMenuHandoff(PPCContext& ctx,uint8_t* base,bool complet
     if(!completed || !registered.load(std::memory_order_acquire) || ctx.lr!=0x83075AD4)return;
     const auto level=em2::CurrentNativeLoadLevel();
     if(!std::string_view(level.data()).starts_with("mainmenu."))return;
+    // The Flash menu clip can stop advancing while hidden by the desktop UI.
+    // Service its networking on the original title's completed-frame boundary.
+    {Preserve preserve(ctx);em2::TickOnlineDesktopMenu();}
+
     uint32_t owner=0;DWORD thread=0;uint64_t generation=0;
     if(title_restore.status==NativeTitleRestoreState::Ready && handoff.phase==Phase::Idle){
         owner=title_restore.owner;thread=title_restore.thread;generation=title_restore.native_load;

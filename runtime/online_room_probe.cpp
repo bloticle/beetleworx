@@ -61,8 +61,9 @@ REXCVAR_DECLARE(uint32_t,em2_native_lobby_qa_damage_player);
 REXCVAR_DECLARE(uint32_t,em2_probe_extra_damage_peer);
 REXCVAR_DEFINE_INT32(em2_room_probe_expected_players,2,"Debug","Private native Room probe transport participant count 2..16; not playable actor capacity");
 REXCVAR_DEFINE_BOOL(em2_room_probe_gameplay,false,"Debug","Explicit private two-retail-player native gameplay experiment; no public-menu enablement");
+REXCVAR_DEFINE_BOOL(em2_room_probe_host_correction,false,"Debug","Private native Room: negotiate host-state corrections instead of independent world-digest equality");
 REXCVAR_DEFINE_BOOL(em2_room_probe_scripted_input,false,"Debug","Isolated verified loopback Room only: synthetic SDK source for extra-human movement and jump; never normal gameplay input");
-REXCVAR_DEFINE_UINT32(em2_room_probe_input_warmup_ticks,0,"Debug","Private validated SDK input only: neutral native updates before the scripted program, maximum 600");
+REXCVAR_DEFINE_UINT32(em2_room_probe_input_warmup_ticks,0,"Debug","Private validated SDK input only: neutral native updates before the scripted program, maximum 3000");
 REXCVAR_DEFINE_BOOL(em2_room_probe_mixed_characters,false,"Debug","Private Room startup: odd extra peers choose Mickey and even extra peers choose Oswald through normal lobby requests");
 REXCVAR_DEFINE_INT32(em2_room_probe_verification_window,1,"Debug","Private native Room completed-update credit 1..8; must match on all peers");
 REXCVAR_DEFINE_STRING(em2_room_probe_replay_invitation_file,"","Debug","Host-only private loopback replay: reuse a captured session nonce while freshly verifying build/content/save");
@@ -185,6 +186,7 @@ bool PreparePrivateRoomProbe(const fs::path& executable,const fs::path& content,
         Require(REXCVAR_GET(em2_private_profile) && !REXCVAR_GET(em2_user_data_directory).empty(),"Private Room probe requires private_profile and explicit isolated user root");
         const auto window=REXCVAR_GET(em2_room_probe_verification_window);
         Require(window>=1 && window<=8 && boot.SetGameplayVerificationWindow(uint8_t(window)),"Private Room verification window must be 1..8");
+        Require(boot.SetHostCorrectionMode(REXCVAR_GET(em2_room_probe_host_correction)),"Private Room could not configure host correction mode");
         Require(REXCVAR_GET(em2_online_auto_continue),"Private Room probe requires native online automatic Continue enabled");
         Require(!REXCVAR_GET(em2_online_menu) && !REXCVAR_GET(em2_online_qa_prelaunch) && REXCVAR_GET(em2_online_qa_role).empty() &&
             REXCVAR_GET(em2_native_lobby_qa_role).empty() && !REXCVAR_GET(em2_open_native_online_menu) &&
@@ -302,6 +304,11 @@ bool PreparePrivateRoomProbe(const fs::path& executable,const fs::path& content,
         throw std::runtime_error("Private Room verified startup exceeded 180 seconds");
     }catch(const std::exception& error){boot.Cancel();REXLOG_ERROR("Private Room probe preparation failed: {}",error.what());return false;}
 }
+bool PrivateNativeRoomGameplayProbeActive(){
+    auto* game=CurrentNativeRoomGameplay();
+    return REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_room_probe_gameplay) &&
+        prepared.load(std::memory_order_acquire) && prepared_room && NativeRoomActive() && game && game->active() && !game->halted();
+}
 bool InstallPrivateRoomProbe(){
     Environment environment;if(REXCVAR_GET(em2_room_probe_role).empty())return true;
     if(REXCVAR_GET(em2_room_probe_gameplay)){
@@ -324,7 +331,7 @@ std::unique_ptr<rex::input::InputSystem> MakePrivateRoomInput(Room& room){
         room.native_bootstrap() && room.lobby().locked && room.lobby().players.size()>=2,
         "Scripted Room input requires its exact prepared isolated loopback owner");
     const auto warmup=REXCVAR_GET(em2_room_probe_input_warmup_ticks);
-    Require(warmup<=600,"Private SDK input warmup exceeds its bound");
+    Require(warmup<=3000,"Private SDK input warmup exceeds its bound");
     class Driver final:public rex::input::InputDriver {
         Room& room_;std::optional<uint64_t> first_,last_;unsigned reads_=0,warmup_=0,recovery_reads_=0;bool warming_=false;
     public:

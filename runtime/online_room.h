@@ -2,6 +2,7 @@
 #include "online_movement_frame.h"
 #include "online_voice_transport.h"
 #include "online_room_history.h"
+#include "online_rollback.h"
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -14,6 +15,41 @@ namespace em2::net {
 struct CheckpointBundle;
 struct RoomCheckpointPeer {uint64_t peer=0;std::size_t total=0,received=0;bool installed=false;};
 struct RoomChatMessage {uint64_t sequence=0,peer=0;std::string name,text;uint8_t color=0;bool operator==(const RoomChatMessage&)const=default;};
+struct RoomRollbackInput {uint64_t tick=0;Pad pad;};
+// Host-owned completed state. Peer IDs are lobby identities; native addresses
+// never cross the network. World/roster scope prevents applying old-level data.
+struct RoomActorState {
+    uint64_t peer=0;
+    bool active=false;
+    std::array<float,3> position{},velocity{};
+    std::optional<int32_t> health;
+    bool operator==(const RoomActorState&)const=default;
+};
+inline constexpr size_t kAuthorityCharacterBatch=128;
+// Bounded incremental world-character samples. Stable authored GUIDs identify
+// local entities; this is not a list of entities to spawn or delete.
+struct RoomCharacterState {
+    std::array<uint32_t,4> id{};
+    bool active=false;
+    std::array<float,3> position{},velocity{};
+    std::optional<int32_t> health;
+    bool operator==(const RoomCharacterState&)const=default;
+};
+struct RoomAuthorityState {
+    uint64_t tick=0,roster_revision=0;
+    std::array<uint8_t,32> world{};
+    std::array<uint8_t,32> completion{};
+    uint16_t players_mask=0;
+    std::vector<RoomActorState> actors;
+    std::vector<RoomCharacterState> characters;
+    bool operator==(const RoomAuthorityState&)const=default;
+};
+struct RoomRollbackCommands {
+    // Host-assigned transport connection incarnation. A reused slot cannot
+    // authenticate commands queued by a prior occupant of that slot.
+    uint64_t peer=0,connection=0;RollbackScope scope;
+    std::vector<RoomRollbackInput> inputs;
+};
 bool ValidRoomChatText(std::string_view);
 struct RoomBootstrapFrame {
     uint64_t tick=0;
@@ -58,7 +94,26 @@ public:
     // Exact Hello/Welcome agreement, immutable after Host/Join. One preserves
     // synchronous verification; at most eight completed worlds may await proof.
     bool SetGameplayVerificationWindow(uint8_t completed_worlds);
+    // Negotiated before connecting. Authority acknowledgements report applied
+    // host corrections, not identical independent world simulation.
+    bool SetHostCorrectionMode(bool);
+    bool host_correction_mode()const;
+    // Explicit alternate transport mode, configured before Host/Join. Keeps
+    // the listener open and uses the existing authenticated TCP/relay channel.
+    // It does not start native gameplay or assert native snapshot capability.
+    bool EnableRollbackTransport(const std::array<uint8_t,32>& state_schema);
+    bool rollback_peer_ready(uint64_t peer)const;
+    uint64_t rollback_connection_id(uint64_t peer)const;
+    bool SendRollbackSnapshot(uint64_t peer,std::shared_ptr<const RollbackBytes>);
+    std::shared_ptr<const RollbackBytes> TakeRollbackSnapshot();
+    bool SendRollbackInputs(const RollbackScope&,std::span<const RoomRollbackInput>);
+    std::vector<RoomRollbackCommands> TakeRollbackInputs();
     uint8_t gameplay_verification_window()const;
+    // Separate state channel over the authenticated gameplay connection. This
+    // does not disable lockstep proofs or claim that native correction is wired.
+    bool PublishAuthorityState(const RoomAuthorityState&);
+    std::optional<RoomAuthorityState> TakeAuthorityState();
+    bool AcknowledgeAuthorityState(uint64_t tick,const std::array<uint8_t,32>& completion);
     bool Host(const Identity&,std::string_view numeric_address,uint16_t port,
         uint8_t gameplay_capacity,std::string_view name="Player 1");
     bool Join(const Identity&,std::string_view numeric_address,uint16_t port,std::string_view name);
@@ -167,6 +222,7 @@ private:
     friend bool TestOnlineRoomChat();
     friend bool TestOnlineRoomVoice();
     friend bool TestOnlineRoomLoads();
+    friend bool TestRoomRollbackTransport();
     struct Impl;
     std::unique_ptr<Impl> impl_;
     bool JoinInternal(const Identity&,std::string_view,uint16_t,std::string_view,bool checkpoint);
@@ -177,4 +233,5 @@ bool TestOnlineRoom();
 bool TestOnlineRoomChat();
 bool TestOnlineRoomVoice();
 bool TestOnlineRoomLoads();
+bool TestRoomRollbackTransport();
 }

@@ -2,6 +2,11 @@
 #include "em1_level_entry.h"
 #include "game_console.h"
 #include "game_console_catalog.h"
+#include "native_script_persistence_probe.h"
+#include "native_script_checkpoint.h"
+#include "native_script_scheduler_checkpoint.h"
+#include "allocation_trace.h"
+#include "native_physics_checkpoint_probe.h"
 #include "engine_workbench.h"
 #include "native_engine.h"
 #include "online_runtime.h"
@@ -34,6 +39,7 @@ PPC_EXTERN_FUNC(__imp__sub_826F6C20);
 PPC_EXTERN_FUNC(__imp__sub_826F71F8);
 PPC_EXTERN_FUNC(__imp__sub_82705AF8);
 REXCVAR_DEFINE_BOOL(em2_verify_game_console_vm,false,"Debug","Run pure arithmetic/string/error/stack console probes in the real game VM; no gameplay actions");
+REXCVAR_DEFINE_UINT32(em2_native_lobby_qa_damage_amount,1000,"Debug","Private native damage fixture amount, 1..1000; default retains fatal-damage tests");
 REXCVAR_DEFINE_UINT32(em2_native_lobby_qa_restart_tick,0xFFFFFFFFu,"Debug","Private validated loopback QA only: invoke the original RestartCurrentLevel at this agreed native script-scheduler tick; maximum disables");
 REXCVAR_DEFINE_UINT32(em2_native_lobby_qa_movie_skip_delay,0,"Debug","Private movie fixture only: native StartSequence skip delay in seconds, 0..10");
 REXCVAR_DEFINE_BOOL(em2_native_lobby_qa_direct_movie,false,"Debug","Private three-human native scheduler fixture: original PlayMovieInternal for retail Havok logo; no direct playback/context writes");
@@ -50,7 +56,9 @@ REXCVAR_DEFINE_STRING(em2_native_lobby_qa_level_route,"","Debug","Private valida
 REXCVAR_DEFINE_BOOL(em2_native_lobby_qa_clean_level_load,false,"Debug","Private loopback comparison only: use destructive debug CleanLoadLevel instead of the normal campaign transition");
 
 REXCVAR_DECLARE(bool,em2_private_profile);
+REXCVAR_DEFINE_BOOL(em2_probe_native_script_persistence,false,"Debug","Private original-VM serialization and scheduler graph checks; never restores live gameplay state");
 REXCVAR_DECLARE(std::string,em2_qa_debug_level);
+REXCVAR_DECLARE(std::string,em2_qa_start_level);
 
 namespace {
 constexpr size_t kMaxSource=16384;
@@ -60,6 +68,7 @@ std::atomic<bool> work_pending{false};
 std::atomic<bool> vm_seen{false};
 thread_local unsigned protected_depth=0;
 thread_local bool executing=false;
+thread_local bool scheduler_probe_boundary=false;
 thread_local uint64_t print_count=0;
 bool Readable(uint8_t* base,uint32_t address,size_t size){
  if(!base || address<4096 || !size || uint64_t(address)+size>0x100000000ull)return false;
@@ -104,8 +113,9 @@ std::string Value(uint8_t* base,uint32_t slot){
  }
  std::ostringstream out;out<<"<VM type "<<type<<" @0x"<<std::hex<<word<<">";return out.str();
 }
-struct Result {bool attempted=false,stack_ok=false;int status=-1;std::vector<std::string> values;};
-Result Evaluate(PPCContext& ctx,uint8_t* base,uint32_t state,std::string_view source,uint32_t environment=0){
+using ResultConsumer=bool(*)(PPCContext&,uint8_t*,uint32_t,uint32_t,unsigned);
+struct Result {bool attempted=false,stack_ok=false,consumer_ok=false;int status=-1;std::vector<std::string> values;};
+Result Evaluate(PPCContext& ctx,uint8_t* base,uint32_t state,std::string_view source,uint32_t environment=0,ResultConsumer consumer=nullptr){
  Result result;
  if(!ValidSource(source) || !Readable(base,state,128) || ctx.r1.u32<65536)return result;
  const auto storage=PPC_LOAD_U32(state+48),top=PPC_LOAD_U32(state+36),bottom=PPC_LOAD_U32(state+40),global=PPC_LOAD_U32(state+8);
@@ -149,7 +159,16 @@ Result Evaluate(PPCContext& ctx,uint8_t* base,uint32_t state,std::string_view so
  if(count>16)result.values.push_back("... "+std::to_string(count-16)+" more results");
  const auto after_call_storage=PPC_LOAD_U32(state+12),after_call_current=PPC_LOAD_U32(state+20);
  result.stack_ok=PPC_LOAD_U32(state+40)==restore_base && int64_t(after_call_current)-after_call_storage==call_delta;
- PPC_STORE_U32(state+36,uint32_t(restore_top));return result;
+ uint64_t cleanup_top=restore_top;
+ if(consumer && result.status==0 && result.stack_ok){
+   result.consumer_ok=consumer(ctx,base,state,uint32_t(result_top),unsigned(count));
+   const auto final_storage=PPC_LOAD_U32(state+48);
+   cleanup_top=uint64_t(final_storage)+top_offset;
+   result.stack_ok=cleanup_top<=UINT32_MAX && PPC_LOAD_U32(state+40)==uint64_t(final_storage)+base_offset &&
+     int64_t(PPC_LOAD_U32(state+20))-PPC_LOAD_U32(state+12)==call_delta;
+ }
+ if(cleanup_top<=UINT32_MAX && Readable(base,uint32_t(cleanup_top),8))PPC_STORE_U32(state+36,uint32_t(cleanup_top));else result.stack_ok=false;
+ return result;
 }
 struct Action {const char* name;const char* description;const char* source;};
 constexpr Action actions[]={
@@ -241,9 +260,36 @@ return true,type(original),env==_G
 void Service(PPCContext& ctx,uint8_t* base,uint32_t state){
  if(executing || faulted)return;
  if(!vm_seen.load(std::memory_order_relaxed))vm_seen.store(true,std::memory_order_relaxed);
- if(!work_pending.load(std::memory_order_acquire) && !REXCVAR_GET(em2_verify_game_console_vm))return;
+ if(!work_pending.load(std::memory_order_acquire) && !REXCVAR_GET(em2_verify_game_console_vm) && !(REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_native_script_persistence)))return;
  if(em2::net::SynchronizedSessionActive()){
    std::lock_guard lock(queue_mutex);requests.clear();work_pending.store(false,std::memory_order_release);return;
+ }
+ if(scheduler_probe_boundary && REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_native_script_persistence)){
+   static unsigned phase=0,attempts=0;static bool finished=false;static auto last=std::chrono::steady_clock::time_point{};
+   const auto now=std::chrono::steady_clock::now();
+   const auto probe_level=REXCVAR_GET(em2_qa_start_level);
+   const bool probe_world_ready=probe_level.empty() || (probe_level==em2::CurrentNativeLoadLevel().data() && em2::NativeConsoleWorldReady());
+   if(!finished && probe_world_ready && now-last>std::chrono::milliseconds(200)){
+     last=now;++attempts;
+     const auto& probe=em2::kNativeScriptPersistenceProbes[phase];
+     const auto saved=ctx;const auto csr=_mm_getcsr();
+     const auto result=Evaluate(ctx,base,state,probe.source,0,phase==6?em2::TestLocalNativeScriptCheckpoint:phase==7?em2::TestNativePhysicsCheckpoint:phase==8?em2::TestNativeScriptBulkCheckpoint:phase==9?em2::TestNativeSchedulerGraphCapture:nullptr);
+     const bool preserved=result.stack_ok && !std::memcmp(&ctx,&saved,sizeof(ctx)) && csr==_mm_getcsr();
+     const bool ok=result.attempted && result.status==0 && preserved && (phase>=6?result.consumer_ok:(result.values.size()==2 && result.values[0]=="true"));
+     if(ok){
+       REXLOG_INFO("Native script persistence probe {} passed: {}; serialized bytes {}; original VM, caller context and stack preserved",phase,probe.name,phase>=6?std::string("see native bridge result"):result.values[1]);
+       if(++phase==em2::kNativeScriptPersistenceProbes.size()){finished=true;REXLOG_INFO("Native script persistence complete: passed {}/{}; original HKS graph/component checks; no complete frame restored or replayed",phase,em2::kNativeScriptPersistenceProbes.size());}
+     }else if(result.attempted || attempts>=100){
+       finished=true;REXLOG_ERROR("Native script persistence complete: passed {}/{}; failed {}; attempted {} status {} caller preserved {}",phase,em2::kNativeScriptPersistenceProbes.size(),probe.name,result.attempted,result.status,preserved);
+       for(const auto& value:result.values)REXLOG_ERROR("Native script persistence VM error: {}",value);
+       Report(result);
+     }
+     if(em2::LocalNativeScriptVmFaulted(base,state) || result.status==4 || result.status==-200){
+       faulted=true;REXLOG_ERROR("Private VM probe stopped after native allocation failure; refusing further native execution/GC. Diagnostic process exits with failure.");
+       spdlog::shutdown();ExitProcess(1);
+     }
+     if(result.attempted && !preserved){faulted=true;return;}
+   }
  }
  if(REXCVAR_GET(em2_verify_game_console_vm)){
    static unsigned phase=0,attempts=0;static auto last=std::chrono::steady_clock::time_point{};
@@ -280,6 +326,17 @@ void Service(PPCContext& ctx,uint8_t* base,uint32_t state){
 }
 }
 
+void em2::RunPrivateScriptPersistenceBoundary(PPCContext& ctx,uint8_t* base){
+ if(!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_native_script_persistence) || executing || faulted || protected_depth || em2::net::SynchronizedSessionActive())return;
+ struct Restore {PPCContext& ctx;PPCContext saved;unsigned csr=_mm_getcsr();DWORD error=GetLastError();bool old=scheduler_probe_boundary;~Restore(){ctx=saved;_mm_setcsr(csr);SetLastError(error);scheduler_probe_boundary=old;}}restore{ctx,ctx};
+ // Original 82732AB8's initialized main wrapper. Do not construct a new VM or
+ // retain a borrowed coroutine from a protected callback that is still running.
+ if(!Readable(base,0x833DA5E0,4))return;
+ const auto wrapper=PPC_LOAD_U32(0x833DA5E0);if(!Readable(base,wrapper,8))return;
+ const auto state=PPC_LOAD_U32(wrapper+4);if(!Readable(base,state,128))return;
+ scheduler_probe_boundary=true;Service(ctx,base,state);
+}
+
 void em2::TickPrivateNativeRestart(PPCContext& ctx,uint8_t* base){
  net::TickPrivateNativeTaskPolicy(ctx,base);
  if(REXCVAR_GET(em2_native_lobby_qa_damage_player)!=4 && net::TickPrivateNativeExtraDamage(ctx,base))return;
@@ -293,8 +350,10 @@ void em2::TickPrivateNativeRestart(PPCContext& ctx,uint8_t* base){
  const auto scheduled=uint64_t(requested)+uint64_t(sent)*interval;
  uint64_t tick=0;
  if(sent>=count || executing || faulted || protected_depth || ctx.lr!=0x829ED694 || !CurrentAgreedSimulationTick(tick) || tick!=scheduled ||
-    !net::NativeOnlineMenuQaActive() || !NativeCoopReady(base))return;
+    (!net::NativeOnlineMenuQaActive() && !net::PrivateNativeRoomGameplayProbeActive()) || !NativeCoopReady(base))return;
  const auto damage_player=REXCVAR_GET(em2_native_lobby_qa_damage_player);
+ const auto damage_amount=REXCVAR_GET(em2_native_lobby_qa_damage_amount);
+ if(damage_player && (!damage_amount || damage_amount>1000)){REXLOG_ERROR("Native damage fixture amount must be 1..1000");return;}
  const bool cutscene=REXCVAR_GET(em2_native_lobby_qa_cutscene_cycle);
  const bool authored=REXCVAR_GET(em2_native_lobby_qa_authored_conversation);
  const bool movie=REXCVAR_GET(em2_native_lobby_qa_movie_sequence);
@@ -356,8 +415,8 @@ void em2::TickPrivateNativeRestart(PPCContext& ctx,uint8_t* base){
  const bool clean=REXCVAR_GET(em2_native_lobby_qa_clean_level_load);
  REXLOG_INFO("Native lobby QA reload method: {}",direct?"original-direct-movie":movie?"original-movie-sequence":authored?"original-authored-conversation":cutscene?"original-cutscene-cycle":damage_player?"original-damage":level?(clean?"original-level":"original-transition"):checkpoint?"checkpoint-memory":"level-only");
  if(level)REXLOG_INFO("Native lobby QA level target: {}",*level);
- const auto source=direct?std::string("PlayMovieInternal(GetPlayer(),\"LOGO_havok.bik\",true,true)"):movie?std::string("StartSequence(GetPlayer(),\"LOGO_havok.bik:")+std::to_string(REXCVAR_GET(em2_native_lobby_qa_movie_skip_delay))+"\",true,false,\"\")":authored?std::string("local owner=GetEntity(\"tcy_autotopia_01a_shared.Marker(Conversation) Oswald\"); ForceSequence(owner,\"AUT_v1_AreaIntro\",1); return IsSequencePlaying(owner,\"AUT_v1_AreaIntro\")"):cutscene?std::string(sent==1?"RestrictCutSceneInput()":"UnrestrictCutSceneInput()"):damage_player>=3?std::string("local a=GetPlayer(); local b=GetPlayer2(); local x=GetHealth(a); local y=GetHealth(b); Damage(a,1000); Damage(b,1000); return x,y,GetHealth(a),GetHealth(b)"):damage_player?std::string("local p=")+(damage_player==1?"GetPlayer()":"GetPlayer2()")+"; local before=GetHealth(p); Damage(p,1000); return before,GetHealth(p)":level?std::string(clean?"CleanLoadLevel(":"TransitionToLevel(")+Quote(*level)+")":std::string(checkpoint?"LoadGameFromMemory()":"RestartCurrentLevel()");
- if(damage_player)REXLOG_INFO("Native lobby QA damage requested: tick {}, retail player {}, amount 1000; original Damage Lua export, no forced reload",tick,damage_player);
+ const auto source=direct?std::string("PlayMovieInternal(GetPlayer(),\"LOGO_havok.bik\",true,true)"):movie?std::string("StartSequence(GetPlayer(),\"LOGO_havok.bik:")+std::to_string(REXCVAR_GET(em2_native_lobby_qa_movie_skip_delay))+"\",true,false,\"\")":authored?std::string("local owner=GetEntity(\"tcy_autotopia_01a_shared.Marker(Conversation) Oswald\"); ForceSequence(owner,\"AUT_v1_AreaIntro\",1); return IsSequencePlaying(owner,\"AUT_v1_AreaIntro\")"):cutscene?std::string(sent==1?"RestrictCutSceneInput()":"UnrestrictCutSceneInput()"):damage_player>=3?std::string("local a=GetPlayer(); local b=GetPlayer2(); local x=GetHealth(a); local y=GetHealth(b); Damage(a,1000); Damage(b,1000); return x,y,GetHealth(a),GetHealth(b)"):damage_player?std::string("local p=")+(damage_player==1?"GetPlayer()":"GetPlayer2()")+"; local before=GetHealth(p); Damage(p,"+std::to_string(damage_amount)+"); return before,GetHealth(p)":level?std::string(clean?"CleanLoadLevel(":"TransitionToLevel(")+Quote(*level)+")":std::string(checkpoint?"LoadGameFromMemory()":"RestartCurrentLevel()");
+ if(damage_player)REXLOG_INFO("Native lobby QA damage requested: tick {}, retail player {}, amount {}; original Damage Lua export, no forced reload",tick,damage_player,damage_player>=3?1000:damage_amount);
  const auto result=Evaluate(ctx,base,state,source);
  if(direct)REXLOG_INFO("Private native direct movie: tick {} LOGO_havok.bik attempted {} status {} stack {}; original PlayMovieInternal export, no direct playback/state writes",tick,result.attempted,result.status,result.stack_ok);
  if(movie)REXLOG_INFO("Private native movie sequence: tick {} LOGO_havok.bik attempted {} status {} stack {}; original StartSequence export, no direct playback/state writes",tick,result.attempted,result.status,result.stack_ok);

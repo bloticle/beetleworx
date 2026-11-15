@@ -17,10 +17,28 @@
 #include <array>
 PPC_EXTERN_FUNC(__imp__sub_827340E0);
 REXCVAR_DECLARE(bool,em2_private_profile);
+REXCVAR_DECLARE(bool,em2_room_probe_host_correction);
+REXCVAR_DECLARE(std::string,em2_room_probe_role);
+REXCVAR_DECLARE(uint32_t,em2_native_lobby_qa_restart_tick);
 REXCVAR_DEFINE_BOOL(em2_online_event_order,true,"Online","Traverse native broadcast subscribers in registration order during agreed Room updates");
 namespace {
 bool Readable(uint32_t p,size_t n,uint8_t* base){return base && p>=4096 && uint64_t(p)+n<=0x100000000ull && em2::GuestReadBatch::Readable(base+p,n);}
 struct Environment {unsigned fp=_mm_getcsr();DWORD error=GetLastError();~Environment(){_mm_setcsr(fp);SetLastError(error);}};
+void TracePrivateDamage(PPCContext& ctx,uint8_t* base,uint64_t tick,const char* phase,uint32_t event,uint32_t caller){
+    if(!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_room_probe_host_correction))return;
+    const uint64_t requested=REXCVAR_GET(em2_native_lobby_qa_restart_tick);
+    if(requested==UINT32_MAX || tick<requested || tick>requested+2)return;
+    Environment preserve;em2::GuestReadBatch reads;static thread_local unsigned reports=0;
+    if(reports>=128 || !Readable(event,116,base) || PPC_LOAD_U16(event+4)!=14)return;
+    ++reports;
+    REXLOG_INFO("Private native Damage event: role {} phase {} tick {} caller {:08X} class {:08X} target {:08X} instigator {:08X} flags {}/{} auxiliary {} types {} raw {} effective {} tag {:08X}; read-only, original dispatch retained",
+        REXCVAR_GET(em2_room_probe_role),phase,tick,caller,PPC_LOAD_U32(event),PPC_LOAD_U32(event+8),PPC_LOAD_U32(event+12),PPC_LOAD_U8(event+16),PPC_LOAD_U8(event+17),PPC_LOAD_U32(event+68),PPC_LOAD_U32(event+84),PPC_LOAD_U32(event+96),PPC_LOAD_U32(event+108),PPC_LOAD_U32(event+76));
+    for(unsigned array:{80u,92u,104u}){
+        const auto data=PPC_LOAD_U32(event+array),count=PPC_LOAD_U32(event+array+4);
+        if(count>16 || (count && !Readable(data,size_t(count)*4,base)))continue;
+        for(unsigned i=0;i<count;++i)REXLOG_INFO("Private native Damage payload: role {} phase {} tick {} array {} index {} bits {:08X}",REXCVAR_GET(em2_room_probe_role),phase,tick,array,i,PPC_LOAD_U32(data+i*4));
+    }
+}
 struct Entry {uint32_t node,listener,record,epoch;};
 struct Iteration {uint8_t* base=nullptr;uint32_t stack=0,manager=0,event=0,table=0,listener=0,record=0;std::vector<Entry> entries;size_t next=0;bool active=false;};
 thread_local Iteration* iteration=nullptr;
@@ -106,8 +124,12 @@ void EM2StableEventNext(PPCRegister& sp,PPCRegister& listener,PPCRegister& recor
 
 PPC_FUNC_IMPL(sub_827340E0){
     uint64_t tick=0;
+    const auto event=ctx.r4.u32,caller=uint32_t(ctx.lr);
+    const bool observed=em2::CurrentAgreedSimulationTick(tick);
+    if(observed)TracePrivateDamage(ctx,base,tick,"before",event,caller);
     Run(ctx,base,REXCVAR_GET(em2_online_event_order) && em2::net::CurrentNativeRoomGameplay() &&
         !em2::net::NativeRoomGameplayHalted() && em2::CurrentAgreedSimulationTick(tick));
+    if(observed)TracePrivateDamage(ctx,base,tick,"after",event,caller);
 }
 
 namespace {

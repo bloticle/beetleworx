@@ -1,5 +1,11 @@
 # Release preparation
 
+The current experimental online package uses the hosted relay and automatically
+enables native host motion/health correction. The historical offline-demo scope
+below is superseded by `ONLINE_QUICK_START.txt` and `ONLINE_DEMO_TESTING.txt`.
+Full campaign synchronization, prediction, rollback and reconnect remain open;
+the limited online demo does not claim those are complete.
+
 The player package uses the existing `beetleworx.exe`. First launch selects an
 Xbox 360 `.iso` or an extracted game folder; native import and content setup run
 in that executable. Developer tools are not required by players.

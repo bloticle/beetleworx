@@ -298,13 +298,16 @@ ActorInputResult ValidateRetailMovementAction(unsigned slot,const NativeActorAct
 }
 bool BeginRetailPassiveTick(uint32_t registry,uint64_t tick,PPCContext& ctx,uint8_t* base){
     Environment environment;uint64_t agreed=0,generation=0;Frame frame,neutral;neutral.tick=tick;
-    if(!Owner(base) || !state.started || state.faulted || state.active || state.passive ||
+    if(!Owner(base) || state.faulted || state.active || state.passive || state.rearming ||
        state.next!=tick || tick==UINT64_MAX || replay_slot!=-1 || update_slot!=-1 ||
        !Clock(agreed,base) || agreed!=tick || !em2::ReadPublishedSynchronizedControls(generation,frame) ||
        generation!=state.controls || frame!=neutral)return false;
     for(unsigned i=0;i<2;++i)if((state.mask&(1u<<i)) &&
         (state.actors[i].registry!=registry || !CurrentControllerOwner(i,ctx,base)))return false;
-    state.tick=tick;state.published=frame;state.passive=true;state.stages={};return true;
+    // A level may start inside an authored cutscene. The armed receiver lease,
+    // exact first tick and agreed neutral publication establish quarantine;
+    // no earlier active Movement transaction is required or invented.
+    state.tick=tick;state.published=frame;state.passive=true;state.started=true;state.stages={};return true;
 }
 bool FinishRetailPassiveTick(uint64_t tick,PPCContext& ctx,uint8_t* base){
     Environment environment;uint64_t agreed=0;
@@ -631,6 +634,14 @@ bool TestNativeRetailInput(){
     em2::EndSynchronizedControls(restore.controls);restore.controls=0;
     if(!em2::BeginSynchronizedControls(10))return false;
     restore.controls=em2::SynchronizedControlsGeneration();DisarmRetailInput();
+    if(!ArmRetailInput(77,registry,restore.controls,3,{101,102},10,ctx,base))return false;
+    raw={};raw.tick=10;fixture_tick=10;
+    if(!check(em2::PublishSynchronizedControls(raw) && !state.started &&
+       !BeginRetailPassiveTick(registry+4,10,ctx,base) && !BeginRetailPassiveTick(registry,11,ctx,base) &&
+       BeginRetailPassiveTick(registry,10,ctx,base) && !state.active && state.started &&
+       RetailInputQuarantineFor(0,ctx,base,retained) && FinishRetailPassiveTick(10,ctx,base),
+       "opening cutscene admits its armed first neutral tick without fabricating prior Movement delivery"))return false;
+    DisarmRetailInput();
     if(!ArmRetailInput(77,registry,restore.controls,3,{101,102},10,ctx,base))return false;
     std::array<uint64_t,kOnlineRoomCapacity> frame_epochs{};frame_epochs[0]=101;frame_epochs[1]=102;
     OwnedMovementFrames button_frames;

@@ -23,7 +23,7 @@ PPC_EXTERN_FUNC(__imp__sub_8276A828);
 PPC_EXTERN_FUNC(__imp__sub_827403B0);
 PPC_EXTERN_FUNC(__imp__sub_827CAE68);
 PPC_EXTERN_FUNC(__imp__sub_82742F70);
-PPC_EXTERN_FUNC(__imp__sub_82744E90);
+PPC_EXTERN_FUNC(sub_82744E90);
 PPC_EXTERN_FUNC(__imp__sub_82747128);
 PPC_EXTERN_FUNC(__imp__sub_8308B3E8);
 PPC_EXTERN_FUNC(__imp__sub_826550C8);
@@ -219,13 +219,13 @@ bool NativeRoomActors::Retire(PPCContext& ctx,uint8_t* base){
     if(!s.bindings.actors().empty() && !s.bindings.BeginRetirement(ctx,base))return false;
     for(auto& actor:s.actors){
         if(actor.camera_constructed && !actor.camera_destroyed){actor.camera_destroyed=true;ctx.r3.u64=actor.camera;ctx.r4.u64=1;__imp__sub_829F20E8(ctx,base);}
-        if(!actor.camera_entities_queued){actor.camera_entities_queued=true;for(auto handle:{actor.tracker,actor.output})if(handle){const auto entity=calls.Resolve(s.registry,handle);if(entity){ctx.r3.u64=s.registry;ctx.r4.u64=entity;__imp__sub_82744E90(ctx,base);}}}
+        if(!actor.camera_entities_queued){actor.camera_entities_queued=true;for(auto handle:{actor.tracker,actor.output})if(handle){const auto entity=calls.Resolve(s.registry,handle);if(entity){ctx.r3.u64=s.registry;ctx.r4.u64=entity;sub_82744E90(ctx,base);}}}
     }
     if(!s.queued){
         for(size_t n=s.actors.size();n-->0;){auto& actor=s.actors[n];const auto entity=calls.Resolve(s.registry,actor.handle);
             if(!entity)continue;
             if(entity!=actor.entity || entity==s.retail_entities[0] || entity==s.retail_entities[1])return false;
-            if(actor.admission_entered){if(!actor.destruction_queued){actor.destruction_queued=true;ctx.r3.u64=s.registry;ctx.r4.u64=entity;__imp__sub_82744E90(ctx,base);}continue;}
+            if(actor.admission_entered){if(!actor.destruction_queued){actor.destruction_queued=true;ctx.r3.u64=s.registry;ctx.r4.u64=entity;sub_82744E90(ctx,base);}continue;}
             const auto owner=PPC_LOAD_U32(s.registry+152);
             if(!Readable(entity-8,104,base) || PPC_LOAD_U32(entity)!=0x8208D908 || !PPC_LOAD_U32(entity-4) || !Readable(owner,112,base))return false;
             const auto pending=PPC_LOAD_U32(s.registry+192),pending_count=PPC_LOAD_U32(s.registry+196);

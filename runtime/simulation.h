@@ -66,6 +66,8 @@ int EffectiveSimulationSpeedPercent();
 bool SetSimulationSpeedPercent(int percent);
 bool RequestSimulationSteps(unsigned count);
 void ResetPlayerMotionHistory(PPCContext& ctx,uint8_t* base);
+// Presentation discontinuity only. Does not reset the network/simulation clock.
+void ResetNetworkPresentationHistory(PPCContext& ctx,uint8_t* base);
 void RecordCameraInput(unsigned user,int16_t x,int16_t y,uint16_t buttons);
 bool InAgreedSimulationTick();
 // Current native update only; no timeline mutation or network-owner lookup.

@@ -200,12 +200,13 @@ bool NativeOnlineVoiceOption(int id,int choice,int& result){
 void PumpOnlineVoiceImpl(Room* room){
     struct Preserve {unsigned fp=_mm_getcsr();DWORD error=GetLastError();~Preserve(){_mm_setcsr(fp);SetLastError(error);}}preserve;
     static std::unique_ptr<MediaWorker> worker;static Room* prior_room=nullptr;static Config prior;static uint64_t epoch=0,session=0;
-    const bool active=room && room->state()==RoomState::Running && !REXCVAR_GET(em2_probe_online_voice);
+    const bool lobby=room && (room->state()==RoomState::Listening || room->state()==RoomState::Lobby);
+    const bool active=room && (room->state()==RoomState::Running || lobby) && !REXCVAR_GET(em2_probe_online_voice);
     connected=active;
     if(!active)ReleaseOnlineVoiceInput();
     Config c;c.enabled=active && mode.load()!=0;c.capture=c.enabled && focused.load() && mode.load()>=2;c.talk=c.capture && Talking();c.volume=volume.load()*.25f;
     {std::lock_guard lock(preferences_mutex);c.input=input_device;c.output=output_device;}
-    c.proximity=spatial_mode.load()==1;c.far_distance=ranges[range_index.load()];
+    c.proximity=spatial_mode.load()==1 && !lobby;c.far_distance=ranges[range_index.load()];
     if(active){c.world=em2::CurrentNativeLoadGeneration();c.local_peer=room->local_peer();c.token=room->identity().session;}
     if(c.enabled)for(const auto& player:room->lobby().players)if(player.peer!=room->local_peer())c.roster|=uint16_t(1u<<(player.peer-1));
     if(prior_room!=room)++session;c.session=session;c.epoch=prior.epoch;
@@ -217,7 +218,7 @@ void PumpOnlineVoiceImpl(Room* room){
         for(const auto& packet:room->TakeVoice())worker->Submit(c.epoch,packet.peer,packet.packet,now);
         VoicePacket packet;for(unsigned i=0;i<8 && worker->Take(c.epoch,packet);++i)if(Talking() && room->voice_ready())room->SendVoice(packet);
     }else if(room && !REXCVAR_GET(em2_probe_online_voice))room->TakeVoice();
-    {std::lock_guard lock(status_mutex);status=!c.enabled?(mode.load()?"Voice is available during online gameplay.":"Voice is off."):worker->Status();if(status.empty())status=room->voice_ready()?(!focused.load()?"Microphone paused while the game is unfocused.":mode.load()==3?"Open microphone enabled.":c.capture?"Push to talk: hold the selected key or D-pad Down.":"Listening; microphone off."):"Connecting voice...";}
+    {std::lock_guard lock(status_mutex);status=!c.enabled?(mode.load()?"Voice is available in an online lobby or game.":"Voice is off."):worker->Status();if(c.enabled && lobby && room->voice_ready() && status.empty())status="Lobby voice is active (party audio). Proximity starts with gameplay.";if(status.empty())status=room->voice_ready()?(!focused.load()?"Microphone paused while the game is unfocused.":mode.load()==3?"Open microphone enabled.":c.capture?"Push to talk: hold the selected key or D-pad Down.":"Listening; microphone off."):"Connecting voice...";}
 }
 void PumpOnlineVoice(Room* room){
     try{PumpOnlineVoiceImpl(room);}catch(...){mode=0;connected=false;ReleaseOnlineVoiceInput();REXLOG_ERROR("Online voice disabled after a media bridge failure; gameplay retained");}

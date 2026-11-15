@@ -4,6 +4,8 @@
 #include "debug_level_browser.h"
 #include "ppc_context.h"
 #include "simulation.h"
+#include "native_simulation_clock_checkpoint.h"
+#include "native_frame_checkpoint_probe.h"
 #include "guest_shutdown.h"
 #include "camera_targets.h"
 #include "camera_cadence.h"
@@ -37,6 +39,8 @@
 #include "game_console.h"
 #include "guest_read_batch.h"
 #include <rex/cvar.h>
+REXCVAR_DECLARE(bool,em2_private_profile);
+REXCVAR_DECLARE(bool,em2_probe_native_frame_replay);
 REXCVAR_DEFINE_BOOL(em2_trace_online_random_owners,false,"Debug","Capture bounded owner registers and parent stacks for online CRT diagnostics; requires observation tracing");
 REXCVAR_DEFINE_BOOL(em2_trace_online_lua_owners,false,"Debug","Private bounded Lua random-source and early-wait capture without per-tick clock logging; requires observation tracing");
 REXCVAR_DEFINE_UINT32(em2_trace_online_random_start_tick,0,"Debug","First of two agreed ticks to capture bounded CRT events for online observation tracing");
@@ -784,6 +788,16 @@ thread_local uint64_t tick_number=0;
 thread_local uint64_t tick_counter=0;
 thread_local uint64_t tick_frequency=50000000;
 thread_local uint64_t counter_remainder=0;
+struct PrivateClockTape {
+    enum Mode {Idle,Record,Ready,Replay}mode=Idle;
+    uint8_t* base=nullptr;uint64_t epoch=0;std::array<uint64_t,16> values{};unsigned count=0,index=0;
+};
+thread_local PrivateClockTape private_clock_tape;
+thread_local PPCContext private_step_arguments;
+thread_local uint8_t* private_step_base=nullptr;
+thread_local bool private_step_valid=false,private_step_running=false;
+thread_local unsigned private_step_csr=0;
+
 thread_local bool agreed_clock_tick=false;
 thread_local uint64_t clock_input_tick=0;
 struct NetworkPauseRestore {uint8_t* base=nullptr;uint8_t local=0;} ;
@@ -1340,11 +1354,14 @@ void CompleteNetworkObservation(PPCContext& ctx,uint8_t* base) {
     const bool room_ready=room_report && actors_ready?room->CheckGameplayReadiness(ctx,base):false;
     ctx=saved;_mm_setcsr(mxcsr);
     bool valid=em2::ReadNativeGameplayObservation(ctx,base,state);
+    if(report && !valid)REXLOG_ERROR("Native online observation rejected while reading world, players or resources");
     // Both online adapters must verify the contact world once the two native
     // humans are admitted. Verifying only the two player positions lets NPC
     // physics diverge unnoticed until a later AI decision changes the RNG.
     if(valid && (gameplay_report || (room_report && gameplay && gameplay->extra_actor_mask()) || (legacy_report && em2::NativeCoopReady(base)))){
-        valid=em2::ReadNativeCharacterPhysics(base,state.characters) && state.characters.size()>=2;
+        state.passive_character_physics=gameplay_report && gameplay->passive_input_pending();
+        valid=em2::ReadNativeCharacterPhysics(base,state.characters) && (state.passive_character_physics || state.characters.size()>=2);
+        if(!valid)REXLOG_ERROR("Native online observation rejected while reading character physics ({} proxies)",state.characters.size());
         state.includes_character_physics=valid;
     }
     state.random=random_observation;
@@ -1362,7 +1379,7 @@ void CompleteNetworkObservation(PPCContext& ctx,uint8_t* base) {
         const auto& a=observations[0];const auto& b=observations[1];
         if(report && REXCVAR_GET(em2_trace_online_random_owners))REXLOG_INFO("Native online scene clock: tick {}, seconds {:08X}, accumulated {:016X}, counter {}, previous {}",observed_tick,PPC_LOAD_U32(0x833FCA4C),PPC_LOAD_U64(0x833FCA38),PPC_LOAD_U64(0x833FCA60),PPC_LOAD_U64(0x833FCA68));
         REXLOG_INFO("Native gameplay observation v{}: level '{}' state '{}' interior '{}' epoch {}, tick {}, modes {}/{}, bits {:08X}/{:08X}/{:08X}/{:08X}/{:08X}/{:08X}, life {}/{}/{}/{}, ammo {:08X}/{:08X}/{:08X}/{:08X}/{:08X}/{:08X}, CRT calls/seeds {}/{}, last state {:08X}, stream {:016X}, digest {}, agreed {}, character proxies {}",
-            state.includes_character_physics?5:4,state.world.level.data(),state.world.state.data(),state.world.interior.data(),tick_number,observed_tick,a.mode,b.mode,std::bit_cast<uint32_t>(a.position[0]),std::bit_cast<uint32_t>(a.position[1]),std::bit_cast<uint32_t>(a.position[2]),
+            state.includes_character_physics?(state.passive_character_physics?6:5):4,state.world.level.data(),state.world.state.data(),state.world.interior.data(),tick_number,observed_tick,a.mode,b.mode,std::bit_cast<uint32_t>(a.position[0]),std::bit_cast<uint32_t>(a.position[1]),std::bit_cast<uint32_t>(a.position[2]),
             std::bit_cast<uint32_t>(b.position[0]),std::bit_cast<uint32_t>(b.position[1]),std::bit_cast<uint32_t>(b.position[2]),
             state.life[0],state.life[1],state.life[2],state.life[3],std::bit_cast<uint32_t>(state.ammo[0]),std::bit_cast<uint32_t>(state.ammo[1]),
             std::bit_cast<uint32_t>(state.ammo[2]),std::bit_cast<uint32_t>(state.ammo[3]),std::bit_cast<uint32_t>(state.ammo[4]),std::bit_cast<uint32_t>(state.ammo[5]),
@@ -1515,14 +1532,13 @@ struct NativeTickAdmissionScope {
     }
 };
 
-void ResetSimulationHistory(PPCContext& ctx,uint8_t* base) {
-    RestoreNetworkPause();
+void ResetSimulationHistory(PPCContext& ctx,uint8_t* base,bool presentation_only=false) {
+    if(!presentation_only)RestoreNetworkPause();
     em2::ResetCameraPresentation();
-    em2::ResetGameplayViewCameras();
-    recording_epoch.store(0,std::memory_order_release);
+    if(!presentation_only)em2::ResetGameplayViewCameras();
+    if(!presentation_only)recording_epoch.store(0,std::memory_order_release);
     em2::interpolated_nodes.store(0,std::memory_order_relaxed);
-    in_tick=false;
-    agreed_clock_tick=false;
+    if(!presentation_only){in_tick=false;agreed_clock_tick=false;}
     std::vector<uint32_t> retained;
     {
         std::lock_guard lock(history_mutex);
@@ -1537,7 +1553,7 @@ void ResetSimulationHistory(PPCContext& ctx,uint8_t* base) {
     }
     ui_containers.clear();
     camera_motion.clear();
-    counter_remainder=0;
+    if(!presentation_only)counter_remainder=0;
     const auto saved=ctx;
     // Release outside the locks: guest deletion can call our detach hooks.
     for(auto object:retained) if(ChangeReference(object,-1,base)==0) {
@@ -1618,6 +1634,7 @@ void FinishTick(PPCContext& ctx,uint8_t* base) {
     ctx=saved;
     em2::simulation_steps.fetch_add(1,std::memory_order_relaxed);
     em2::CaptureCameraPresentationTarget(ctx,base,tick_number);
+    em2::TickPrivateNativeFrameCheckpoint(ctx,base,tick_number);
 }
 
 void ApplyTransforms(PPCContext& ctx,uint8_t* base,bool restore) {
@@ -1725,6 +1742,7 @@ void BenchmarkSceneRenderEntries() {
 
 namespace em2 {
 void PrepareSimulationWorldUnload(PPCContext& ctx,uint8_t* base){
+    CancelPrivateNativeFrameCheckpoint(ctx,base);
     const bool tick=in_tick,agreed=agreed_clock_tick;
     const auto remainder=counter_remainder;
     ResetSimulationHistory(ctx,base);
@@ -1733,6 +1751,9 @@ void PrepareSimulationWorldUnload(PPCContext& ctx,uint8_t* base){
 void ResetPlayerMotionHistory(PPCContext& ctx,uint8_t* base) {
     ResetSimulationHistory(ctx,base);
     scheduler.Reset();
+}
+void ResetNetworkPresentationHistory(PPCContext& ctx,uint8_t* base) {
+    ResetSimulationHistory(ctx,base,true);
 }
 void RecordCameraInput(unsigned user,int16_t x,int16_t y,uint16_t buttons) {
     if(user || (!REXCVAR_GET(em2_trace_camera) && !REXCVAR_GET(em2_trace_motion))) return;
@@ -1809,6 +1830,7 @@ PPC_FUNC_IMPL(sub_8273D880) {
     }
     const auto trace_end=script_wait_trace_size;
     __imp__sub_8273D880(ctx,base);
+    em2::RunPrivateScriptPersistenceBoundary(ctx,base);
     if(trace_manager && trace_end>trace_begin){
         // A target's pause flags can suppress the subtraction even with equal
         // clock inputs. Observe the original scheduler's output without
@@ -1900,6 +1922,14 @@ void UpdateFixedClock(PPCContext& ctx,uint8_t* base,uint64_t counter) {
     // profiling, streaming and kernel timers must continue reading real time.
     // Anchor every update to real QPC so a loading stall cannot leave one clock
     // permanently seconds behind other systems.
+    auto& tape=private_clock_tape;
+    if(tape.mode==PrivateClockTape::Record){
+        if(tape.base!=base || tape.count==tape.values.size()){REXLOG_ERROR("Private native clock recording exceeded its owner/bound");spdlog::shutdown();ExitProcess(1);}
+        tape.values[tape.count++]=counter;
+    }else if(tape.mode==PrivateClockTape::Replay){
+        if(tape.base!=base || tape.index>=tape.count){REXLOG_ERROR("Private native clock replay has no matching recorded read");spdlog::shutdown();ExitProcess(1);}
+        counter=tape.values[tape.index++];
+    }
     tick_counter=counter;
     uint64_t interval;
     if(agreed_clock_tick) {
@@ -1987,6 +2017,7 @@ PPC_FUNC_IMPL(sub_829EC348) {
 PPC_FUNC_IMPL(sub_829ED310) {
     if(!frame_active) {
         const auto started=Clock::now();
+        if(REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_native_frame_replay)){private_step_arguments=ctx;private_step_base=base;private_step_valid=true;private_step_csr=_mm_getcsr();}
         __imp__sub_829ED310(ctx,base);
         em2::em1::TickArchitectureScripts(ctx,base,std::bit_cast<float>(PPC_LOAD_U32(0x833FCA54)));
         MeasureMaximum(em2::maximum_simulation_us,started);
@@ -2049,6 +2080,7 @@ PPC_FUNC_IMPL(sub_829ED310) {
         else if(network_tick)em2::RunNativeSynchronizedJoin(ctx,base,network_frame.players[1].buttons);
         if(!em2::net::BeforeOwnedActorProbeTick(ctx,base))return false;
         const auto started=Clock::now();
+        if(REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_native_frame_replay)){private_step_arguments=ctx;private_step_base=base;private_step_valid=true;private_step_csr=_mm_getcsr();}
         __imp__sub_829ED310(ctx,base);
         em2::em1::TickArchitectureScripts(ctx,base,std::bit_cast<float>(PPC_LOAD_U32(0x833FCA54)));
         admission_scope.completed=true;
@@ -2089,6 +2121,80 @@ PPC_FUNC_IMPL(sub_829D95B8) {
     const auto application=ctx.r3.u32;
     if(frame_finish_pending) { __imp__sub_829D95B8(ctx,base); FinishTick(ctx,base);frame_finish_pending=false; }
     PPC_STORE_U32(application+76,application_delta);
+}
+
+namespace em2 {
+struct NativeSimulationClockCheckpoint::Impl {
+    uint8_t* base=nullptr;uint64_t epoch=0,number=0,counter=0,frequency=0,remainder=0,input_tick=0,steps=0,recording=0;
+    DWORD thread=0;bool active=false,agreed=false;
+    std::array<uint8_t,92> clock{};std::array<uint8_t,12> frequency_fields{};std::array<uint8_t,4> speed{};
+    bool Scope(uint8_t* memory,uint64_t expected,std::string& error)const{
+        if(!epoch || expected!=epoch || memory!=base || thread!=GetCurrentThreadId() || in_clock_update || in_tick!=active || agreed_clock_tick!=agreed ||
+           !GuestReadBatch::Readable(memory+0x833FCA30,clock.size()) || !GuestReadBatch::Readable(memory+0x833D04D8,frequency_fields.size()) || !GuestReadBatch::Readable(memory+0x833C01C0,4) ||
+           std::memcmp(memory+0x833D04D8,frequency_fields.data(),frequency_fields.size()) || std::memcmp(memory+0x833C01C0,speed.data(),4)){
+            error="Native simulation clock owner/phase/frequency/speed/world epoch changed";return false;
+        }return true;
+    }
+};
+NativeSimulationClockCheckpoint::NativeSimulationClockCheckpoint():impl_(std::make_unique<Impl>()){}
+NativeSimulationClockCheckpoint::~NativeSimulationClockCheckpoint()=default;
+bool NativeSimulationClockCheckpoint::Capture(uint8_t* base,uint64_t epoch,std::string& error){
+    struct Host{DWORD error=GetLastError();unsigned csr=_mm_getcsr();~Host(){SetLastError(error);_mm_setcsr(csr);}}host;GuestReadBatch reads;
+    if(!base || !epoch || impl_->epoch || in_clock_update || !GuestReadBatch::Readable(base+0x833FCA30,92) || !GuestReadBatch::Readable(base+0x833D04D8,12) || !GuestReadBatch::Readable(base+0x833C01C0,4)){
+        error="Native clock capture requires an empty checkpoint at a stable clock boundary";return false;
+    }
+    auto& s=*impl_;s.base=base;s.epoch=epoch;s.thread=GetCurrentThreadId();s.number=tick_number;s.counter=tick_counter;s.frequency=tick_frequency;s.remainder=counter_remainder;s.input_tick=clock_input_tick;
+    s.active=in_tick;s.agreed=agreed_clock_tick;s.recording=recording_epoch.load(std::memory_order_acquire);s.steps=simulation_steps.load(std::memory_order_relaxed);
+    std::memcpy(s.clock.data(),base+0x833FCA30,92);std::memcpy(s.frequency_fields.data(),base+0x833D04D8,12);std::memcpy(s.speed.data(),base+0x833C01C0,4);error.clear();return true;
+}
+bool NativeSimulationClockCheckpoint::Restore(uint8_t* base,uint64_t epoch,std::string& error)const{
+    struct Host{DWORD error=GetLastError();unsigned csr=_mm_getcsr();~Host(){SetLastError(error);_mm_setcsr(csr);}}host;GuestReadBatch reads;
+    const auto& s=*impl_;if(!s.Scope(base,epoch,error))return false;
+    std::memcpy(base+0x833FCA30,s.clock.data(),92);tick_number=s.number;tick_counter=s.counter;tick_frequency=s.frequency;counter_remainder=s.remainder;clock_input_tick=s.input_tick;
+    recording_epoch.store(s.recording,std::memory_order_release);simulation_steps.store(s.steps,std::memory_order_relaxed);error.clear();return true;
+}
+bool NativeSimulationClockCheckpoint::Matches(uint8_t* base,uint64_t epoch,std::string& error)const{
+    struct Host{DWORD error=GetLastError();unsigned csr=_mm_getcsr();~Host(){SetLastError(error);_mm_setcsr(csr);}}host;GuestReadBatch reads;
+    const auto& s=*impl_;if(!s.Scope(base,epoch,error))return false;
+    if(std::memcmp(base+0x833FCA30,s.clock.data(),92) || tick_number!=s.number || tick_counter!=s.counter || tick_frequency!=s.frequency || counter_remainder!=s.remainder || clock_input_tick!=s.input_tick ||
+       recording_epoch.load(std::memory_order_acquire)!=s.recording || simulation_steps.load(std::memory_order_relaxed)!=s.steps){error="Native game clock/fixed-step owner state differs from checkpoint";return false;}
+    error.clear();return true;
+}
+bool BeginPrivateNativeClockRecord(uint8_t* base,uint64_t epoch,std::string& error){
+    auto& t=private_clock_tape;if(!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_native_frame_replay) || !base || !epoch || t.mode!=PrivateClockTape::Idle || in_tick){error="Private core-clock tape cannot begin at this boundary";return false;}
+    t={};t.mode=PrivateClockTape::Record;t.base=base;t.epoch=epoch;error.clear();return true;
+}
+bool SealPrivateNativeClockRecord(uint8_t* base,uint64_t epoch,std::string& error){
+    auto& t=private_clock_tape;if(t.base!=base || t.epoch!=epoch || t.mode!=PrivateClockTape::Record || !t.count){error="Private original update recorded no valid native core-clock sequence";return false;}
+    t.mode=PrivateClockTape::Ready;error.clear();return true;
+}
+bool BeginPrivateNativeClockReplay(uint8_t* base,uint64_t epoch,std::string& error){
+    auto& t=private_clock_tape;if(t.base!=base || t.epoch!=epoch || t.mode!=PrivateClockTape::Ready){error="Private core-clock replay owner/phase mismatch";return false;}
+    t.index=0;t.mode=PrivateClockTape::Replay;error.clear();return true;
+}
+bool FinishPrivateNativeClockReplay(uint8_t* base,uint64_t epoch,std::string& error){
+    auto& t=private_clock_tape;if(t.base!=base || t.epoch!=epoch || t.mode!=PrivateClockTape::Replay || t.index!=t.count){error="Private replay did not consume the original core-clock sequence";return false;}
+    REXLOG_INFO("Private native replay core clock matched: {} original counter reads reused; OS/media clocks unchanged",t.count);t={};error.clear();return true;
+}
+bool RunPrivateNativeReplayUpdate(PPCContext& ctx,uint8_t* base,std::string& error){
+    if(!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_native_frame_replay) || !private_step_valid || private_step_base!=base || private_step_running || in_tick || private_clock_tape.mode!=PrivateClockTape::Replay || net::SynchronizedSessionActive()){
+        error="Private native replay requires one retained offline completed-update owner";return false;
+    }
+    const auto saved=ctx;
+    struct RestoreContext{PPCContext& ctx;PPCContext saved;unsigned csr=_mm_getcsr();~RestoreContext(){ctx=saved;_mm_setcsr(csr);private_step_running=false;}}restore{ctx,saved};private_step_running=true;
+    const auto replay_csr=_mm_getcsr();
+    REXLOG_INFO("Private native replay host FP: recorded {:08X}, previous replay entry {:08X}",private_step_csr,replay_csr);
+    ctx=private_step_arguments;const auto application=ctx.r3.u32;
+    if(application<4096 || !GuestReadBatch::Readable(base+application,80)){error="Private native replay application is unavailable";return false;}
+    PPC_STORE_U32(application+76,std::bit_cast<uint32_t>(1.f/30.f));StartTick(base,false,0);
+    _mm_setcsr(private_step_csr);
+    REXLOG_INFO("Private native replay entering original update: application {:08X}, logical tick {}",application,tick_number);
+    __imp__sub_829ED310(ctx,base);
+    em1::TickArchitectureScripts(ctx,base,std::bit_cast<float>(PPC_LOAD_U32(0x833FCA54)));
+    REXLOG_INFO("Private native replay original update returned; entering original finalization");
+    ctx=private_step_arguments;__imp__sub_829D95B8(ctx,base);FinishTick(ctx,base);
+    error="Private native replay returned without its expected terminal probe";return false;
+}
 }
 
 PPC_FUNC_IMPL(sub_829D8228) {

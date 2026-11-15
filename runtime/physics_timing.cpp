@@ -1,5 +1,6 @@
 #include "ppc_config.h"
 #include "physics_timing.h"
+#include "native_frame_checkpoint_probe.h"
 #include "players.h"
 #include "character_timing.h"
 #include "pc_settings.h"
@@ -24,9 +25,20 @@
 PPC_EXTERN_FUNC(__imp__sub_8246AD50);
 PPC_EXTERN_FUNC(__imp__sub_82467468);
 PPC_EXTERN_FUNC(__imp__sub_82468610);
+PPC_EXTERN_FUNC(__imp__sub_82467D50);
+PPC_EXTERN_FUNC(__imp__sub_8247D628);
+PPC_EXTERN_FUNC(__imp__sub_827D4208);
+PPC_EXTERN_FUNC(__imp__sub_827D4CD8);
+PPC_EXTERN_FUNC(__imp__sub_827D5E00);
+PPC_EXTERN_FUNC(__imp__sub_827D78D0);
+PPC_EXTERN_FUNC(__imp__sub_8280F428);
+PPC_EXTERN_FUNC(__imp__sub_827E0148);
+PPC_EXTERN_FUNC(__imp__sub_8288AE38);
 PPC_EXTERN_FUNC(__imp__sub_823F92A0);
 PPC_EXTERN_FUNC(__imp__sub_823F9478);
 PPC_EXTERN_FUNC(__imp__sub_82489860);
+PPC_EXTERN_FUNC(__imp__sub_82487770);
+PPC_EXTERN_FUNC(__imp__sub_8248E1A8);
 PPC_EXTERN_FUNC(__imp__sub_827ADCC8);
 PPC_EXTERN_FUNC(sub_82489860);
 REXCVAR_DEFINE_BOOL(em2_trace_physics,false,"Debug","Summarize actual native world-step intervals every five seconds");
@@ -219,9 +231,58 @@ PPC_FUNC_IMPL(sub_827ADCC8) {
     const bool trace=native && REXCVAR_GET(em2_trace_motion);
     const auto manager=ctx.r3.u32;
     const uint32_t step=trace?PPC_LOAD_U32(manager+72):0;
+    em2::ObservePrivateNativeReplayPhysics(base,manager,1);
     WithNativePhysicsStep(ctx,base,requested_step,__imp__sub_827ADCC8);
+    em2::ObservePrivateNativeReplayPhysics(base,manager,4);
     em2::TracePlayerSpawnPhysicsStep(base);
     if(trace)ObserveNativeBodyRoots(manager,requested_step && step==0x3D088889?requested_step:step,base);
+}
+PPC_FUNC_IMPL(sub_827D78D0) {
+    const auto object=ctx.r3.u32;
+    em2::ObservePrivateNativeReplayPose(ctx,base,2);
+    __imp__sub_827D78D0(ctx,base);
+    em2::ObservePrivateNativeReplayPose(ctx,base,3,object);
+}
+PPC_FUNC_IMPL(sub_827D5E00) {
+    em2::ObservePrivateNativeReplayTranslation(ctx,base,172);
+    __imp__sub_827D5E00(ctx,base);
+}
+PPC_FUNC_IMPL(sub_827D4CD8) {
+    em2::ObservePrivateNativeReplayTranslation(ctx,base);
+    __imp__sub_827D4CD8(ctx,base);
+}
+PPC_FUNC_IMPL(sub_8280F428) {
+    em2::ObservePrivateNativeReplayPose(ctx,base,0);
+    __imp__sub_8280F428(ctx,base);
+}
+PPC_FUNC_IMPL(sub_827E0148) {
+    const auto object=ctx.r3.u32;
+    __imp__sub_827E0148(ctx,base);
+    em2::ObservePrivateNativeReplayPose(ctx,base,1,object);
+}
+PPC_FUNC_IMPL(sub_827D4208) {
+    em2::ObservePrivateNativeReplayBodyCall(ctx,base,0x827D4208,ctx.r6.u32,ctx.r3.u32,ctx.r4.u32);
+    __imp__sub_827D4208(ctx,base);
+}
+PPC_FUNC_IMPL(sub_8288AE38) {
+    // The observer resolves proxy+16 only while the private probe is active.
+    em2::ObservePrivateNativeReplayBodyCall(ctx,base,0x8288AE38,ctx.r3.u32,ctx.r4.u32,0);
+    __imp__sub_8288AE38(ctx,base);
+}
+PPC_FUNC_IMPL(sub_8247D628) {
+    // Read-only, bounded diagnostic. The original activation routine always runs.
+    em2::ObservePrivateNativeReplayBodyCall(ctx,base);
+    __imp__sub_8247D628(ctx,base);
+}
+PPC_FUNC_IMPL(sub_82468610) {
+    const auto simulation=ctx.r3.u32;em2::ObservePrivateNativeReplayPhysics(base,simulation,2);
+    __imp__sub_82468610(ctx,base);
+    em2::ObservePrivateNativeReplayPhysics(base,simulation,3);
+}
+PPC_FUNC_IMPL(sub_82467D50) {
+    const auto simulation=ctx.r3.u32;em2::ObservePrivateNativeReplayPhysics(base,simulation,5);
+    __imp__sub_82467D50(ctx,base);
+    em2::ObservePrivateNativeReplayPhysics(base,simulation,6);
 }
 PPC_FUNC_IMPL(sub_8246AD50) {
     if(test_step){test_step(ctx,base);return;}
@@ -233,8 +294,20 @@ PPC_FUNC_IMPL(sub_8246AD50) {
     ObserveWorld(world,dt,ctx.r3.u32);
 }
 PPC_FUNC_IMPL(sub_82489860) {
+    const auto step=ctx.r4.u32;em2::ObservePrivateNativeReplayPhysics(base,step,7);
     if(TracePhysics())ObserveIntegration(ctx,base);
     __imp__sub_82489860(ctx,base);
+    em2::ObservePrivateNativeReplayPhysics(base,step,8);
+}
+PPC_FUNC_IMPL(sub_82487770) {
+    const auto bodies=ctx.r4.u32;em2::ObservePrivateNativeReplayPhysics(base,bodies,9);
+    __imp__sub_82487770(ctx,base);
+    em2::ObservePrivateNativeReplayPhysics(base,bodies,10);
+}
+PPC_FUNC_IMPL(sub_8248E1A8) {
+    const auto island=ctx.r6.u32;em2::ObservePrivateNativeReplayPhysics(base,island,11);
+    __imp__sub_8248E1A8(ctx,base);
+    em2::ObservePrivateNativeReplayPhysics(base,island,12);
 }
 namespace {
 struct IntegrationHeaderCaptured {};
