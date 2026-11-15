@@ -430,6 +430,48 @@ This does not inject the specific new native gameplay failure branch.
 The bounded live run above precedes the diagnostic-message/comment-only edits;
 its recorded executable hash is retained rather than replaced with a later one.
 
+## Interrupted combat update during a native load
+
+With the private AI/spawn/impact/launch adapters enabled, the clean native
+Autotopia to Mean Street North test failed at tick 700. The host entered its
+original loader and sent the existing authoritative load notice. The guest's
+Deliver path correctly admitted that interrupted update without waiting for a
+completed host result, but the AI adapter still required a completed decision
+batch before the guest could reach its own loader. It halted with
+`Guest AI selector has no matching host decision`; the host consequently lost
+the loader rendezvous. The retained failure report preserved the actual AI
+cause, exercising the previous diagnostic change. Baseline evidence:
+`analysis/private-native-room-pair-20261115-114219-4e839192/combat-load-integration-result.json`.
+
+The combat adapters now recognize the existing authenticated, guest-only,
+exact-tick host load announcement when no authority result exists. During
+that admitted interrupted update they retain original AI, Damage, spawner,
+launch and impact execution so the engine can reach its native load boundary.
+They do not invent an empty successful combat result. Normal gameplay
+completion explicitly rejects this path if the guest fails to enter its
+matching loader. Original load votes, destination/world agreement, teardown
+and new-world admission remain required. Other ticks retain combat authority.
+This does not add arbitrary mid-update snapshots or a causal journal for all
+possible campaign transitions.
+
+The candidate builds and passes the 9,091-check Room regression, including
+existing real-TCP load-announcement tick/role/vote/completion fencing:
+`analysis/native-combat-load-test-5a096184632d448e80b41cd19124bdcc/rollback.log`.
+The live rerun passes both loader votes at tick 700, enters fresh admission at
+raw 701 in both processes, and observes Mean Street North through guest tick
+1161 (host 1163), including 968 guest AI decisions after admission. It then
+fails at 1162 with `Host pre-update native death correction failed`. This is
+a passed load boundary and a failed longer integration, not a passed playthrough.
+The finisher's tick-1200 markers time out because gameplay already stopped;
+both windows nevertheless close normally and normal user files are unchanged.
+Evidence:
+`analysis/private-native-room-pair-20261115-114526-b04562f1/combat-load-integration-result.json`.
+Executable SHA256:
+`90D37DC0EB7C58B6BEBB0BB110BED943AD87A5CA7041D2E4A98602EEF0A6C4DB`.
+The next unresolved path is direct/native zero-health reconciliation during
+respawn; the existing synthetic lethal Damage operation did not produce the
+required zero-health readback in this case. Its cause is not yet established.
+
 ## GUID mutation fence fixed
 
 Cloning assigns a new GUID after the entity is registered. Original

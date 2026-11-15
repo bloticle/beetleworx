@@ -327,10 +327,18 @@ struct NativeRoomGameplay::Impl {
         if(!result || result>16 || std::none_of(roster.players.begin(),roster.players.end(),[&](const auto& player){return player.peer==result;}))return 0;
         return uint8_t(result);
     }
+    bool AnnouncedLoadCancellation(uint64_t tick)const{
+        // The host is blocked inside the real loader before completing this
+        // update, so no completed combat packet exists. Its authenticated,
+        // tick-scoped notice admits the guest's original path to the same
+        // loader rendezvous. It does not authorize completing this update.
+        return Owner() && Configured() && !stopped && peer!=1 && pending && delivered &&
+            tick==committed && !pending_authority && room->HostLoadAnnounced(tick);
+    }
     bool AiScope(uint32_t brain,uint8_t* base,std::array<uint32_t,4>& id,uint64_t& tick){
         if(!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_ai_targets) || !Owner() || !Configured() || stopped ||
            !pending || !delivered || load_depth || transition_pending || !room->host_correction_mode() ||
-           room->state()!=RoomState::Running || !em2::CurrentAgreedSimulationTick(tick) || tick!=committed)return false;
+           room->state()!=RoomState::Running || !em2::CurrentAgreedSimulationTick(tick) || tick!=committed || AnnouncedLoadCancellation(tick))return false;
         if(!Readable(brain,296,base))return Stop("Native AI target brain unavailable");
         const auto attached=PPC_LOAD_U32(brain+60);
         if(!attached || uint64_t(attached)+28>0x100000000ull || !Readable(attached+8,20,base) || PPC_LOAD_U32(attached+8)!=0x8208D908)
@@ -917,7 +925,10 @@ bool NativeRoomGameplay::Deliver(PPCContext& ctx,uint8_t* base){
         while(!s.pending_authority && s.room->state()==RoomState::Running &&
               std::chrono::steady_clock::now()<until && !NativeRoomLoadsCancelled()){
             UpdateNativeRoomSession(base,false);s.pending_authority=s.room->TakeAuthorityState();
-            if(!s.pending_authority && s.room->HostLoadAnnounced(tick))return true;
+            if(!s.pending_authority && s.room->HostLoadAnnounced(tick)){
+                REXLOG_INFO("Native guest admitted host-announced load tick: {}; no completed combat packet, original update must enter the matching native loader",tick);
+                return true;
+            }
             if(!s.pending_authority)std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         if(!s.pending_authority || s.pending_authority->tick!=tick)return s.Stop("Host update result did not arrive before matching native guest update");
@@ -1009,6 +1020,7 @@ bool NativeRoomGameplay::Complete(const std::array<uint8_t,32>& digest,PPCContex
     Environment environment;Context context(ctx);auto& s=*impl_;Impl::FaultOnThrow fault{s};uint64_t tick=0;
     if(!s.Owner() || s.stopped || !s.pending || !s.delivered || !s.consumed ||
         !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed)return false;
+    if(s.AnnouncedLoadCancellation(tick))return s.Stop("Host announced a native load, but guest completed without entering the matching loader");
     if(const auto failure=s.WorldFailure(base))return s.Stop(std::string("Native gameplay completion rejected: ")+failure);
     if(REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_ai_targets) && s.peer!=1 &&
        (!s.pending_authority || s.ai_cursor!=s.pending_authority->ai_decisions.size()))return s.Stop("Native AI target completion did not consume the host decision batch");
@@ -1222,7 +1234,7 @@ bool NativeRoomGameplay::SuppressLocalDamage(uint32_t target)const{
     const bool owned=s.Owner() && s.Configured() && !s.stopped && s.peer!=1 && s.pending && !s.load_depth &&
         !s.transition_pending && s.room->state()==RoomState::Running && s.room->host_correction_mode() &&
         em2::CurrentAgreedSimulationTick(tick) && tick==s.committed;
-    if(!owned || !target)return false;
+    if(!owned || !target || s.AnnouncedLoadCancellation(tick))return false;
     if(REXCVAR_GET(em2_private_profile) && REXCVAR_GET(em2_probe_room_world_damage_events))return true;
     return target==s.label_handles[0] || target==s.label_handles[1] ||
         std::any_of(s.actors->actors().begin(),s.actors->actors().end(),[&](const auto& entry){return entry.actor.handle==target;});
@@ -1238,6 +1250,7 @@ bool NativeRoomGameplay::RecordSpawnBatch(SpawnBatch batch,uint32_t owner,uint32
     if(!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_spawn_batches) || !s.Owner() || !s.Configured() || s.stopped ||
        !s.pending || s.load_depth || s.transition_pending || s.room->state()!=RoomState::Running || !s.room->host_correction_mode() ||
        !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed)return false;
+    if(s.AnnouncedLoadCancellation(tick))return false;
     const auto canonical=[&](SpawnReference& ref,uint32_t entity){
         if(!entity)return std::all_of(ref.id.begin(),ref.id.end(),[](auto word){return word==0;});
         if(!Readable(entity,20,base) || PPC_LOAD_U32(entity)!=0x8208D908)return false;
@@ -1262,7 +1275,7 @@ NativeImpactMode NativeRoomGameplay::ProjectileImpactMode(const SpawnId& id,uint
     if(!REXCVAR_GET(em2_private_profile) || !REXCVAR_GET(em2_probe_room_projectile_impacts) || !REXCVAR_GET(em2_probe_room_spawn_replay) ||
        !REXCVAR_GET(em2_probe_room_world_damage_events) || !s.Owner() || !s.Configured() || s.stopped || !s.pending || s.load_depth || s.transition_pending ||
        s.room->state()!=RoomState::Running || !s.room->host_correction_mode() || s.projectile_load!=s.load || !s.owned_projectiles.contains(id) ||
-       !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed)return NativeImpactMode::Original;
+       !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed || s.AnnouncedLoadCancellation(tick))return NativeImpactMode::Original;
     // All direct original callers below ignore this void operation's return.
     switch(caller){case 0x8293E5E4:case 0x8293F8D4:case 0x82940BFC:case 0x82940E48:case 0x82941538:case 0x82941588:case 0x8294275C:case 0x82943480:break;
     default:return NativeImpactMode::Original;}
@@ -1274,7 +1287,7 @@ NativeImpactMode NativeRoomGameplay::ShooterLaunchMode(std::span<const SpawnId> 
        !REXCVAR_GET(em2_probe_room_spawn_replay) || !s.Owner() || !s.Configured() || s.stopped || !s.pending || s.load_depth || s.transition_pending ||
        s.room->state()!=RoomState::Running || !s.room->host_correction_mode() || s.projectile_load!=s.load || shots.empty() ||
        !std::all_of(shots.begin(),shots.end(),[&](const auto& id){return s.owned_projectiles.contains(id);}) ||
-       !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed)return NativeImpactMode::Original;
+       !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed || s.AnnouncedLoadCancellation(tick))return NativeImpactMode::Original;
     // All six direct original callers overwrite r3 before using another result.
     switch(caller){case 0x828B9058:case 0x82957A98:case 0x82A835A0:case 0x82A8B6D8:case 0x82A993FC:case 0x82B560B4:break;default:return NativeImpactMode::Original;}
     return s.peer==1?NativeImpactMode::Host:NativeImpactMode::Suppress;
@@ -1379,6 +1392,7 @@ bool NativeRoomGameplay::PrepareSpawnReplay(PPCContext& ctx,uint8_t* base,unsign
         // replay the parent without its owning script operation.
         if(depth || (uint32_t(ctx.lr)!=0x828B71C4 && uint32_t(ctx.lr)!=0x827B4178))return true;
     }
+    if(s.AnnouncedLoadCancellation(s.committed))return true;
     const auto fail=[&](const char* reason){s.Stop(reason);return false;};
     if(s.stopped || !s.Owner() || s.peer==1 || !s.pending || s.load_depth || s.transition_pending ||
        !s.pending_authority || !em2::CurrentAgreedSimulationTick(tick) || tick!=s.committed || s.pending_authority->tick!=tick ||
